@@ -8,37 +8,24 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::{config::Config, storage::StorageSource};
-
-/// Shared application state.
-#[derive(Clone)]
-pub struct AppState {
-    /// The configured S3 source, if any.
-    pub source: Option<StorageSource>,
-    /// Source metadata for display (never contains credentials).
-    pub source_info: Option<SourceInfo>,
-}
-
-/// Non-secret description of the configured source, surfaced via `/api/source`.
-#[derive(Clone, serde::Serialize)]
-pub struct SourceInfo {
-    pub bucket: String,
-    pub cluster: String,
-    pub endpoint: Option<String>,
-    pub region: String,
-}
+use crate::{api, config::Config, state::AppState};
 
 /// Build the application router.
 ///
 /// - `GET /health` — liveness probe.
 /// - `GET /api/health` — liveness probe (API namespace).
 /// - `GET /api/source` — configured source + connectivity status.
+/// - `GET /api/clusters/{cluster}/topics/{topic}/messages` — event browser.
 /// - everything else — frontend static assets in production, when
 ///   `KOTATSU_STATIC_DIR` is set (SPA fallback to `index.html`).
 pub fn router(config: &Config, state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/source", get(source))
+        .route(
+            "/clusters/{cluster}/topics/{topic}/messages",
+            get(api::messages),
+        )
         .with_state(state);
 
     let mut app = Router::new()

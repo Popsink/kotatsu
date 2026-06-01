@@ -6,7 +6,8 @@
 use anyhow::Context;
 use kotatsu::{
     config::Config,
-    http::{self, AppState, SourceInfo},
+    http,
+    state::{AppState, SourceInfo},
     storage::StorageSource,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
