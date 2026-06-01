@@ -17,6 +17,13 @@ const topic = route.params.name as string
 const { data: source } = await useFetch<any>('/api/source')
 const cluster = computed(() => source.value?.cluster)
 
+interface PartitionInfo { partition: number; low: number; high: number; messages: number }
+const { data: detail } = await useFetch<{ partitions: PartitionInfo[]; messages: number }>(
+  () => cluster.value ? `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}` : '',
+  { watch: [cluster] },
+)
+const partitions = computed(() => detail.value?.partitions ?? [])
+
 // Controls
 const partition = ref(0)
 const offsetMode = ref<'earliest' | 'latest' | 'specific' | 'timestamp'>('latest')
@@ -85,9 +92,30 @@ function fmtTime(ms: number): string {
       <span v-if="cluster" class="muted">on {{ cluster }}</span>
     </h2>
 
+    <table v-if="partitions.length" class="parts">
+      <thead>
+        <tr><th>partition</th><th>low</th><th>high</th><th>messages</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="p in partitions" :key="p.partition">
+          <td class="mono">{{ p.partition }}</td>
+          <td class="mono">{{ p.low }}</td>
+          <td class="mono">{{ p.high }}</td>
+          <td class="mono">{{ p.messages }}</td>
+        </tr>
+      </tbody>
+      <tfoot v-if="detail">
+        <tr><td colspan="3" class="muted">total</td><td class="mono">{{ detail.messages }}</td></tr>
+      </tfoot>
+    </table>
+
+    <h3 class="browse-h">Messages</h3>
     <form class="controls" @submit.prevent="search">
       <label>Partition
-        <input type="number" v-model.number="partition" min="0" />
+        <select v-if="partitions.length" v-model.number="partition">
+          <option v-for="p in partitions" :key="p.partition" :value="p.partition">{{ p.partition }}</option>
+        </select>
+        <input v-else type="number" v-model.number="partition" min="0" />
       </label>
       <label>From
         <select v-model="offsetMode">
@@ -151,7 +179,12 @@ function fmtTime(ms: number): string {
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
-.controls { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin: 1.25rem 0 0.5rem; }
+.parts { border-collapse: collapse; margin: 1rem 0; min-width: 320px; }
+.parts th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid #333; padding: 0.35rem 0.75rem 0.35rem 0; }
+.parts td { padding: 0.3rem 0.75rem 0.3rem 0; }
+.parts tfoot td { border-top: 1px solid #333; }
+.browse-h { margin: 1.5rem 0 0; font-size: 1rem; }
+.controls { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
 .controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); }
 .controls input, .controls select { background: var(--panel); color: var(--fg); border: 1px solid #333; border-radius: 6px; padding: 0.4rem; }
 .controls input[type="number"] { width: 5rem; }

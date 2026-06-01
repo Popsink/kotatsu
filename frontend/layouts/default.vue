@@ -5,7 +5,7 @@
       <!-- Nav placeholder — sections land with their issues -->
       <nav>
         <NuxtLink to="/">Overview</NuxtLink>
-        <span class="muted">Topics</span>
+        <NuxtLink to="/topics">Topics</NuxtLink>
         <span class="muted">Consumer groups</span>
         <span class="muted">Schemas</span>
       </nav>

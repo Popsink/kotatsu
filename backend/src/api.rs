@@ -41,6 +41,7 @@ impl From<StorageError> for ApiError {
             StorageError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             StorageError::NotFound(_) => StatusCode::NOT_FOUND,
             StorageError::ClusterNotFound(_) => StatusCode::NOT_FOUND,
+            StorageError::TopicNotFound(_) => StatusCode::NOT_FOUND,
             StorageError::Unreachable(_) => StatusCode::BAD_GATEWAY,
             StorageError::Decode(_) | StorageError::Parse { .. } | StorageError::ObjectStore(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -56,6 +57,41 @@ fn source(state: &AppState) -> Result<&StorageSource, ApiError> {
         .source
         .as_ref()
         .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no S3 source configured"))
+}
+
+/// Resolves the source and verifies the path cluster matches the configured one.
+fn cluster_source<'a>(
+    state: &'a AppState,
+    cluster: &str,
+) -> Result<&'a StorageSource, ApiError> {
+    let source = source(state)?;
+    if cluster != source.keys().cluster() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("unknown cluster '{cluster}'"),
+        ));
+    }
+    Ok(source)
+}
+
+/// `GET /api/clusters/{cluster}/topics`
+pub async fn topics(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let topics = source.list_topics().await?;
+    Ok(Json(json!({ "cluster": cluster, "topics": topics })))
+}
+
+/// `GET /api/clusters/{cluster}/topics/{topic}`
+pub async fn topic_detail(
+    State(state): State<AppState>,
+    Path((cluster, topic)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let detail = source.topic_detail(&topic).await?;
+    Ok(Json(json!(detail)))
 }
 
 #[derive(Deserialize)]
@@ -102,14 +138,7 @@ pub async fn messages(
     Path((cluster, topic)): Path<(String, String)>,
     Query(query): Query<MessagesQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let source = source(&state)?;
-
-    if cluster != source.keys().cluster() {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            format!("unknown cluster '{cluster}'"),
-        ));
-    }
+    let source = cluster_source(&state, &cluster)?;
 
     let spec = parse_offset(&query.offset)?;
     let limit = query.limit.clamp(1, MAX_LIMIT);

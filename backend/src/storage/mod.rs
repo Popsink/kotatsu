@@ -8,10 +8,12 @@ mod error;
 mod keys;
 mod model;
 mod reader;
+mod topics;
 
 pub use error::StorageError;
 pub use keys::Keys;
 pub use model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, RecordHeader, Watermark};
+pub use topics::{PartitionInfo, TopicDetail, TopicSummary};
 
 use std::sync::Arc;
 

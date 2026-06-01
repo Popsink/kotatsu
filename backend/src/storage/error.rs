@@ -13,6 +13,9 @@ pub enum StorageError {
     #[error("cluster '{0}' not found in the bucket")]
     ClusterNotFound(String),
 
+    #[error("topic '{0}' not found")]
+    TopicNotFound(String),
+
     #[error("object not found: {0}")]
     NotFound(Path),
 

@@ -22,6 +22,8 @@ pub fn router(config: &Config, state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/source", get(source))
+        .route("/clusters/{cluster}/topics", get(api::topics))
+        .route("/clusters/{cluster}/topics/{topic}", get(api::topic_detail))
         .route(
             "/clusters/{cluster}/topics/{topic}/messages",
             get(api::messages),
