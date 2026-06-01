@@ -109,6 +109,14 @@ docker build -t kotatsu .
 docker run -p 8080:8080 kotatsu
 ```
 
+Pushed images are published to **`ghcr.io/popsink/kotatsu`** by the `release`
+workflow on every push to `main` (tagged `main` + `sha`) and on `v*` tags
+(semver + `latest`), built for `linux/amd64` and `linux/arm64`.
+
+```bash
+docker run -p 8080:8080 ghcr.io/popsink/kotatsu:latest
+```
+
 ## Tests
 
 ```bash
