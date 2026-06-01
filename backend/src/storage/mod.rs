@@ -4,6 +4,7 @@
 //! client, no broker. Every method is invoked on-demand from an API handler;
 //! there are no background tasks or timers here.
 
+mod cluster;
 mod error;
 mod groups;
 mod keys;
@@ -11,6 +12,7 @@ mod model;
 mod reader;
 mod topics;
 
+pub use cluster::ClusterSummary;
 pub use error::StorageError;
 pub use groups::{GroupDetailView, GroupOffset, GroupSummary};
 pub use keys::Keys;
