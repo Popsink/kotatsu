@@ -1,0 +1,18 @@
+# Rust
+/backend/target
+target/
+
+# Node / Nuxt
+node_modules/
+.nuxt/
+.output/
+.data/
+dist/
+*.log
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store

@@ -1,2 +1,84 @@
 # kotatsu
-On-demand Kafka UI built with Rust + Nuxt, designed for Tansu and any Kafka-compatible broker
+
+Read-only, on-demand browser over [Tansu](https://github.com/tansu-io/tansu)'s
+**native S3 storage**. Topics, events, consumer groups and simple stats are read
+directly from the object store Tansu writes to — **no Kafka broker, no Kafka
+client, no background polling**. Every read is triggered by a user action.
+
+Built with **Rust (Axum)** + **Nuxt 3**.
+
+## Architecture
+
+Tansu persists everything to S3 under a known layout (reverse-engineered from
+`tansu-storage::dynostore`):
+
+```
+clusters/{cluster}/meta.json                                        topic/producer/txn metadata
+clusters/{cluster}/topics/{topic}/partitions/{p:010}/watermark.json low/high offsets
+clusters/{cluster}/topics/{topic}/partitions/{p:010}/records/{base_offset:020}.batch
+clusters/{cluster}/groups/consumers/{group}.json                    consumer group detail
+clusters/{cluster}/groups/consumers/{group}/offsets/{topic}/partitions/{p:010}.json
+```
+
+Kotatsu reads these objects via the `object_store` crate and decodes the
+`.batch` files (raw Kafka record batches) with `tansu-sans-io`. Avro values are
+resolved against [Kora](https://github.com/Popsink/kora) (Confluent-compatible
+schema registry). See the GitHub issues for the full design.
+
+## Project layout
+
+```
+kotatsu/
+├── backend/          # Rust (Axum) — object_store + tansu-sans-io, no Kafka client
+├── frontend/         # Nuxt 3 (SPA), served as static assets by the backend in prod
+├── Dockerfile        # multi-stage → single image (backend serves frontend)
+└── docker-compose.yml
+```
+
+## Run locally (development)
+
+Two processes, with the frontend proxying `/api` to the backend.
+
+```bash
+# 1. backend
+cd backend
+cargo run            # listens on 0.0.0.0:8080
+
+# 2. frontend (separate terminal)
+cd frontend
+npm install
+npm run dev          # http://localhost:3000, proxies /api → http://localhost:8080
+```
+
+Environment variables (backend):
+
+| Var                  | Default          | Purpose                                  |
+| -------------------- | ---------------- | ---------------------------------------- |
+| `KOTATSU_BIND`       | `0.0.0.0:8080`   | HTTP bind address                        |
+| `KOTATSU_STATIC_DIR` | _(unset)_        | Dir of built frontend assets (prod only) |
+
+S3 source variables (`KOTATSU_S3_*`) are consumed starting with the storage
+layer (issue #2).
+
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+Starts the Kotatsu app (backend + bundled frontend) on http://localhost:8080 and
+a MinIO S3 on http://localhost:9000 (console at :9001, `minioadmin`/`minioadmin`)
+with a `tansu` bucket created automatically.
+
+To build the single production image on its own:
+
+```bash
+docker build -t kotatsu .
+docker run -p 8080:8080 kotatsu
+```
+
+## Pointing at an S3 source
+
+Set the bucket/endpoint/credentials and the Tansu cluster name (see
+`docker-compose.yml` for the variable names). A single source per instance for
+now; multi-source comes later.
