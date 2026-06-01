@@ -51,6 +51,33 @@ services:
     ports:
       - "9092:9092"
 
+  # Confluent-compatible schema registry (Popsink Kora) + its PostgreSQL.
+  # Avro/JSON/Protobuf schemas are resolved here by schema id.
+  kora-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: kora
+      POSTGRES_USER: kora
+      POSTGRES_PASSWORD: kora
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kora"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - kora-db-data:/var/lib/postgresql/data
+
+  kora:
+    image: ghcr.io/popsink/kora:latest
+    depends_on:
+      kora-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://kora:kora@kora-db:5432/kora
+      RUST_LOG: info
+    ports:
+      - "8085:8080" # Kora REST (host:8085 → container:8080)
+
   app:
     build:
       context: .
@@ -68,6 +95,9 @@ services:
       KOTATSU_S3_ACCESS_KEY: minioadmin
       KOTATSU_S3_SECRET_KEY: minioadmin
       KOTATSU_S3_FORCE_PATH_STYLE: "true"
+      # Schema registry (Kora) — consumed by #6/#8
+      KOTATSU_KORA_URL: http://kora:8080
 
 volumes:
   minio-data:
+  kora-db-data:

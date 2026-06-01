@@ -87,6 +87,21 @@ printf 'key-1:{"id":1}\n' | docker run -i --rm --network kotatsu_default apache/
 The records land under `clusters/demo/topics/orders/…` in the bucket and are
 read back by Kotatsu.
 
+The stack also runs **Kora** (Confluent-compatible schema registry) on
+`localhost:8085` with its own PostgreSQL; the app resolves Avro schemas via
+`KOTATSU_KORA_URL=http://kora:8080`. To produce Confluent-framed **Avro** events
+(schema auto-registered in Kora):
+
+```bash
+printf '{"id":1,"item":"widget"}\n' | docker run -i --rm --network kotatsu_default \
+  confluentinc/cp-schema-registry:7.6.0 kafka-avro-console-producer \
+  --bootstrap-server tansu:9092 --topic avro-orders \
+  --property schema.registry.url=http://kora:8080 \
+  --property value.schema='{"type":"record","name":"Order","fields":[{"name":"id","type":"int"},{"name":"item","type":"string"}]}'
+```
+
+Kotatsu decodes these in the event browser and lists the schema under **Schemas**.
+
 To build the single production image on its own:
 
 ```bash

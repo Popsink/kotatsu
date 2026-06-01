@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
+    schema::{decode_field, SchemaError, SchemaRegistry},
     state::AppState,
     storage::{OffsetSpec, StorageError, StorageSource},
 };
@@ -50,6 +51,25 @@ impl From<StorageError> for ApiError {
         };
         ApiError::new(status, err.to_string())
     }
+}
+
+impl From<SchemaError> for ApiError {
+    fn from(err: SchemaError) -> Self {
+        let status = match err {
+            SchemaError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            SchemaError::SubjectNotFound(_) => StatusCode::NOT_FOUND,
+            SchemaError::Request(_) => StatusCode::BAD_GATEWAY,
+        };
+        ApiError::new(status, err.to_string())
+    }
+}
+
+/// Resolves the schema registry, or 503 if none configured.
+fn registry(state: &AppState) -> Result<&SchemaRegistry, ApiError> {
+    state
+        .registry
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no schema registry configured"))
 }
 
 /// Resolves the configured source, or 503 if none.
@@ -167,10 +187,33 @@ pub async fn group_detail(
     Ok(Json(json!(detail)))
 }
 
+/// `GET /api/schemas` — list subjects in the registry.
+pub async fn schemas(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let registry = registry(&state)?;
+    let subjects = registry.subjects().await?;
+    Ok(Json(json!({ "registry": registry.base_url(), "subjects": subjects })))
+}
+
+/// `GET /api/schemas/{subject}` — versions + the latest schema for a subject.
+pub async fn schema_subject(
+    State(state): State<AppState>,
+    Path(subject): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let registry = registry(&state)?;
+    let versions = registry.versions(&subject).await?;
+    let latest = registry.version(&subject, "latest").await?;
+    Ok(Json(json!({
+        "subject": subject,
+        "versions": versions,
+        "latest": latest,
+    })))
+}
+
 /// `GET /api/clusters/{cluster}/topics/{topic}/messages`
 ///
 /// Reads records directly from S3 on user action. `offset` accepts
-/// `earliest`, `latest`, a specific offset, or `timestamp:<ms>`.
+/// `earliest`, `latest`, a specific offset, or `timestamp:<ms>`. Confluent-
+/// framed Avro keys/values are decoded against the schema registry (#8).
 pub async fn messages(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
@@ -186,10 +229,26 @@ pub async fn messages(
         .fetch(&topic, query.partition, spec, limit)
         .await?;
 
+    let registry = state.registry.as_ref();
+    let mut rendered = Vec::with_capacity(records.len());
+    for record in &records {
+        rendered.push(json!({
+            "offset": record.offset,
+            "partition": record.partition,
+            "timestamp": record.timestamp,
+            "key": decode_field(registry, &record.key).await,
+            "value": decode_field(registry, &record.value).await,
+            "headers": record.headers.iter().map(|h| json!({
+                "key": h.key.as_ref().map(crate::schema::raw_field),
+                "value": h.value.as_ref().map(crate::schema::raw_field),
+            })).collect::<Vec<_>>(),
+        }));
+    }
+
     Ok(Json(json!({
         "partition": query.partition,
         "watermark": watermark,
-        "count": records.len(),
-        "records": records,
+        "count": rendered.len(),
+        "records": rendered,
     })))
 }

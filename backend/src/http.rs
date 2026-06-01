@@ -32,6 +32,8 @@ pub fn router(config: &Config, state: AppState) -> Router {
         )
         .route("/clusters/{cluster}/groups", get(api::groups))
         .route("/clusters/{cluster}/groups/{group}", get(api::group_detail))
+        .route("/schemas", get(api::schemas))
+        .route("/schemas/{subject}", get(api::schema_subject))
         .with_state(state);
 
     let mut app = Router::new()

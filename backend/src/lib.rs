@@ -6,5 +6,6 @@
 pub mod api;
 pub mod config;
 pub mod http;
+pub mod schema;
 pub mod state;
 pub mod storage;

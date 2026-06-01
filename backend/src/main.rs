@@ -7,6 +7,7 @@ use anyhow::Context;
 use kotatsu::{
     config::Config,
     http,
+    schema::SchemaRegistry,
     state::{AppState, SourceInfo},
     storage::StorageSource,
 };
@@ -41,11 +42,20 @@ async fn main() -> anyhow::Result<()> {
 /// Connectivity is not probed here — that happens on-demand per request — so a
 /// misconfigured or down S3 never blocks startup (`/health` stays up).
 fn build_state(config: &Config) -> anyhow::Result<AppState> {
+    let registry = config.kora_url.as_ref().map(|url| {
+        tracing::info!(%url, "schema registry (Kora) configured");
+        SchemaRegistry::new(url)
+    });
+    if registry.is_none() {
+        tracing::warn!("no schema registry configured (set KOTATSU_KORA_URL) — Avro decode disabled");
+    }
+
     let Some(s3) = &config.s3 else {
         tracing::warn!("no S3 source configured (set KOTATSU_S3_BUCKET + KOTATSU_CLUSTER)");
         return Ok(AppState {
             source: None,
             source_info: None,
+            registry,
         });
     };
 
@@ -60,6 +70,7 @@ fn build_state(config: &Config) -> anyhow::Result<AppState> {
             endpoint: s3.endpoint.clone(),
             region: s3.region.clone(),
         }),
+        registry,
     })
 }
 
