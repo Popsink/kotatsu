@@ -50,14 +50,14 @@ struct OffsetCommitRaw {
 
 // --- API view types ---
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GroupSummary {
     pub name: String,
     pub state: &'static str,
     pub members: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GroupOffset {
     pub topic: String,
     pub partition: i32,
@@ -66,7 +66,7 @@ pub struct GroupOffset {
     pub lag: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GroupDetailView {
     pub name: String,
     pub state: &'static str,

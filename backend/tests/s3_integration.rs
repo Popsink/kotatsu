@@ -33,47 +33,51 @@ fn key_of(record: &kotatsu::storage::DecodedRecord) -> String {
 
 #[tokio::test]
 #[ignore = "requires local MinIO + Tansu demo data"]
-async fn watermark_reports_five_messages() {
+async fn watermark_reports_offsets() {
     let wm = demo_source().watermark("orders", 0).await.unwrap();
+    // The demo seed produces at least 5 messages; more may be added over time.
     assert_eq!(wm.low, 0);
-    assert_eq!(wm.high, 5);
-    assert_eq!(wm.count(), 5);
+    assert!(wm.high >= 5, "high = {}", wm.high);
 }
 
 #[tokio::test]
 #[ignore = "requires local MinIO + Tansu demo data"]
-async fn fetch_earliest_returns_all_in_order() {
+async fn fetch_earliest_returns_first_records_in_order() {
     let records = demo_source()
-        .fetch("orders", 0, OffsetSpec::Earliest, 100)
+        .fetch("orders", 0, OffsetSpec::Earliest, 5)
         .await
         .unwrap();
     assert_eq!(records.len(), 5);
-    assert_eq!(records[0].offset, 0);
-    assert_eq!(key_of(&records[0]), "key-1");
-    assert_eq!(records[4].offset, 4);
-    assert_eq!(key_of(&records[4]), "key-5");
+    // The first five produced messages: offsets 0..4, keys key-1..key-5.
+    for (i, r) in records.iter().enumerate() {
+        assert_eq!(r.offset, i as i64);
+        assert_eq!(key_of(r), format!("key-{}", i + 1));
+    }
 }
 
 #[tokio::test]
 #[ignore = "requires local MinIO + Tansu demo data"]
 async fn fetch_latest_returns_tail() {
-    let records = demo_source()
-        .fetch("orders", 0, OffsetSpec::Latest, 2)
-        .await
-        .unwrap();
+    let source = demo_source();
+    let high = source.watermark("orders", 0).await.unwrap().high;
+    let records = source.fetch("orders", 0, OffsetSpec::Latest, 2).await.unwrap();
     assert_eq!(records.len(), 2);
-    assert_eq!(records[0].offset, 3);
-    assert_eq!(records[1].offset, 4);
+    // The last two offsets, contiguous up to the high watermark.
+    assert_eq!(records[0].offset, high - 2);
+    assert_eq!(records[1].offset, high - 1);
 }
 
 #[tokio::test]
 #[ignore = "requires local MinIO + Tansu demo data"]
 async fn fetch_at_mid_batch_uses_predecessor() {
-    // Offset 2 sits at a batch boundary here; reading from it must return 2..4.
-    let records = demo_source()
-        .fetch("orders", 0, OffsetSpec::At(2), 100)
-        .await
-        .unwrap();
+    let source = demo_source();
+    let high = source.watermark("orders", 0).await.unwrap().high;
+    // Reading from offset 2 must start exactly at 2 and run to the end.
+    let records = source.fetch("orders", 0, OffsetSpec::At(2), 1000).await.unwrap();
     assert_eq!(records.first().unwrap().offset, 2);
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), (high - 2) as usize);
+    // Offsets are contiguous.
+    for (i, r) in records.iter().enumerate() {
+        assert_eq!(r.offset, 2 + i as i64);
+    }
 }
