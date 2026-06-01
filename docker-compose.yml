@@ -1,5 +1,9 @@
-# Local stack: the Kotatsu app (backend + bundled frontend) + a MinIO S3 that
-# stands in for the object store Tansu writes to.
+# Local stack: the Kotatsu app (backend + bundled frontend), a MinIO S3 that
+# stands in for the object store, and a Tansu broker writing to it — so you can
+# produce events with any Kafka client and browse them in Kotatsu.
+#
+# The cluster name (clusters/{cluster}/ prefix) is Tansu's --kafka-cluster-id,
+# here "demo", which Kotatsu reads via KOTATSU_CLUSTER.
 services:
   minio:
     image: minio/minio:latest
@@ -25,6 +29,28 @@ services:
       echo 'bucket ready';
       "
 
+  # Kafka-compatible broker persisting to the MinIO bucket. Produce events to
+  # localhost:9092 and they land under clusters/demo/ in the bucket.
+  tansu:
+    image: ghcr.io/tansu-io/tansu:latest
+    depends_on:
+      - minio
+      - createbucket
+    environment:
+      RUST_LOG: warn,tansu_broker=info,tansu_storage=info
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://minio:9000
+      AWS_ALLOW_HTTP: "true"
+      AWS_DEFAULT_REGION: us-east-1
+    command: >
+      --kafka-cluster-id demo
+      --kafka-listener-url tcp://0.0.0.0:9092/
+      --kafka-advertised-listener-url tcp://tansu:9092
+      --storage-engine s3://tansu/
+    ports:
+      - "9092:9092"
+
   app:
     build:
       context: .
@@ -35,7 +61,7 @@ services:
       - "8080:8080"
     environment:
       KOTATSU_BIND: 0.0.0.0:8080
-      # S3 source — consumed once #2 lands. Harmless placeholders for now.
+      KOTATSU_CLUSTER: demo
       KOTATSU_S3_ENDPOINT: http://minio:9000
       KOTATSU_S3_BUCKET: tansu
       KOTATSU_S3_REGION: us-east-1

@@ -1,6 +1,6 @@
 //! HTTP router construction.
 
-use axum::{routing::get, Json, Router};
+use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
 use serde_json::{json, Value};
 use tower_http::{
     cors::CorsLayer,
@@ -8,16 +8,27 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-use crate::config::Config;
+use crate::{api, config::Config, state::AppState};
 
 /// Build the application router.
 ///
 /// - `GET /health` — liveness probe.
-/// - `/api/*` — JSON API (endpoints land in #2+).
+/// - `GET /api/health` — liveness probe (API namespace).
+/// - `GET /api/source` — configured source + connectivity status.
+/// - `GET /api/clusters/{cluster}/topics/{topic}/messages` — event browser.
 /// - everything else — frontend static assets in production, when
 ///   `KOTATSU_STATIC_DIR` is set (SPA fallback to `index.html`).
-pub fn router(config: &Config) -> Router {
-    let api = Router::new().route("/health", get(health));
+pub fn router(config: &Config, state: AppState) -> Router {
+    let api = Router::new()
+        .route("/health", get(health))
+        .route("/source", get(source))
+        .route("/clusters/{cluster}/topics", get(api::topics))
+        .route("/clusters/{cluster}/topics/{topic}", get(api::topic_detail))
+        .route(
+            "/clusters/{cluster}/topics/{topic}/messages",
+            get(api::messages),
+        )
+        .with_state(state);
 
     let mut app = Router::new()
         .route("/health", get(health))
@@ -36,4 +47,26 @@ pub fn router(config: &Config) -> Router {
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "kotatsu" }))
+}
+
+/// Reports the configured source and whether it is currently reachable.
+/// The connectivity check is on-demand (this request), never on a timer.
+async fn source(State(state): State<AppState>) -> impl IntoResponse {
+    let (Some(source), Some(info)) = (&state.source, &state.source_info) else {
+        return Json(json!({ "configured": false }));
+    };
+
+    let status = match source.check().await {
+        Ok(()) => json!({ "connected": true }),
+        Err(err) => json!({ "connected": false, "error": err.to_string() }),
+    };
+
+    Json(json!({
+        "configured": true,
+        "bucket": info.bucket,
+        "cluster": info.cluster,
+        "endpoint": info.endpoint,
+        "region": info.region,
+        "status": status,
+    }))
 }

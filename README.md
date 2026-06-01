@@ -70,6 +70,23 @@ Starts the Kotatsu app (backend + bundled frontend) on http://localhost:8080 and
 a MinIO S3 on http://localhost:9000 (console at :9001, `minioadmin`/`minioadmin`)
 with a `tansu` bucket created automatically.
 
+It also starts a **Tansu broker** (`localhost:9092`, cluster `demo`) writing to
+that bucket, so you can generate real events:
+
+```bash
+# create a topic + produce a few messages with any Kafka client
+docker run --rm --network kotatsu_default apache/kafka:latest \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 \
+  --create --topic orders --partitions 1 --replication-factor 1
+
+printf 'key-1:{"id":1}\n' | docker run -i --rm --network kotatsu_default apache/kafka:latest \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server tansu:9092 \
+  --topic orders --property parse.key=true --property key.separator=:
+```
+
+The records land under `clusters/demo/topics/orders/…` in the bucket and are
+read back by Kotatsu.
+
 To build the single production image on its own:
 
 ```bash

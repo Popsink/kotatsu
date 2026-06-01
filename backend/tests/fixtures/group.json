@@ -1,0 +1,1 @@
+{"session_timeout_ms":45000,"rebalance_timeout_ms":300000,"members":{},"generation_id":1,"skip_assignment":false,"inception":{"secs_since_epoch":1780339256,"nanos_since_epoch":822096471},"state":{"Forming":{"protocol_type":"consumer","protocol_name":"range","leader":null}}}
