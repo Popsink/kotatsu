@@ -24,9 +24,9 @@ const subjects = computed(() => data.value?.subjects ?? [])
 
 <style scoped>
 .muted { color: var(--muted); }
-.err { color: #f87171; }
+.err { color: var(--err); }
 .subjects { list-style: none; padding: 0; margin: 1rem 0; max-width: 480px; }
-.subjects li { padding: 0.5rem 0.25rem; border-bottom: 1px solid #1d1f26; }
+.subjects li { padding: 0.5rem 0.25rem; border-bottom: 1px solid #0e2a40; }
 .link { color: var(--accent); text-decoration: none; }
 .link:hover { text-decoration: underline; }
 </style>
