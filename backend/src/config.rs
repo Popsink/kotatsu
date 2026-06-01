@@ -17,6 +17,10 @@ pub struct Config {
     /// starts (so `/health` works), but storage-backed endpoints report that
     /// no source is configured.
     pub s3: Option<S3Config>,
+
+    /// Schema registry (Kora) base URL (`KOTATSU_KORA_URL`). `None` disables
+    /// schema browsing and Avro decoding.
+    pub kora_url: Option<String>,
 }
 
 /// Configuration for the single S3 source Kotatsu reads from.
@@ -66,11 +70,13 @@ impl Config {
         let static_dir = env::var("KOTATSU_STATIC_DIR").ok().filter(|s| !s.is_empty());
 
         let s3 = S3Config::from_env();
+        let kora_url = non_empty("KOTATSU_KORA_URL");
 
         Ok(Self {
             bind_addr,
             static_dir,
             s3,
+            kora_url,
         })
     }
 }

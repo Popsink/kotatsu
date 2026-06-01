@@ -21,6 +21,9 @@ bytes = "1"
 futures = "0.3"
 # Kafka record-batch codec (sans-io). Pinned: tested against Tansu 0.6.x.
 tansu-sans-io = "0.6"
+# Schema registry (Kora) client + Avro decoding.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+apache-avro = "0.17"
 
 [profile.release]
 strip = true

@@ -1,6 +1,6 @@
 //! Shared application state.
 
-use crate::storage::StorageSource;
+use crate::{schema::SchemaRegistry, storage::StorageSource};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -8,6 +8,8 @@ pub struct AppState {
     pub source: Option<StorageSource>,
     /// Source metadata for display (never contains credentials).
     pub source_info: Option<SourceInfo>,
+    /// Schema registry (Kora) client, if configured.
+    pub registry: Option<SchemaRegistry>,
 }
 
 /// Non-secret description of the configured source, surfaced via `/api/source`.

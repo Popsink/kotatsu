@@ -1,5 +1,5 @@
 <script setup lang="ts">
-type FieldValue = { kind: 'utf8' | 'hex'; data: string } | null
+type FieldValue = { kind: string; data: any; schemaId?: number } | null
 interface Header { key: FieldValue; value: FieldValue }
 interface Record {
   offset: number
@@ -73,11 +73,19 @@ function toggle(offset: number) {
 
 function fieldText(f: FieldValue): string {
   if (f === null) return '∅ null'
-  return f.kind === 'hex' ? `0x${f.data}` : f.data
+  if (f.kind === 'avro' || typeof f.data === 'object') return JSON.stringify(f.data, null, 2)
+  if (f.kind === 'hex') return `0x${f.data}`
+  return String(f.data)
 }
 function preview(f: FieldValue, max = 120): string {
-  const t = fieldText(f)
+  if (f === null) return '∅ null'
+  const t = (f.kind === 'avro' || typeof f.data === 'object') ? JSON.stringify(f.data) : fieldText(f)
   return t.length > max ? t.slice(0, max) + '…' : t
+}
+function badge(f: FieldValue): string {
+  if (f === null) return ''
+  if (f.schemaId != null) return `${f.kind} #${f.schemaId}`
+  return f.kind
 }
 function fmtTime(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
@@ -159,8 +167,14 @@ function fmtTime(ms: number): string {
           <tr v-if="expanded.has(r.offset)" class="detail">
             <td></td>
             <td colspan="4">
-              <div class="kv"><span class="lbl">key</span><pre>{{ fieldText(r.key) }}</pre></div>
-              <div class="kv"><span class="lbl">value</span><pre>{{ fieldText(r.value) }}</pre></div>
+              <div class="kv">
+                <span class="lbl">key <em v-if="r.key" class="tag">{{ badge(r.key) }}</em></span>
+                <pre>{{ fieldText(r.key) }}</pre>
+              </div>
+              <div class="kv">
+                <span class="lbl">value <em v-if="r.value" class="tag">{{ badge(r.value) }}</em></span>
+                <pre>{{ fieldText(r.value) }}</pre>
+              </div>
               <div class="kv" v-if="r.headers.length">
                 <span class="lbl">headers</span>
                 <pre>{{ r.headers.map(h => `${fieldText(h.key)}: ${fieldText(h.value)}`).join('\n') }}</pre>
@@ -202,5 +216,6 @@ h2 code { color: var(--accent); }
 .detail td { padding: 0.5rem 0.4rem 1rem; background: #14161c; }
 .kv { display: grid; grid-template-columns: 70px 1fr; gap: 0.5rem; margin-bottom: 0.4rem; }
 .kv .lbl { color: var(--muted); font-size: 0.75rem; }
+.kv .tag { font-style: normal; color: var(--accent); font-size: 0.7rem; margin-left: 0.3rem; }
 .kv pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.82rem; }
 </style>
