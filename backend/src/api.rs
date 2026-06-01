@@ -75,6 +75,23 @@ fn cluster_source<'a>(
     Ok(source)
 }
 
+/// `GET /api/clusters`
+pub async fn clusters(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let source = source(&state)?;
+    let clusters = source.list_clusters().await?;
+    Ok(Json(json!({ "clusters": clusters })))
+}
+
+/// `GET /api/clusters/{cluster}` — meta.json summary.
+pub async fn cluster(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let summary = source.cluster_summary().await?;
+    Ok(Json(json!(summary)))
+}
+
 /// `GET /api/clusters/{cluster}/topics`
 pub async fn topics(
     State(state): State<AppState>,

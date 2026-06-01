@@ -32,6 +32,11 @@ impl Keys {
         &self.cluster
     }
 
+    /// `clusters/` — root prefix for listing cluster names.
+    pub fn clusters_root() -> Path {
+        Path::from("clusters/")
+    }
+
     /// `clusters/{cluster}/meta.json`
     pub fn meta(&self) -> Path {
         Path::from(format!("clusters/{}/meta.json", self.cluster))
