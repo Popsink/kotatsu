@@ -6,7 +6,7 @@
       <nav>
         <NuxtLink to="/">Overview</NuxtLink>
         <NuxtLink to="/topics">Topics</NuxtLink>
-        <span class="muted">Consumer groups</span>
+        <NuxtLink to="/groups">Consumer groups</NuxtLink>
         <span class="muted">Schemas</span>
       </nav>
     </aside>

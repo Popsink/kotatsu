@@ -5,12 +5,14 @@
 //! there are no background tasks or timers here.
 
 mod error;
+mod groups;
 mod keys;
 mod model;
 mod reader;
 mod topics;
 
 pub use error::StorageError;
+pub use groups::{GroupDetailView, GroupOffset, GroupSummary};
 pub use keys::Keys;
 pub use model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, RecordHeader, Watermark};
 pub use topics::{PartitionInfo, TopicDetail, TopicSummary};

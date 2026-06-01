@@ -28,6 +28,8 @@ pub fn router(config: &Config, state: AppState) -> Router {
             "/clusters/{cluster}/topics/{topic}/messages",
             get(api::messages),
         )
+        .route("/clusters/{cluster}/groups", get(api::groups))
+        .route("/clusters/{cluster}/groups/{group}", get(api::group_detail))
         .with_state(state);
 
     let mut app = Router::new()

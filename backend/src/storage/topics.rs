@@ -58,7 +58,7 @@ pub struct TopicDetail {
 impl StorageSource {
     /// Reads a partition watermark, treating a missing file (no data produced
     /// yet) as an empty partition rather than an error.
-    async fn watermark_or_empty(
+    pub(super) async fn watermark_or_empty(
         &self,
         topic: &str,
         partition: i32,

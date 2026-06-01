@@ -42,6 +42,7 @@ impl From<StorageError> for ApiError {
             StorageError::NotFound(_) => StatusCode::NOT_FOUND,
             StorageError::ClusterNotFound(_) => StatusCode::NOT_FOUND,
             StorageError::TopicNotFound(_) => StatusCode::NOT_FOUND,
+            StorageError::GroupNotFound(_) => StatusCode::NOT_FOUND,
             StorageError::Unreachable(_) => StatusCode::BAD_GATEWAY,
             StorageError::Decode(_) | StorageError::Parse { .. } | StorageError::ObjectStore(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -127,6 +128,26 @@ fn parse_offset(raw: &str) -> Result<OffsetSpec, ApiError> {
             }
         }
     }
+}
+
+/// `GET /api/clusters/{cluster}/groups`
+pub async fn groups(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let groups = source.list_groups().await?;
+    Ok(Json(json!({ "cluster": cluster, "groups": groups })))
+}
+
+/// `GET /api/clusters/{cluster}/groups/{group}`
+pub async fn group_detail(
+    State(state): State<AppState>,
+    Path((cluster, group)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let detail = source.group_detail(&group).await?;
+    Ok(Json(json!(detail)))
 }
 
 /// `GET /api/clusters/{cluster}/topics/{topic}/messages`
