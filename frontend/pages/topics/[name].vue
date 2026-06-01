@@ -194,26 +194,26 @@ function fmtTime(ms: number): string {
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
 .parts { border-collapse: collapse; margin: 1rem 0; min-width: 320px; }
-.parts th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid #333; padding: 0.35rem 0.75rem 0.35rem 0; }
+.parts th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.35rem 0.75rem 0.35rem 0; }
 .parts td { padding: 0.3rem 0.75rem 0.3rem 0; }
-.parts tfoot td { border-top: 1px solid #333; }
+.parts tfoot td { border-top: 1px solid var(--border); }
 .browse-h { margin: 1.5rem 0 0; font-size: 1rem; }
 .controls { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
 .controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); }
-.controls input, .controls select { background: var(--panel); color: var(--fg); border: 1px solid #333; border-radius: 6px; padding: 0.4rem; }
+.controls input, .controls select { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem; }
 .controls input[type="number"] { width: 5rem; }
-.controls button { background: var(--accent); color: #111; border: 0; border-radius: 6px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; }
+.controls button { background: var(--accent); color: #051522; border: 0; border-radius: 6px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
 .wm { font-size: 0.8rem; }
-.err { color: #f87171; }
+.err { color: var(--err); }
 .msgs { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
-.msgs th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid #333; padding: 0.4rem; }
-.row { cursor: pointer; border-bottom: 1px solid #1d1f26; }
-.row:hover { background: #1a1d24; }
+.msgs th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.4rem; }
+.row { cursor: pointer; border-bottom: 1px solid #0e2a40; }
+.row:hover { background: #0e2a40; }
 .row td { padding: 0.4rem; vertical-align: top; }
 .caret { color: var(--muted); width: 1.2rem; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
-.detail td { padding: 0.5rem 0.4rem 1rem; background: #14161c; }
+.detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
 .kv { display: grid; grid-template-columns: 70px 1fr; gap: 0.5rem; margin-bottom: 0.4rem; }
 .kv .lbl { color: var(--muted); font-size: 0.75rem; }
 .kv .tag { font-style: normal; color: var(--accent); font-size: 0.7rem; margin-left: 0.3rem; }

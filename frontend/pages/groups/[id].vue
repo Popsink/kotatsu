@@ -71,14 +71,14 @@ const totalLag = computed(() =>
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
-.err { color: #f87171; }
-.warn { color: #fbbf24; }
+.err { color: var(--err); }
+.warn { color: var(--warn); }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; max-width: 640px; }
-.meta div { background: var(--panel); border: 1px solid #222; border-radius: 8px; padding: 0.6rem 0.8rem; }
+.meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }
 .meta dd { margin: 0.2rem 0 0; font-family: ui-monospace, monospace; }
 .offsets { width: 100%; max-width: 640px; border-collapse: collapse; margin-top: 0.5rem; }
-.offsets th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid #333; padding: 0.4rem; }
-.offsets td { padding: 0.4rem; border-bottom: 1px solid #1d1f26; }
+.offsets th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.4rem; }
+.offsets td { padding: 0.4rem; border-bottom: 1px solid #0e2a40; }
 .mono { font-family: ui-monospace, monospace; }
 </style>

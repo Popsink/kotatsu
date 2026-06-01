@@ -42,10 +42,10 @@ const topics = computed(() => data.value?.topics ?? [])
 
 <style scoped>
 .muted { color: var(--muted); }
-.err { color: #f87171; }
+.err { color: var(--err); }
 .topics { width: 100%; max-width: 560px; border-collapse: collapse; margin-top: 1rem; }
-.topics th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid #333; padding: 0.5rem; }
-.topics td { padding: 0.5rem; border-bottom: 1px solid #1d1f26; }
+.topics th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.5rem; }
+.topics td { padding: 0.5rem; border-bottom: 1px solid #0e2a40; }
 .link { color: var(--accent); text-decoration: none; }
 .link:hover { text-decoration: underline; }
 .mono { font-family: ui-monospace, monospace; }

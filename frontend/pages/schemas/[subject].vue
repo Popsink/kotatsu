@@ -53,10 +53,10 @@ const pretty = computed(() => {
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
-.err { color: #f87171; }
+.err { color: var(--err); }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; max-width: 640px; }
-.meta div { background: var(--panel); border: 1px solid #222; border-radius: 8px; padding: 0.6rem 0.8rem; }
+.meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }
 .meta dd { margin: 0.2rem 0 0; font-family: ui-monospace, monospace; }
-.schema { background: #14161c; border: 1px solid #222; border-radius: 8px; padding: 1rem; overflow: auto; font-family: ui-monospace, monospace; font-size: 0.82rem; max-width: 720px; }
+.schema { background: #0a1f30; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow: auto; font-family: ui-monospace, monospace; font-size: 0.82rem; max-width: 720px; }
 </style>
