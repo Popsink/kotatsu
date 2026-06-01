@@ -1,0 +1,47 @@
+# Local stack: the Kotatsu app (backend + bundled frontend) + a MinIO S3 that
+# stands in for the object store Tansu writes to.
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # MinIO console
+    volumes:
+      - minio-data:/data
+
+  # One-shot: create the bucket Kotatsu reads from.
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done;
+      mc mb -p local/tansu || true;
+      echo 'bucket ready';
+      "
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - minio
+    ports:
+      - "8080:8080"
+    environment:
+      KOTATSU_BIND: 0.0.0.0:8080
+      # S3 source — consumed once #2 lands. Harmless placeholders for now.
+      KOTATSU_S3_ENDPOINT: http://minio:9000
+      KOTATSU_S3_BUCKET: tansu
+      KOTATSU_S3_REGION: us-east-1
+      KOTATSU_S3_ACCESS_KEY: minioadmin
+      KOTATSU_S3_SECRET_KEY: minioadmin
+      KOTATSU_S3_FORCE_PATH_STYLE: "true"
+
+volumes:
+  minio-data:
