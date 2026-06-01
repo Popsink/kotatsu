@@ -84,12 +84,31 @@ impl Keys {
         ))
     }
 
+    /// `clusters/{cluster}/groups/consumers/{group}/offsets/` — prefix for listing committed offsets.
+    pub fn group_offsets_prefix(&self, group: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/groups/consumers/{}/offsets/",
+            self.cluster, group
+        ))
+    }
+
     /// `.../groups/consumers/{group}/offsets/{topic}/partitions/{partition:010}.json`
     pub fn group_offset(&self, group: &str, topic: &str, partition: i32) -> Path {
         Path::from(format!(
             "clusters/{}/groups/consumers/{}/offsets/{}/partitions/{:0>10}.json",
             self.cluster, group, topic, partition
         ))
+    }
+
+    /// Parses `(topic, partition)` from a committed-offset object path
+    /// `.../{group}/offsets/{topic}/partitions/{partition:010}.json`.
+    pub fn topic_partition_from_offset(path: &Path) -> Option<(String, i32)> {
+        let parts: Vec<String> = path.parts().map(|p| p.as_ref().to_string()).collect();
+        let idx = parts.iter().position(|p| p == "offsets")?;
+        // expect [..., offsets, {topic}, partitions, {partition:010}.json]
+        let topic = parts.get(idx + 1)?.clone();
+        let partition = parts.get(idx + 3)?.strip_suffix(".json")?.parse().ok()?;
+        Some((topic, partition))
     }
 
     /// The base offset encoded in a record batch filename, e.g.

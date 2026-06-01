@@ -16,6 +16,9 @@ pub enum StorageError {
     #[error("topic '{0}' not found")]
     TopicNotFound(String),
 
+    #[error("consumer group '{0}' not found")]
+    GroupNotFound(String),
+
     #[error("object not found: {0}")]
     NotFound(Path),
 
