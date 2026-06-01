@@ -109,6 +109,25 @@ docker build -t kotatsu .
 docker run -p 8080:8080 kotatsu
 ```
 
+## Tests
+
+```bash
+cd backend
+cargo test                      # unit tests (decode, keys, parsing) — no services needed
+```
+
+Integration tests under `backend/tests/` are **`#[ignore]`-gated** so CI stays
+green without infrastructure. They are self-contained (they seed their own
+data and clean up), needing only the relevant services running:
+
+```bash
+docker compose up -d minio createbucket kora kora-db
+cargo test -- --ignored          # runs s3 / groups / schema integration tests
+# or per suite:
+cargo test --test groups_integration -- --ignored
+cargo test --test schema_integration -- --ignored
+```
+
 ## Pointing at an S3 source
 
 Set the bucket/endpoint/credentials and the Tansu cluster name (see

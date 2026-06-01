@@ -25,5 +25,14 @@ tansu-sans-io = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 apache-avro = "0.17"
 
+# Used only by the #[ignore]-gated integration tests under tests/.
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+object_store = { version = "0.12", features = ["aws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+apache-avro = "0.17"
+bytes = "1"
+serde_json = "1"
+
 [profile.release]
 strip = true
