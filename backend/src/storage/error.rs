@@ -16,6 +16,9 @@ pub enum StorageError {
     #[error("object not found: {0}")]
     NotFound(Path),
 
+    #[error("failed to decode record batch: {0}")]
+    Decode(String),
+
     #[error("failed to parse object {path}: {source}")]
     Parse {
         path: Path,

@@ -3,14 +3,12 @@
 //! No Kafka client, no broker: every read is triggered by a UI action and goes
 //! straight to the object store. See the GitHub issues for the design.
 
-mod config;
-mod http;
-mod storage;
-
 use anyhow::Context;
-use config::Config;
-use http::{AppState, SourceInfo};
-use storage::StorageSource;
+use kotatsu::{
+    config::Config,
+    http::{self, AppState, SourceInfo},
+    storage::StorageSource,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]

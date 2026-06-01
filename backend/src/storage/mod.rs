@@ -6,9 +6,12 @@
 
 mod error;
 mod keys;
+mod model;
+mod reader;
 
 pub use error::StorageError;
 pub use keys::Keys;
+pub use model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, RecordHeader, Watermark};
 
 use std::sync::Arc;
 
