@@ -66,10 +66,12 @@ impl From<SchemaError> for ApiError {
 
 /// Resolves the schema registry, or 503 if none configured.
 fn registry(state: &AppState) -> Result<&SchemaRegistry, ApiError> {
-    state
-        .registry
-        .as_ref()
-        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no schema registry configured"))
+    state.registry.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no schema registry configured",
+        )
+    })
 }
 
 /// Resolves the configured source, or 503 if none.
@@ -81,10 +83,7 @@ fn source(state: &AppState) -> Result<&StorageSource, ApiError> {
 }
 
 /// Resolves the source and verifies the path cluster matches the configured one.
-fn cluster_source<'a>(
-    state: &'a AppState,
-    cluster: &str,
-) -> Result<&'a StorageSource, ApiError> {
+fn cluster_source<'a>(state: &'a AppState, cluster: &str) -> Result<&'a StorageSource, ApiError> {
     let source = source(state)?;
     if cluster != source.keys().cluster() {
         return Err(ApiError::new(
@@ -153,7 +152,8 @@ fn default_limit() -> usize {
 const MAX_LIMIT: usize = 500;
 
 fn parse_offset(raw: &str) -> Result<OffsetSpec, ApiError> {
-    let bad = |what: &str| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid offset: {what}"));
+    let bad =
+        |what: &str| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid offset: {what}"));
     match raw {
         "earliest" => Ok(OffsetSpec::Earliest),
         "latest" => Ok(OffsetSpec::Latest),
@@ -191,7 +191,9 @@ pub async fn group_detail(
 pub async fn schemas(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let registry = registry(&state)?;
     let subjects = registry.subjects().await?;
-    Ok(Json(json!({ "registry": registry.base_url(), "subjects": subjects })))
+    Ok(Json(
+        json!({ "registry": registry.base_url(), "subjects": subjects }),
+    ))
 }
 
 /// `GET /api/schemas/{subject}` — versions + the latest schema for a subject.
@@ -225,9 +227,7 @@ pub async fn messages(
     let limit = query.limit.clamp(1, MAX_LIMIT);
 
     let watermark = source.watermark(&topic, query.partition).await?;
-    let records = source
-        .fetch(&topic, query.partition, spec, limit)
-        .await?;
+    let records = source.fetch(&topic, query.partition, spec, limit).await?;
 
     let registry = state.registry.as_ref();
     let mut rendered = Vec::with_capacity(records.len());

@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · unit · frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: unit tests
+        run: cargo test # integration tests are #[ignore]-gated and skipped here
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run generate
+
+  integration:
+    name: integration (MinIO + Tansu + Kora)
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: kt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Start services
+        run: docker compose up -d minio createbucket tansu kora kora-db
+
+      - name: Wait for Kora
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8085/health && break
+            sleep 2
+          done
+
+      - name: Seed demo data (orders topic, 5 messages)
+        run: |
+          # Create the topic (retry until Tansu is ready).
+          for i in $(seq 1 30); do
+            docker run --rm --network kt_default apache/kafka:latest \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 \
+              --create --topic orders --partitions 1 --replication-factor 1 && break
+            sleep 5
+          done
+          # Produce 5 keyed messages (key-1..key-5) the s3 suite expects.
+          for n in 1 2 3 4 5; do
+            printf "key-%s:{\"id\":%s}\n" "$n" "$n" | docker run -i --rm --network kt_default apache/kafka:latest \
+              /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server tansu:9092 --topic orders \
+              --property parse.key=true --property key.separator=:
+          done
+
+      - name: Integration tests
+        working-directory: backend
+        run: cargo test -- --ignored
+
+      - name: Tear down
+        if: always()
+        run: docker compose -p kt down -v

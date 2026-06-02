@@ -49,7 +49,10 @@ impl Keys {
 
     /// `clusters/{cluster}/topics/{topic}/partitions/` — prefix for listing partitions.
     pub fn partitions_prefix(&self, topic: &str) -> Path {
-        Path::from(format!("clusters/{}/topics/{}/partitions/", self.cluster, topic))
+        Path::from(format!(
+            "clusters/{}/topics/{}/partitions/",
+            self.cluster, topic
+        ))
     }
 
     /// `.../partitions/{partition:010}/watermark.json`

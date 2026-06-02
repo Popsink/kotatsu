@@ -77,10 +77,8 @@ impl StorageSource {
         let mut summaries = Vec::with_capacity(meta.topics.len());
         for (name, entry) in meta.topics {
             let partitions = entry.topic.num_partitions.max(0);
-            let watermarks = try_join_all(
-                (0..partitions).map(|p| self.watermark_or_empty(&name, p)),
-            )
-            .await?;
+            let watermarks =
+                try_join_all((0..partitions).map(|p| self.watermark_or_empty(&name, p))).await?;
             let messages = watermarks.iter().map(Watermark::count).sum();
             summaries.push(TopicSummary {
                 name,

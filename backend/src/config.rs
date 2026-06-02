@@ -67,7 +67,9 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
             .parse()?;
 
-        let static_dir = env::var("KOTATSU_STATIC_DIR").ok().filter(|s| !s.is_empty());
+        let static_dir = env::var("KOTATSU_STATIC_DIR")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let s3 = S3Config::from_env();
         let kora_url = non_empty("KOTATSU_KORA_URL");

@@ -17,8 +17,7 @@ use bytes::Bytes;
 use kotatsu::schema::{decode_field, SchemaRegistry};
 
 const SUBJECT: &str = "kotatsu-it-value";
-const SCHEMA: &str =
-    r#"{"type":"record","name":"ItTest","fields":[{"name":"id","type":"int"},{"name":"name","type":"string"}]}"#;
+const SCHEMA: &str = r#"{"type":"record","name":"ItTest","fields":[{"name":"id","type":"int"},{"name":"name","type":"string"}]}"#;
 
 fn kora_url() -> String {
     std::env::var("KORA_URL").unwrap_or_else(|_| "http://127.0.0.1:8085".to_string())
@@ -47,7 +46,10 @@ async fn registers_lists_and_reads_schema() {
     let registry = SchemaRegistry::new(kora_url());
 
     let subjects = registry.subjects().await.expect("subjects");
-    assert!(subjects.contains(&SUBJECT.to_string()), "subjects: {subjects:?}");
+    assert!(
+        subjects.contains(&SUBJECT.to_string()),
+        "subjects: {subjects:?}"
+    );
 
     let versions = registry.versions(SUBJECT).await.expect("versions");
     assert!(!versions.is_empty());

@@ -100,10 +100,15 @@ impl SchemaRegistry {
     }
 
     pub async fn versions(&self, subject: &str) -> Result<Vec<i32>, SchemaError> {
-        self.get_json(&format!("/subjects/{subject}/versions")).await
+        self.get_json(&format!("/subjects/{subject}/versions"))
+            .await
     }
 
-    pub async fn version(&self, subject: &str, version: &str) -> Result<SchemaVersion, SchemaError> {
+    pub async fn version(
+        &self,
+        subject: &str,
+        version: &str,
+    ) -> Result<SchemaVersion, SchemaError> {
         self.get_json(&format!("/subjects/{subject}/versions/{version}"))
             .await
     }
