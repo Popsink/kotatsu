@@ -13,8 +13,8 @@ use object_store::path::Path;
 use serde::Deserialize;
 
 use super::{
-    model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, Watermark},
     keys::Keys,
+    model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, Watermark},
     StorageError, StorageSource,
 };
 
@@ -28,7 +28,9 @@ struct WatermarkRaw {
 impl StorageSource {
     /// Reads a partition's low/high watermark.
     pub async fn watermark(&self, topic: &str, partition: i32) -> Result<Watermark, StorageError> {
-        let raw: WatermarkRaw = self.get_json(&self.keys().watermark(topic, partition)).await?;
+        let raw: WatermarkRaw = self
+            .get_json(&self.keys().watermark(topic, partition))
+            .await?;
         Ok(Watermark {
             low: raw.low.unwrap_or(0),
             high: raw.high.unwrap_or(0),
@@ -88,7 +90,9 @@ impl StorageSource {
             if out.len() >= limit {
                 break;
             }
-            let bytes = self.get_bytes(&self.keys().batch(topic, partition, base)).await?;
+            let bytes = self
+                .get_bytes(&self.keys().batch(topic, partition, base))
+                .await?;
             for record in decode_batch(bytes, base, partition)? {
                 if record.offset >= start && record.offset < wm.high {
                     out.push(record);

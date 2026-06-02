@@ -60,7 +60,10 @@ async fn fetch_earliest_returns_first_records_in_order() {
 async fn fetch_latest_returns_tail() {
     let source = demo_source();
     let high = source.watermark("orders", 0).await.unwrap().high;
-    let records = source.fetch("orders", 0, OffsetSpec::Latest, 2).await.unwrap();
+    let records = source
+        .fetch("orders", 0, OffsetSpec::Latest, 2)
+        .await
+        .unwrap();
     assert_eq!(records.len(), 2);
     // The last two offsets, contiguous up to the high watermark.
     assert_eq!(records[0].offset, high - 2);
@@ -73,7 +76,10 @@ async fn fetch_at_mid_batch_uses_predecessor() {
     let source = demo_source();
     let high = source.watermark("orders", 0).await.unwrap().high;
     // Reading from offset 2 must start exactly at 2 and run to the end.
-    let records = source.fetch("orders", 0, OffsetSpec::At(2), 1000).await.unwrap();
+    let records = source
+        .fetch("orders", 0, OffsetSpec::At(2), 1000)
+        .await
+        .unwrap();
     assert_eq!(records.first().unwrap().offset, 2);
     assert_eq!(records.len(), (high - 2) as usize);
     // Offsets are contiguous.

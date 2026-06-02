@@ -122,13 +122,13 @@ impl StorageSource {
 
     /// Reads a group's metadata, committed offsets and lag.
     pub async fn group_detail(&self, group: &str) -> Result<GroupDetailView, StorageError> {
-        let detail: GroupDetailRaw = self
-            .get_json(&self.keys().group(group))
-            .await
-            .map_err(|e| match e {
-                StorageError::NotFound(_) => StorageError::GroupNotFound(group.to_string()),
-                other => other,
-            })?;
+        let detail: GroupDetailRaw =
+            self.get_json(&self.keys().group(group))
+                .await
+                .map_err(|e| match e {
+                    StorageError::NotFound(_) => StorageError::GroupNotFound(group.to_string()),
+                    other => other,
+                })?;
 
         let (protocol_type, protocol_name) = match &detail.state {
             GroupStateRaw::Forming {
@@ -157,8 +157,9 @@ impl StorageSource {
 
         let mut offsets = Vec::with_capacity(topic_partitions.len());
         for (topic, partition) in topic_partitions {
-            let commit: OffsetCommitRaw =
-                self.get_json(&self.keys().group_offset(group, &topic, partition)).await?;
+            let commit: OffsetCommitRaw = self
+                .get_json(&self.keys().group_offset(group, &topic, partition))
+                .await?;
             let high = self.watermark_or_empty(&topic, partition).await?.high;
             offsets.push(GroupOffset {
                 topic,

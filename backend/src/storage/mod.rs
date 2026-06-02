@@ -85,7 +85,9 @@ impl StorageSource {
                 match self.store.list(Some(&prefix)).next().await {
                     Some(Ok(_)) => Ok(()),
                     Some(Err(e)) => Err(StorageError::Unreachable(e.to_string())),
-                    None => Err(StorageError::ClusterNotFound(self.keys.cluster().to_string())),
+                    None => Err(StorageError::ClusterNotFound(
+                        self.keys.cluster().to_string(),
+                    )),
                 }
             }
             Err(e) => Err(StorageError::Unreachable(e.to_string())),

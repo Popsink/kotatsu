@@ -59,7 +59,12 @@ async fn seeded_group_lists_with_offsets_and_lag() {
     )
     .await;
     put(&source, &offset_path, r#"{"offset":4}"#).await;
-    put(&source, &watermark_path, r#"{"low":0,"high":10,"timestamps":null}"#).await;
+    put(
+        &source,
+        &watermark_path,
+        r#"{"low":0,"high":10,"timestamps":null}"#,
+    )
+    .await;
 
     // list_groups includes our group, derived state Empty.
     let groups = source.list_groups().await.expect("list groups");

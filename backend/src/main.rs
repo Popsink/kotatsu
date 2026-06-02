@@ -47,7 +47,9 @@ fn build_state(config: &Config) -> anyhow::Result<AppState> {
         SchemaRegistry::new(url)
     });
     if registry.is_none() {
-        tracing::warn!("no schema registry configured (set KOTATSU_KORA_URL) — Avro decode disabled");
+        tracing::warn!(
+            "no schema registry configured (set KOTATSU_KORA_URL) — Avro decode disabled"
+        );
     }
 
     let Some(s3) = &config.s3 else {
@@ -76,7 +78,10 @@ fn build_state(config: &Config) -> anyhow::Result<AppState> {
 
 fn init_tracing() {
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "kotatsu=info,tower_http=info".into()))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "kotatsu=info,tower_http=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 }
