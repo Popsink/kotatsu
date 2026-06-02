@@ -1,0 +1,22 @@
+apiVersion: v2
+name: kotatsu
+description: Kotatsu — read-only browser for Tansu (Kafka-compatible) S3 storage
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/Popsink/kotatsu
+sources:
+  - https://github.com/Popsink/kotatsu
+maintainers:
+  - name: Popsink SAS
+    url: https://www.popsink.com
+keywords:
+  - kafka
+  - tansu
+  - s3
+  - browser
+  - observability
+dependencies:
+  - name: common
+    version: 2.x.x
+    repository: oci://registry-1.docker.io/bitnamicharts

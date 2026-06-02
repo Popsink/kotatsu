@@ -1,0 +1,46 @@
+CHART NAME: {{ .Chart.Name }}
+CHART VERSION: {{ .Chart.Version }}
+APP VERSION: {{ .Chart.AppVersion }}
+
+** Please be patient while the chart is being deployed **
+
+Kotatsu is a read-only browser for Tansu (Kafka-compatible) S3 storage.
+
+{{- if .Values.ingress.enabled }}
+
+1. Get the application URL:
+   http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.hostname }}{{ .Values.ingress.path }}
+
+{{- else if eq .Values.service.type "NodePort" }}
+
+1. Get the application URL by running:
+   export NODE_PORT=$(kubectl get svc --namespace {{ include "common.names.namespace" . }} {{ include "common.names.fullname" . }} -o jsonpath="{.spec.ports[0].nodePort}")
+   export NODE_IP=$(kubectl get nodes --namespace {{ include "common.names.namespace" . }} -o jsonpath="{.items[0].status.addresses[0].address}")
+   echo "http://$NODE_IP:$NODE_PORT"
+
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+1. Get the application URL. NOTE: it may take a few minutes for the LoadBalancer IP to be available.
+   Watch for status: kubectl get svc --namespace {{ include "common.names.namespace" . }} {{ include "common.names.fullname" . }} --watch
+
+   export SERVICE_IP=$(kubectl get svc --namespace {{ include "common.names.namespace" . }} {{ include "common.names.fullname" . }} -o jsonpath="{.status.loadBalancer.ingress[0].ip}")
+   echo "http://$SERVICE_IP:{{ .Values.service.ports.http }}"
+
+{{- else }}
+
+1. Forward the service port to access the UI:
+   kubectl port-forward --namespace {{ include "common.names.namespace" . }} svc/{{ include "common.names.fullname" . }} 8080:{{ .Values.service.ports.http }}
+   echo "Open http://127.0.0.1:8080 in your browser"
+
+{{- end }}
+
+2. Check that all pods are running:
+   kubectl get pods --namespace {{ include "common.names.namespace" . }} -l "{{ include "kotatsu.selectorLabels" . | replace ": " "=" | replace "\n" "," }}"
+
+{{- if not .Values.s3.accessKey }}
+
+NOTE: No static S3 credentials configured. Kotatsu will use the ambient AWS credential
+chain (IRSA / Pod Identity / instance role). Ensure the service account has the
+necessary permissions to access the bucket '{{ .Values.s3.bucket }}'.
+
+{{- end }}

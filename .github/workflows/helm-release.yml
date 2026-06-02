@@ -1,0 +1,104 @@
+name: Publish Helm Chart
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+    paths:
+      - 'chart/kotatsu/**'
+      - '.github/workflows/helm-release.yml'
+  workflow_dispatch:
+    inputs:
+      chart_version:
+        description: 'Chart version to publish (leave empty to use Chart.yaml version)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run (skip actual push to registry)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CHART_PATH: ./chart/kotatsu
+  REGISTRY: ghcr.io
+
+jobs:
+  release:
+    name: Package and Push Helm Chart
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Log in to GitHub Container Registry
+        if: github.event.inputs.dry_run != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set repository variables
+        id: repo
+        run: |
+          REPO_OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner=$REPO_OWNER_LOWER" >> $GITHUB_OUTPUT
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.chart_version }}" ]; then
+            VERSION="${{ inputs.chart_version }}"
+            echo "Using manual version: $VERSION"
+          else
+            VERSION=$(grep '^version:' ${{ env.CHART_PATH }}/Chart.yaml | awk '{print $2}')
+            echo "Using Chart.yaml version: $VERSION"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update chart dependencies
+        run: helm dependency update ${{ env.CHART_PATH }}
+
+      - name: Update Chart version (if needed)
+        if: steps.version.outputs.version != ''
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CURRENT_VERSION=$(grep '^version:' ${{ env.CHART_PATH }}/Chart.yaml | awk '{print $2}')
+          if [ "$CURRENT_VERSION" != "$VERSION" ]; then
+            echo "Updating Chart.yaml version from $CURRENT_VERSION to $VERSION"
+            sed -i "s/^version:.*/version: $VERSION/" ${{ env.CHART_PATH }}/Chart.yaml
+          fi
+
+      - name: Lint chart
+        run: helm lint ${{ env.CHART_PATH }} --set s3.bucket=test --set s3.cluster=test
+
+      - name: Package Helm chart
+        run: |
+          helm package ${{ env.CHART_PATH }} --destination /tmp/charts
+          ls -lh /tmp/charts/
+
+      - name: Push chart to GHCR
+        if: github.event.inputs.dry_run != 'true'
+        working-directory: /tmp/charts
+        run: |
+          CHART_FILE=$(ls *.tgz)
+          REGISTRY_PATH="oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/charts"
+          echo "Pushing chart: $CHART_FILE"
+          helm push "$CHART_FILE" "$REGISTRY_PATH"
+
+      - name: Dry run notice
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          echo "::notice::DRY RUN MODE - Chart was packaged but NOT pushed to registry"

@@ -1,0 +1,263 @@
+## @section Global parameters
+## @param global.imageRegistry Global Docker image registry
+## @param global.imagePullSecrets Global Docker registry secret names as an array
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+## @section Common parameters
+## @param kubeVersion Override Kubernetes version
+kubeVersion: ""
+## @param nameOverride String to partially override common.names.fullname
+nameOverride: ""
+## @param fullnameOverride String to fully override common.names.fullname
+fullnameOverride: ""
+## @param commonLabels Labels to add to all deployed objects
+commonLabels: {}
+## @param commonAnnotations Annotations to add to all deployed objects
+commonAnnotations: {}
+
+## @section Kotatsu image parameters
+## @param image.registry Kotatsu image registry
+## @param image.repository Kotatsu image repository
+## @param image.tag Kotatsu image tag (defaults to appVersion)
+## @param image.digest Kotatsu image digest — overrides tag when set
+## @param image.pullPolicy Image pull policy
+## @param image.pullSecrets Image pull secrets
+image:
+  registry: ghcr.io
+  repository: popsink/kotatsu
+  tag: "0.1.0"
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+## @section Kotatsu deployment parameters
+## @param replicaCount Number of replicas
+replicaCount: 1
+
+## @param updateStrategy.type Deployment update strategy
+updateStrategy:
+  type: RollingUpdate
+
+## @param podLabels Extra labels for pods
+podLabels: {}
+## @param podAnnotations Annotations for pods
+podAnnotations: {}
+
+## @param podAffinityPreset Pod affinity preset (`soft` or `hard`). Ignored when affinity is set.
+podAffinityPreset: ""
+## @param podAntiAffinityPreset Pod anti-affinity preset (`soft` or `hard`). Ignored when affinity is set.
+podAntiAffinityPreset: soft
+## @param nodeAffinityPreset.type Node affinity preset type (`soft` or `hard`). Ignored when affinity is set.
+## @param nodeAffinityPreset.key Node label key to match
+## @param nodeAffinityPreset.values Node label values to match
+nodeAffinityPreset:
+  type: ""
+  key: ""
+  values: []
+
+## @param affinity Pod affinity rules (overrides presets)
+affinity: {}
+## @param nodeSelector Node labels for pod assignment
+nodeSelector: {}
+## @param tolerations Tolerations for pod assignment
+tolerations: []
+## @param topologySpreadConstraints Topology spread constraints for pod assignment
+topologySpreadConstraints: []
+
+## @param priorityClassName Pod priority class name
+priorityClassName: ""
+
+## @param podSecurityContext.enabled Enable pod security context
+## @param podSecurityContext.fsGroup File system group ID
+podSecurityContext:
+  enabled: true
+  fsGroup: 1001
+
+## @param containerSecurityContext.enabled Enable container security context
+containerSecurityContext:
+  enabled: true
+  runAsUser: 1001
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+## @param containerPorts.http Container HTTP port
+containerPorts:
+  http: 8080
+
+## @param resources.requests.cpu CPU request
+## @param resources.requests.memory Memory request
+## @param resources.limits.cpu CPU limit
+## @param resources.limits.memory Memory limit
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+## @param livenessProbe Liveness probe configuration
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+  successThreshold: 1
+
+## @param readinessProbe Readiness probe configuration
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+  successThreshold: 1
+
+## @param startupProbe Startup probe configuration
+startupProbe:
+  enabled: false
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+  successThreshold: 1
+
+## @section Service parameters
+## @param service.type Kubernetes service type
+## @param service.ports.http Service HTTP port
+## @param service.nodePorts.http NodePort for HTTP (only when type=NodePort)
+## @param service.clusterIP Static cluster IP
+## @param service.loadBalancerIP Load balancer IP
+## @param service.loadBalancerSourceRanges Load balancer source ranges
+## @param service.externalTrafficPolicy External traffic policy
+## @param service.annotations Service annotations
+## @param service.sessionAffinity Session affinity
+## @param service.sessionAffinityConfig Session affinity config
+service:
+  type: ClusterIP
+  ports:
+    http: 80
+  nodePorts:
+    http: ""
+  clusterIP: ""
+  loadBalancerIP: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: Cluster
+  annotations: {}
+  sessionAffinity: None
+  sessionAffinityConfig: {}
+
+## @section Ingress parameters
+## @param ingress.enabled Enable ingress
+## @param ingress.ingressClassName IngressClass name
+## @param ingress.annotations Ingress annotations
+## @param ingress.hostname Default hostname
+## @param ingress.path Default path
+## @param ingress.pathType Path type
+## @param ingress.tls Enable TLS for the default hostname
+## @param ingress.selfSigned Create self-signed TLS certificate
+## @param ingress.extraHosts Additional hostnames
+## @param ingress.extraPaths Extra paths on the default host
+## @param ingress.extraTls Extra TLS entries
+## @param ingress.secrets Additional TLS secrets
+## @param ingress.extraRules Additional custom ingress rules
+ingress:
+  enabled: false
+  ingressClassName: ""
+  annotations: {}
+  hostname: kotatsu.local
+  path: /
+  pathType: ImplementationSpecific
+  tls: false
+  selfSigned: false
+  extraHosts: []
+  extraPaths: []
+  extraTls: []
+  secrets: []
+  extraRules: []
+
+## @section Service Account parameters
+## @param serviceAccount.create Create a service account
+## @param serviceAccount.name Service account name (auto-generated when empty)
+## @param serviceAccount.automountServiceAccountToken Automount the service account token
+## @param serviceAccount.annotations Service account annotations (e.g. IRSA role ARN)
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+  annotations: {}
+
+## @section S3 storage configuration
+## @param s3.bucket S3 bucket name [required]
+## @param s3.cluster Tansu cluster ID [required] — must match the cluster ID used by Tansu
+## @param s3.endpoint Custom S3 endpoint URL (leave empty for AWS S3; set for MinIO or other S3-compatible stores)
+## @param s3.region S3 region
+## @param s3.forcePathStyle Use path-style addressing (required for MinIO)
+## @param s3.existingSecret Name of an existing secret with S3 credentials. Keys must match s3.secretKeys.
+## @param s3.accessKey Static S3 access key. Ignored when existingSecret is set or when using IAM/IRSA.
+## @param s3.secretKey Static S3 secret key. Ignored when existingSecret is set or when using IAM/IRSA.
+## @param s3.secretKeys.accessKey Key name in the secret for the access key
+## @param s3.secretKeys.secretKey Key name in the secret for the secret key
+s3:
+  bucket: ""
+  cluster: ""
+  endpoint: ""
+  region: "us-east-1"
+  forcePathStyle: "true"
+  existingSecret: ""
+  accessKey: ""
+  secretKey: ""
+  secretKeys:
+    accessKey: "access-key"
+    secretKey: "secret-key"
+
+## @section Schema Registry (Kora) configuration
+## @param koraUrl URL of the Kora schema registry. Enables Avro/JSON/Protobuf value decoding. Leave empty to disable.
+koraUrl: ""
+
+## @section Autoscaling parameters
+## @param autoscaling.enabled Enable Horizontal Pod Autoscaler
+## @param autoscaling.minReplicas Minimum number of replicas
+## @param autoscaling.maxReplicas Maximum number of replicas
+## @param autoscaling.targetCPU Target CPU utilisation percentage
+## @param autoscaling.targetMemory Target memory utilisation percentage (leave empty to disable)
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPU: 80
+  targetMemory: ""
+
+## @section Pod Disruption Budget parameters
+## @param pdb.create Create a PodDisruptionBudget
+## @param pdb.minAvailable Minimum number of pods that must be available
+## @param pdb.maxUnavailable Maximum number of pods that can be unavailable
+pdb:
+  create: false
+  minAvailable: ""
+  maxUnavailable: ""
+
+## @section Extra / advanced parameters
+## @param extraDeploy Array of extra Kubernetes objects to deploy with the release (evaluated as templates)
+extraDeploy: []
+## @param extraEnvVars Extra environment variables
+extraEnvVars: []
+## @param extraEnvVarsCM Name of an existing ConfigMap with extra env vars
+extraEnvVarsCM: ""
+## @param extraEnvVarsSecret Name of an existing Secret with extra env vars
+extraEnvVarsSecret: ""
+## @param extraVolumes Extra volumes
+extraVolumes: []
+## @param extraVolumeMounts Extra volume mounts
+extraVolumeMounts: []
+## @param sidecars Additional sidecar containers
+sidecars: []
+## @param initContainers Additional init containers
+initContainers: []

@@ -16,3 +16,9 @@ dist/
 
 # OS
 .DS_Store
+
+# Charts
+/chart/kotatsu/charts/*.tgz
+
+# AI
+/.agent-shell/
