@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-06-02
+
+### Fixed
+- Event browser: Confluent-framed Avro values containing `decimal`, `bytes` or
+  `fixed` fields (e.g. CDC/Debezium events) are now decoded to JSON instead of
+  being shown as raw hex. Decode and schema-registry errors are surfaced in the
+  field result and in the UI.
+
+### Added
+- Helm chart (`chart/kotatsu`) for Kubernetes deployment.
+
 ## [0.1.0] - 2026-06-02
 
 First release. A read-only, on-demand browser over [Tansu](https://github.com/tansu-io/tansu)'s
@@ -37,4 +48,5 @@ Built with Rust (Axum) + Nuxt 3.
   the bundled frontend); `ci` workflow (fmt, clippy, unit + integration tests);
   `release` workflow publishing multi-arch images to `ghcr.io/popsink/kotatsu`.
 
+[0.1.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.0
