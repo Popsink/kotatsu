@@ -67,4 +67,4 @@ jobs:
         run: |
           helm push \
             /tmp/charts/kotatsu-${{ steps.version.outputs.version }}.tgz \
-            oci://ghcr.io/${{ github.repository_owner }}/charts
+            oci://ghcr.io/${{ github.repository_owner | lower }}/charts
