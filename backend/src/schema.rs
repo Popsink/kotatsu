@@ -139,6 +139,8 @@ impl SchemaRegistry {
 ///
 /// Confluent-framed Avro is decoded to JSON; otherwise the bytes are shown as
 /// UTF-8 or hex. `registry` is `None` when no schema registry is configured.
+/// Errors (no registry, schema fetch, decode) are surfaced in the result so
+/// failures are diagnosable rather than silently shown as hex.
 pub async fn decode_field(registry: Option<&SchemaRegistry>, field: &Option<Bytes>) -> Value {
     let Some(bytes) = field else {
         return Value::Null;
@@ -146,24 +148,101 @@ pub async fn decode_field(registry: Option<&SchemaRegistry>, field: &Option<Byte
 
     // Confluent wire format: 0x00 + 4-byte big-endian schema id + payload.
     if bytes.len() >= 5 && bytes[0] == 0x00 {
-        if let Some(registry) = registry {
-            let id = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-            if let Ok(cached) = registry.schema_by_id(id).await {
-                if let Some(schema) = &cached.avro {
-                    let mut payload = &bytes[5..];
-                    if let Ok(value) = apache_avro::from_avro_datum(schema, &mut payload, None) {
-                        if let Ok(data) = apache_avro::from_value::<Value>(&value) {
-                            return json!({ "kind": "avro", "schemaId": id, "data": data });
-                        }
+        let id = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        let payload = &bytes[5..];
+
+        let Some(registry) = registry else {
+            return json!({ "kind": "hex", "schemaId": id, "data": hex(bytes),
+                "error": "no schema registry configured (set KOTATSU_KORA_URL)" });
+        };
+
+        return match registry.schema_by_id(id).await {
+            Ok(cached) => match &cached.avro {
+                Some(schema) => match apache_avro::from_avro_datum(schema, &mut &payload[..], None)
+                {
+                    Ok(value) => {
+                        json!({ "kind": "avro", "schemaId": id, "data": avro_to_json(&value) })
                     }
-                }
-                // Framed but non-Avro or decode failed → surface the id + raw.
-                return json!({ "kind": cached.schema_type.to_lowercase(), "schemaId": id, "data": raw_text(bytes) });
-            }
-        }
+                    Err(e) => json!({ "kind": "avro", "schemaId": id, "data": hex(payload),
+                        "error": format!("avro decode failed: {e}") }),
+                },
+                // Schema exists but isn't Avro (JSON Schema / Protobuf).
+                None => json!({ "kind": cached.schema_type.to_lowercase(), "schemaId": id,
+                    "data": raw_text(payload) }),
+            },
+            Err(e) => json!({ "kind": "hex", "schemaId": id, "data": hex(bytes),
+                "error": format!("schema id {id}: {e}") }),
+        };
     }
 
     raw_field(bytes)
+}
+
+/// Converts a decoded Avro [`apache_avro::types::Value`] into JSON.
+///
+/// Unlike `apache_avro::from_value::<serde_json::Value>` (which errors on
+/// `Decimal`/`Bytes`/`Fixed`), this handles every variant — binary as hex,
+/// logical types as their underlying scalar, unions unwrapped.
+fn avro_to_json(value: &apache_avro::types::Value) -> Value {
+    use apache_avro::types::Value as A;
+    match value {
+        A::Null => Value::Null,
+        A::Boolean(b) => json!(b),
+        A::Int(i) | A::Date(i) | A::TimeMillis(i) => json!(i),
+        A::Long(l)
+        | A::TimeMicros(l)
+        | A::TimestampMillis(l)
+        | A::TimestampMicros(l)
+        | A::TimestampNanos(l)
+        | A::LocalTimestampMillis(l)
+        | A::LocalTimestampMicros(l)
+        | A::LocalTimestampNanos(l) => json!(l),
+        A::Float(f) => json!(f),
+        A::Double(f) => json!(f),
+        A::Bytes(b) | A::Fixed(_, b) => json!(hex(b)),
+        A::String(s) | A::Enum(_, s) => json!(s),
+        A::Uuid(u) => json!(u.to_string()),
+        A::Union(_, inner) => avro_to_json(inner),
+        A::Array(items) => Value::Array(items.iter().map(avro_to_json).collect()),
+        A::Map(m) => Value::Object(
+            m.iter()
+                .map(|(k, v)| (k.clone(), avro_to_json(v)))
+                .collect(),
+        ),
+        A::Record(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), avro_to_json(v)))
+                .collect(),
+        ),
+        // Unscaled integer value (the decimal scale lives in the schema, not the value).
+        A::Decimal(d) => match <Vec<u8>>::try_from(d) {
+            Ok(be) => json!(twos_complement_to_string(&be)),
+            Err(_) => Value::Null,
+        },
+        A::BigDecimal(bd) => json!(bd.to_string()),
+        A::Duration(d) => json!({
+            "months": u32::from(d.months()),
+            "days": u32::from(d.days()),
+            "millis": u32::from(d.millis()),
+        }),
+    }
+}
+
+/// Big-endian two's-complement bytes → decimal string (fits within i128, else hex).
+fn twos_complement_to_string(be: &[u8]) -> String {
+    if be.is_empty() {
+        return "0".to_string();
+    }
+    if be.len() <= 16 {
+        let mut v: i128 = if be[0] & 0x80 != 0 { -1 } else { 0 };
+        for &byte in be {
+            v = (v << 8) | i128::from(byte);
+        }
+        v.to_string()
+    } else {
+        format!("0x{}", hex(be))
+    }
 }
 
 /// Encodes raw bytes as `{kind: utf8|hex, data}` (no schema involved).
@@ -187,4 +266,64 @@ fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apache_avro::{
+        types::{Record, Value as AvroValue},
+        Decimal, Schema,
+    };
+
+    // A record mixing the types that broke `from_value`: decimal, raw bytes,
+    // fixed — alongside a logical timestamp, a union and an enum.
+    const SCHEMA: &str = r#"
+    {"type":"record","name":"Cdc","fields":[
+      {"name":"id","type":"long"},
+      {"name":"amount","type":{"type":"bytes","logicalType":"decimal","precision":10,"scale":2}},
+      {"name":"raw","type":"bytes"},
+      {"name":"key","type":{"type":"fixed","name":"K","size":4}},
+      {"name":"ts","type":{"type":"long","logicalType":"timestamp-micros"}},
+      {"name":"opt","type":["null","string"]},
+      {"name":"color","type":{"type":"enum","name":"Color","symbols":["RED","GREEN"]}}
+    ]}"#;
+
+    #[test]
+    fn avro_to_json_handles_decimal_bytes_fixed_and_logical_types() {
+        let schema = Schema::parse_str(SCHEMA).unwrap();
+        let mut rec = Record::new(&schema).unwrap();
+        rec.put("id", 42i64);
+        rec.put(
+            "amount",
+            AvroValue::Decimal(Decimal::from(vec![0x04, 0xd2])),
+        ); // unscaled 1234
+        rec.put("raw", AvroValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]));
+        rec.put("key", AvroValue::Fixed(4, vec![1, 2, 3, 4]));
+        rec.put("ts", AvroValue::TimestampMicros(1_700_000_000_000_000));
+        rec.put(
+            "opt",
+            AvroValue::Union(1, Box::new(AvroValue::String("x".into()))),
+        );
+        rec.put("color", AvroValue::Enum(1, "GREEN".into()));
+        let datum = apache_avro::to_avro_datum(&schema, rec).unwrap();
+
+        let value = apache_avro::from_avro_datum(&schema, &mut &datum[..], None).unwrap();
+        let j = avro_to_json(&value);
+
+        assert_eq!(j["id"], 42);
+        assert_eq!(j["amount"], "1234"); // unscaled decimal
+        assert_eq!(j["raw"], "deadbeef"); // bytes as hex
+        assert_eq!(j["key"], "01020304"); // fixed as hex
+        assert_eq!(j["ts"], 1_700_000_000_000_000i64);
+        assert_eq!(j["opt"], "x"); // union unwrapped
+        assert_eq!(j["color"], "GREEN"); // enum symbol
+    }
+
+    #[test]
+    fn twos_complement_handles_sign() {
+        assert_eq!(twos_complement_to_string(&[0x04, 0xd2]), "1234");
+        assert_eq!(twos_complement_to_string(&[0xff]), "-1");
+        assert_eq!(twos_complement_to_string(&[]), "0");
+    }
 }

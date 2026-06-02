@@ -1,5 +1,5 @@
 <script setup lang="ts">
-type FieldValue = { kind: string; data: any; schemaId?: number } | null
+type FieldValue = { kind: string; data: any; schemaId?: number; error?: string } | null
 interface Header { key: FieldValue; value: FieldValue }
 interface Record {
   offset: number
@@ -170,10 +170,12 @@ function fmtTime(ms: number): string {
               <div class="kv">
                 <span class="lbl">key <em v-if="r.key" class="tag">{{ badge(r.key) }}</em></span>
                 <pre>{{ fieldText(r.key) }}</pre>
+                <span v-if="r.key?.error" class="ferr">⚠ {{ r.key.error }}</span>
               </div>
               <div class="kv">
                 <span class="lbl">value <em v-if="r.value" class="tag">{{ badge(r.value) }}</em></span>
                 <pre>{{ fieldText(r.value) }}</pre>
+                <span v-if="r.value?.error" class="ferr">⚠ {{ r.value.error }}</span>
               </div>
               <div class="kv" v-if="r.headers.length">
                 <span class="lbl">headers</span>
@@ -217,5 +219,6 @@ h2 code { color: var(--accent); }
 .kv { display: grid; grid-template-columns: 70px 1fr; gap: 0.5rem; margin-bottom: 0.4rem; }
 .kv .lbl { color: var(--muted); font-size: 0.75rem; }
 .kv .tag { font-style: normal; color: var(--accent); font-size: 0.7rem; margin-left: 0.3rem; }
+.kv .ferr { grid-column: 2; color: var(--err); font-size: 0.75rem; }
 .kv pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.82rem; }
 </style>
