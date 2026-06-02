@@ -34,10 +34,14 @@ pub struct S3Config {
     pub endpoint: Option<String>,
     /// Region (`KOTATSU_S3_REGION`, default `us-east-1`).
     pub region: String,
-    /// Access key id (`KOTATSU_S3_ACCESS_KEY`).
+    /// Access key id (`KOTATSU_S3_ACCESS_KEY`). When unset, credentials are
+    /// resolved from the ambient AWS chain (env / web identity / pod identity /
+    /// instance role).
     pub access_key: Option<String>,
     /// Secret access key (`KOTATSU_S3_SECRET_KEY`).
     pub secret_key: Option<String>,
+    /// Session token for temporary static credentials (`KOTATSU_S3_SESSION_TOKEN`).
+    pub session_token: Option<String>,
     /// Use path-style addressing (`KOTATSU_S3_FORCE_PATH_STYLE`, default true —
     /// required by MinIO and most non-AWS S3s).
     pub force_path_style: bool,
@@ -55,6 +59,7 @@ impl std::fmt::Debug for S3Config {
             .field("region", &self.region)
             .field("access_key", &self.access_key.as_ref().map(|_| "***"))
             .field("secret_key", &self.secret_key.as_ref().map(|_| "***"))
+            .field("session_token", &self.session_token.as_ref().map(|_| "***"))
             .field("force_path_style", &self.force_path_style)
             .field("allow_http", &self.allow_http)
             .finish()
@@ -101,6 +106,7 @@ impl S3Config {
             region: non_empty("KOTATSU_S3_REGION").unwrap_or_else(|| "us-east-1".to_string()),
             access_key: non_empty("KOTATSU_S3_ACCESS_KEY"),
             secret_key: non_empty("KOTATSU_S3_SECRET_KEY"),
+            session_token: non_empty("KOTATSU_S3_SESSION_TOKEN"),
             force_path_style: env::var("KOTATSU_S3_FORCE_PATH_STYLE")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
