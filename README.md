@@ -138,6 +138,33 @@ cargo test --test schema_integration -- --ignored
 
 ## Pointing at an S3 source
 
-Set the bucket/endpoint/credentials and the Tansu cluster name (see
-`docker-compose.yml` for the variable names). A single source per instance for
-now; multi-source comes later.
+Set the bucket/endpoint and the Tansu cluster name (see `docker-compose.yml`
+for the variable names). A single source per instance for now; multi-source
+comes later.
+
+| Var | Purpose |
+| --- | --- |
+| `KOTATSU_S3_BUCKET` | bucket holding Tansu's storage |
+| `KOTATSU_CLUSTER` | Tansu cluster id (`clusters/{cluster}/` prefix) |
+| `KOTATSU_S3_ENDPOINT` | custom endpoint (MinIO/R2); omit for AWS |
+| `KOTATSU_S3_REGION` | region (default `us-east-1`) |
+| `KOTATSU_S3_FORCE_PATH_STYLE` | `true` for MinIO/most S3s; set `false` for AWS S3 |
+| `KOTATSU_S3_ACCESS_KEY` / `_SECRET_KEY` | static keys (optional) |
+| `KOTATSU_S3_SESSION_TOKEN` | session token for static temporary creds (optional) |
+
+### Credentials: static keys or an IAM role
+
+If `KOTATSU_S3_ACCESS_KEY`/`KOTATSU_S3_SECRET_KEY` are set they are used
+directly. **Otherwise Kotatsu resolves credentials from the ambient AWS chain**,
+so it can run with no secrets:
+
+1. environment — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+2. **web identity (EKS IRSA)** — `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`
+3. **EKS Pod Identity / ECS** — container credential endpoints
+4. **EC2/ECS instance role** — IMDS
+
+Temporary credentials are refreshed automatically. On EKS, attach a role to the
+pod's ServiceAccount (IRSA annotation `eks.amazonaws.com/role-arn`) or via an
+EKS Pod Identity association — the platform injects the env above and Kotatsu
+picks it up. For real AWS S3 also set `KOTATSU_S3_FORCE_PATH_STYLE=false` and
+leave `KOTATSU_S3_ENDPOINT` unset.

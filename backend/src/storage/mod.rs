@@ -37,8 +37,16 @@ pub struct StorageSource {
 impl StorageSource {
     /// Builds the source from config. Does not touch the network — connectivity
     /// is verified lazily via [`StorageSource::check`].
+    ///
+    /// Credentials: when explicit static keys are configured they win;
+    /// otherwise `object_store` resolves them from the ambient AWS chain —
+    /// environment, web identity (IRSA), ECS/EKS Pod Identity container
+    /// credentials, then the EC2/ECS instance role (IMDS). Basing the builder
+    /// on [`AmazonS3Builder::from_env`] is what lets the container/pod-identity
+    /// providers pick up their endpoints from the environment. Temporary
+    /// credentials are refreshed automatically by `object_store`.
     pub fn from_config(cfg: &S3Config) -> anyhow::Result<Self> {
-        let mut builder = AmazonS3Builder::new()
+        let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(&cfg.bucket)
             .with_region(&cfg.region)
             .with_virtual_hosted_style_request(!cfg.force_path_style);
@@ -46,14 +54,19 @@ impl StorageSource {
         if let Some(endpoint) = &cfg.endpoint {
             builder = builder.with_endpoint(endpoint);
         }
-        if let Some(key) = &cfg.access_key {
-            builder = builder.with_access_key_id(key);
-        }
-        if let Some(secret) = &cfg.secret_key {
-            builder = builder.with_secret_access_key(secret);
-        }
         if cfg.allow_http {
             builder = builder.with_allow_http(true);
+        }
+
+        // Explicit static keys take precedence over the ambient credential
+        // chain. Set both together so a partial config never shadows it.
+        if let (Some(key), Some(secret)) = (&cfg.access_key, &cfg.secret_key) {
+            builder = builder
+                .with_access_key_id(key)
+                .with_secret_access_key(secret);
+            if let Some(token) = &cfg.session_token {
+                builder = builder.with_token(token);
+            }
         }
 
         let store = builder.build()?;

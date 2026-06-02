@@ -27,6 +27,7 @@ fn demo_source() -> StorageSource {
         region: "us-east-1".into(),
         access_key: Some("minioadmin".into()),
         secret_key: Some("minioadmin".into()),
+        session_token: None,
         force_path_style: true,
         allow_http: true,
     };
