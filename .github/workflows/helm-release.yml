@@ -42,8 +42,8 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.ref_type }}" = "branch" ]; then
-            # test publish from branch: use 0.0.0-dev so it never collides with real releases
-            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            # test publish from branch: use 0.0.1-dev so it never collides with real releases
+            echo "version=0.0.1-dev" >> "$GITHUB_OUTPUT"
           else
             # strip "chart/v" prefix from the tag (refs/tags/chart/v0.1.0 -> 0.1.0)
             TAG="${GITHUB_REF_NAME#chart/v}"

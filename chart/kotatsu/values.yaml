@@ -245,6 +245,8 @@ pdb:
   maxUnavailable: ""
 
 ## @section Extra / advanced parameters
+## @param extraDeploy Array of extra Kubernetes objects to deploy with the release (evaluated as templates)
+extraDeploy: []
 ## @param extraEnvVars Extra environment variables
 extraEnvVars: []
 ## @param extraEnvVarsCM Name of an existing ConfigMap with extra env vars
