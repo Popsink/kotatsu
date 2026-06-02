@@ -1,0 +1,70 @@
+name: Publish Helm Chart
+
+on:
+  push:
+    branches:
+      # TODO: remove before merging to main
+      - "33-adding-helm-chart"
+    tags:
+      - "chart/v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Chart version to publish (e.g. 0.2.0)
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+
+      - name: Determine chart version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_type }}" = "branch" ]; then
+            # test publish from branch: use 0.0.0-dev so it never collides with real releases
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          else
+            # strip "chart/v" prefix from the tag (refs/tags/chart/v0.1.0 -> 0.1.0)
+            TAG="${GITHUB_REF_NAME#chart/v}"
+            echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Patch chart version
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" chart/kotatsu/Chart.yaml
+
+      - name: Update chart dependencies
+        run: helm dependency update chart/kotatsu
+
+      - name: Lint chart
+        run: helm lint chart/kotatsu --set s3.bucket=test --set s3.cluster=test
+
+      - name: Package chart
+        run: helm package chart/kotatsu --destination /tmp/charts
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Push chart to GHCR
+        run: |
+          helm push \
+            /tmp/charts/kotatsu-${{ steps.version.outputs.version }}.tgz \
+            oci://ghcr.io/${{ github.repository_owner }}/charts
