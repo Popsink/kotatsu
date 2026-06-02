@@ -27,7 +27,7 @@ commonAnnotations: {}
 image:
   registry: ghcr.io
   repository: popsink/kotatsu
-  tag: ""
+  tag: "0.1.0"
   digest: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
