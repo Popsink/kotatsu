@@ -42,7 +42,7 @@ jobs:
       - name: frontend build
         working-directory: frontend
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           npm run generate
 
   integration:
