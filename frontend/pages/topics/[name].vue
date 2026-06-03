@@ -116,6 +116,36 @@ function toggle(offset: number) {
   expanded.value = next
 }
 
+// Export / copy the currently fetched messages (decoded).
+function download(name: string, content: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+function exportJson() {
+  download(`${topic}-p${partition.value}.json`, JSON.stringify(records.value, null, 2), 'application/json')
+}
+function exportNdjson() {
+  download(
+    `${topic}-p${partition.value}.ndjson`,
+    records.value.map((r) => JSON.stringify(r)).join('\n'),
+    'application/x-ndjson',
+  )
+}
+const copied = ref<number | null>(null)
+async function copyMsg(r: Record) {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(r, null, 2))
+    copied.value = r.offset
+    setTimeout(() => {
+      if (copied.value === r.offset) copied.value = null
+    }, 1500)
+  } catch {}
+}
+
 function fieldText(f: FieldValue): string {
   if (f === null) return '∅ null'
   if (f.kind === 'avro' || typeof f.data === 'object') return JSON.stringify(f.data, null, 2)
@@ -250,6 +280,11 @@ function fmtTime(ms: number): string {
 
     <p v-if="error" class="err">{{ error }}</p>
 
+    <div v-if="records.length" class="exporttb">
+      <button type="button" class="ghost" @click="exportJson">Export JSON</button>
+      <button type="button" class="ghost" @click="exportNdjson">Export NDJSON</button>
+    </div>
+
     <table v-if="records.length" class="msgs">
       <thead>
         <tr><th></th><th>offset</th><th>timestamp</th><th>key</th><th>value</th></tr>
@@ -280,6 +315,9 @@ function fmtTime(ms: number): string {
                 <span class="lbl">headers</span>
                 <pre>{{ r.headers.map(h => `${fieldText(h.key)}: ${fieldText(h.value)}`).join('\n') }}</pre>
               </div>
+              <button type="button" class="ghost copy" @click="copyMsg(r)">
+                {{ copied === r.offset ? 'Copied ✓' : 'Copy JSON' }}
+              </button>
             </td>
           </tr>
         </template>
@@ -303,6 +341,9 @@ h2 code { color: var(--accent); }
 .cfg { border-collapse: collapse; margin-top: 0.5rem; }
 .cfg td { padding: 0.25rem 1rem 0.25rem 0; font-size: 0.82rem; }
 .browse-h { margin: 1.5rem 0 0; font-size: 1rem; }
+.exporttb { display: flex; gap: 0.5rem; margin: 0.75rem 0 0; }
+.exporttb .ghost, .copy { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
+.copy { margin-top: 0.5rem; }
 .controls { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
 .controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); }
 .controls input, .controls select { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem; }
