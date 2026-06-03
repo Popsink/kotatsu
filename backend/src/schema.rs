@@ -55,6 +55,13 @@ fn default_type() -> String {
     "AVRO".to_string()
 }
 
+/// Confluent `/config` response (compatibility level).
+#[derive(Deserialize)]
+struct ConfigResponse {
+    #[serde(rename = "compatibilityLevel", alias = "compatibility")]
+    compatibility_level: Option<String>,
+}
+
 /// Client for a Confluent-compatible schema registry, with an id→schema cache.
 #[derive(Clone)]
 pub struct SchemaRegistry {
@@ -111,6 +118,21 @@ impl SchemaRegistry {
     ) -> Result<SchemaVersion, SchemaError> {
         self.get_json(&format!("/subjects/{subject}/versions/{version}"))
             .await
+    }
+
+    /// The subject's compatibility level, falling back to the global config.
+    /// Best-effort: returns `None` if the registry doesn't expose `/config`.
+    pub async fn compatibility(&self, subject: &str) -> Option<String> {
+        if let Ok(c) = self
+            .get_json::<ConfigResponse>(&format!("/config/{subject}"))
+            .await
+        {
+            return c.compatibility_level;
+        }
+        self.get_json::<ConfigResponse>("/config")
+            .await
+            .ok()
+            .and_then(|c| c.compatibility_level)
     }
 
     /// Resolves a schema id to a (cached) parsed entry.

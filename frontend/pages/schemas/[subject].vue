@@ -10,6 +10,7 @@ interface SubjectDetail {
   subject: string
   versions: number[]
   latest: SchemaVersion
+  compatibility: string | null
 }
 
 const route = useRoute()
@@ -19,11 +20,28 @@ const { data, pending, error } = await useFetch<SubjectDetail>(
   `/api/schemas/${encodeURIComponent(subject)}`,
 )
 
-// Pretty-print the (stringified) schema JSON.
+// Selected version (defaults to latest); fetch its schema on change.
+const selected = ref<number | null>(null)
+watch(data, (d) => {
+  if (d && selected.value === null) selected.value = d.latest.version
+}, { immediate: true })
+
+const { data: current, pending: loadingVersion } = await useFetch<SchemaVersion>(
+  () =>
+    selected.value != null
+      ? `/api/schemas/${encodeURIComponent(subject)}/versions/${selected.value}`
+      : '',
+  { watch: [selected] },
+)
+
 const pretty = computed(() => {
-  const raw = data.value?.latest?.schema
+  const raw = current.value?.schema
   if (!raw) return ''
-  try { return JSON.stringify(JSON.parse(raw), null, 2) } catch { return raw }
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
 })
 </script>
 
@@ -37,13 +55,22 @@ const pretty = computed(() => {
 
     <template v-else-if="data">
       <dl class="meta">
-        <div><dt>type</dt><dd>{{ data.latest.schemaType }}</dd></div>
-        <div><dt>latest version</dt><dd>{{ data.latest.version }}</dd></div>
-        <div><dt>schema id</dt><dd>{{ data.latest.id }}</dd></div>
-        <div><dt>versions</dt><dd>{{ data.versions.join(', ') }}</dd></div>
+        <div><dt>type</dt><dd>{{ current?.schemaType ?? data.latest.schemaType }}</dd></div>
+        <div>
+          <dt>version</dt>
+          <dd>
+            <select v-model.number="selected">
+              <option v-for="v in [...data.versions].sort((a, b) => b - a)" :key="v" :value="v">
+                {{ v }}{{ v === data.latest.version ? ' (latest)' : '' }}
+              </option>
+            </select>
+          </dd>
+        </div>
+        <div><dt>schema id</dt><dd>{{ current?.id ?? data.latest.id }}</dd></div>
+        <div><dt>compatibility</dt><dd>{{ data.compatibility ?? '—' }}</dd></div>
       </dl>
 
-      <h3>Latest schema</h3>
+      <h3>Schema <Spinner v-if="loadingVersion" size="14px" /></h3>
       <pre class="schema">{{ pretty }}</pre>
     </template>
   </section>
@@ -59,5 +86,6 @@ h2 code { color: var(--accent); }
 .meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }
 .meta dd { margin: 0.2rem 0 0; font-family: ui-monospace, monospace; }
+.meta select { background: #0e2a40; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.2rem 0.4rem; font-family: ui-monospace, monospace; }
 .schema { background: #0a1f30; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow: auto; font-family: ui-monospace, monospace; font-size: 0.82rem; max-width: 720px; }
 </style>
