@@ -25,6 +25,35 @@ const { data: detail } = await useFetch<{ partitions: PartitionInfo[]; messages:
 )
 const partitions = computed(() => detail.value?.partitions ?? [])
 
+// Related schema subjects (show links to those that exist in the registry).
+const { data: schemaList } = await useFetch<any>(
+  () => cluster.value ? `/api/schemas?search=${encodeURIComponent(topic)}&limit=200` : '',
+  { watch: [cluster] },
+)
+const subjects = computed<string[]>(() => schemaList.value?.items ?? [])
+const valueSubject = computed(() => subjects.value.includes(`${topic}-value`) ? `${topic}-value` : null)
+const keySubject = computed(() => subjects.value.includes(`${topic}-key`) ? `${topic}-key` : null)
+
+// Consumer groups consuming this topic — loaded lazily (scans all groups).
+interface ConsumingGroup { group: string; offsets: { partition: number; lag: number }[] }
+const topicGroups = ref<ConsumingGroup[] | null>(null)
+const loadingGroups = ref(false)
+async function loadGroups() {
+  if (!cluster.value) return
+  loadingGroups.value = true
+  try {
+    const r = await $fetch<any>(`/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/groups`)
+    topicGroups.value = r.groups
+  } catch {
+    topicGroups.value = []
+  } finally {
+    loadingGroups.value = false
+  }
+}
+function groupLag(g: ConsumingGroup) {
+  return g.offsets.reduce((s, o) => s + o.lag, 0)
+}
+
 // Controls
 const partition = ref(0)
 const offsetMode = ref<'earliest' | 'latest' | 'specific' | 'timestamp'>('latest')
@@ -205,6 +234,25 @@ function fmtTime(ms: number): string {
       <p v-else class="muted">No config overrides (broker defaults).</p>
     </details>
 
+    <p v-if="valueSubject || keySubject" class="related">
+      <span class="muted">Schemas:</span>
+      <NuxtLink v-if="valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}`" class="link">{{ valueSubject }}</NuxtLink>
+      <NuxtLink v-if="keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}`" class="link">{{ keySubject }}</NuxtLink>
+    </p>
+
+    <div class="related">
+      <button v-if="topicGroups === null" type="button" class="ghost" :disabled="loadingGroups" @click="loadGroups">
+        <Spinner v-if="loadingGroups" size="14px" /> Consumer groups
+      </button>
+      <template v-else>
+        <span class="muted">Consumer groups:</span>
+        <span v-if="!topicGroups.length" class="muted">none</span>
+        <NuxtLink v-for="g in topicGroups" :key="g.group" :to="`/groups/${encodeURIComponent(g.group)}`" class="link">
+          {{ g.group }} <span class="muted">(lag {{ groupLag(g) }})</span>
+        </NuxtLink>
+      </template>
+    </div>
+
     <h3 class="browse-h">Messages</h3>
     <form class="controls" @submit.prevent="search">
       <label>Partition
@@ -302,12 +350,18 @@ function fmtTime(ms: number): string {
             <td></td>
             <td colspan="4">
               <div class="kv">
-                <span class="lbl">key <em v-if="r.key" class="tag">{{ badge(r.key) }}</em></span>
+                <span class="lbl">key
+                  <em v-if="r.key" class="tag">{{ badge(r.key) }}</em>
+                  <NuxtLink v-if="r.key?.schemaId != null && keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}`" class="schemalink">↗ schema</NuxtLink>
+                </span>
                 <pre>{{ fieldText(r.key) }}</pre>
                 <span v-if="r.key?.error" class="ferr">⚠ {{ r.key.error }}</span>
               </div>
               <div class="kv">
-                <span class="lbl">value <em v-if="r.value" class="tag">{{ badge(r.value) }}</em></span>
+                <span class="lbl">value
+                  <em v-if="r.value" class="tag">{{ badge(r.value) }}</em>
+                  <NuxtLink v-if="r.value?.schemaId != null && valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}`" class="schemalink">↗ schema</NuxtLink>
+                </span>
                 <pre>{{ fieldText(r.value) }}</pre>
                 <span v-if="r.value?.error" class="ferr">⚠ {{ r.value.error }}</span>
               </div>
@@ -336,6 +390,9 @@ h2 code { color: var(--accent); }
 .parts th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.35rem 0.75rem 0.35rem 0; }
 .parts td { padding: 0.3rem 0.75rem 0.3rem 0; }
 .parts tfoot td { border-top: 1px solid var(--border); }
+.related { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.5rem 0; font-size: 0.85rem; }
+.related .link { color: var(--accent); text-decoration: none; }
+.related .link:hover { text-decoration: underline; }
 .config { margin: 1rem 0; max-width: 560px; }
 .config summary { cursor: pointer; font-size: 0.9rem; }
 .cfg { border-collapse: collapse; margin-top: 0.5rem; }
@@ -366,6 +423,8 @@ h2 code { color: var(--accent); }
 .kv { display: grid; grid-template-columns: 70px 1fr; gap: 0.5rem; margin-bottom: 0.4rem; }
 .kv .lbl { color: var(--muted); font-size: 0.75rem; }
 .kv .tag { font-style: normal; color: var(--accent); font-size: 0.7rem; margin-left: 0.3rem; }
+.kv .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; margin-left: 0.4rem; }
+.kv .schemalink:hover { text-decoration: underline; }
 .kv .ferr { grid-column: 2; color: var(--err); font-size: 0.75rem; }
 .kv pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.82rem; }
 </style>

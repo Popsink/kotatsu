@@ -54,7 +54,7 @@ const totalLag = computed(() =>
         <thead><tr><th>topic</th><th>partition</th><th>committed</th><th>high watermark</th><th>lag</th></tr></thead>
         <tbody>
           <tr v-for="o in detail.offsets" :key="`${o.topic}-${o.partition}`">
-            <td>{{ o.topic }}</td>
+            <td><NuxtLink :to="`/topics/${encodeURIComponent(o.topic)}`" class="link">{{ o.topic }}</NuxtLink></td>
             <td class="mono">{{ o.partition }}</td>
             <td class="mono">{{ o.committed_offset }}</td>
             <td class="mono">{{ o.high_watermark }}</td>
@@ -74,6 +74,8 @@ h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
 .err { color: var(--err); }
 .warn { color: var(--warn); }
+.link { color: var(--accent); text-decoration: none; }
+.link:hover { text-decoration: underline; }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; max-width: 640px; }
 .meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }

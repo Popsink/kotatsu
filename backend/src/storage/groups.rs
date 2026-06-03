@@ -67,6 +67,13 @@ pub struct GroupOffset {
     pub lag: i64,
 }
 
+/// A group that has committed offsets on a given topic.
+#[derive(Debug, Serialize)]
+pub struct ConsumingGroup {
+    pub group: String,
+    pub offsets: Vec<GroupOffset>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GroupDetailView {
     pub name: String,
@@ -181,6 +188,65 @@ impl StorageSource {
             members: detail.members.into_keys().collect(),
             offsets,
         })
+    }
+
+    /// Lists consumer groups that have committed offsets on `topic`, with their
+    /// per-partition committed/high/lag. Scans every group's offsets — meant to
+    /// be called lazily (opt-in) from the topic detail page.
+    pub async fn groups_consuming(&self, topic: &str) -> Result<Vec<ConsumingGroup>, StorageError> {
+        let listed = self
+            .store()
+            .list_with_delimiter(Some(&self.keys().groups_prefix()))
+            .await?;
+        let mut group_names: Vec<String> = listed
+            .objects
+            .iter()
+            .filter_map(|m| {
+                m.location
+                    .filename()
+                    .and_then(|f| f.strip_suffix(".json"))
+                    .map(str::to_string)
+            })
+            .collect();
+        group_names.sort();
+
+        let mut consuming = Vec::new();
+        for group in group_names {
+            // Partitions this group committed for the target topic.
+            let mut partitions = Vec::new();
+            let mut stream = self
+                .store()
+                .list(Some(&self.keys().group_offsets_prefix(&group)));
+            while let Some(meta) = stream.next().await {
+                let meta = meta?;
+                if let Some((t, p)) = Keys::topic_partition_from_offset(&meta.location) {
+                    if t == topic {
+                        partitions.push(p);
+                    }
+                }
+            }
+            if partitions.is_empty() {
+                continue;
+            }
+            partitions.sort_unstable();
+
+            let mut offsets = Vec::with_capacity(partitions.len());
+            for partition in partitions {
+                let commit: OffsetCommitRaw = self
+                    .get_json(&self.keys().group_offset(&group, topic, partition))
+                    .await?;
+                let high = self.watermark_or_empty(topic, partition).await?.high;
+                offsets.push(GroupOffset {
+                    topic: topic.to_string(),
+                    partition,
+                    committed_offset: commit.offset,
+                    high_watermark: high,
+                    lag: (high - commit.offset).max(0),
+                });
+            }
+            consuming.push(ConsumingGroup { group, offsets });
+        }
+        Ok(consuming)
     }
 }
 

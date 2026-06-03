@@ -27,6 +27,10 @@ pub fn router(config: &Config, state: AppState) -> Router {
         .route("/clusters/{cluster}/topics", get(api::topics))
         .route("/clusters/{cluster}/topics/{topic}", get(api::topic_detail))
         .route(
+            "/clusters/{cluster}/topics/{topic}/groups",
+            get(api::topic_groups),
+        )
+        .route(
             "/clusters/{cluster}/topics/{topic}/messages",
             get(api::messages),
         )
