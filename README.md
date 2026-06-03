@@ -117,6 +117,25 @@ workflow on every push to `main` (tagged `main` + `sha`) and on `v*` tags
 docker run -p 8080:8080 ghcr.io/popsink/kotatsu:latest
 ```
 
+## Kubernetes (Helm)
+
+A Helm chart is published as an OCI artifact to
+**`oci://ghcr.io/popsink/kotatsu/charts/kotatsu`** by the `chart-release`
+workflow.
+
+```bash
+helm install kotatsu oci://ghcr.io/popsink/kotatsu/charts/kotatsu --version 0.1.1 \
+  --set s3.bucket=tansu \
+  --set s3.cluster=demo \
+  --set koraUrl=http://kora:8080
+```
+
+`s3.cluster` and `s3.bucket` are required. Provide static keys via
+`s3.accessKey`/`s3.secretKey`, or omit them to use the pod's IAM role — attach
+it through `serviceAccount.annotations` (EKS IRSA) or a Pod Identity
+association. See [`chart/kotatsu/values.yaml`](chart/kotatsu/values.yaml) for all
+options.
+
 ## Tests
 
 ```bash
