@@ -135,47 +135,96 @@ impl SchemaRegistry {
     }
 }
 
-/// Decodes a record field (key or value) into a display value.
-///
-/// Confluent-framed Avro is decoded to JSON; otherwise the bytes are shown as
-/// UTF-8 or hex. `registry` is `None` when no schema registry is configured.
-/// Errors (no registry, schema fetch, decode) are surfaced in the result so
-/// failures are diagnosable rather than silently shown as hex.
-pub async fn decode_field(registry: Option<&SchemaRegistry>, field: &Option<Bytes>) -> Value {
+/// How a record field should be deserialized in the event browser.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FieldFormat {
+    /// Confluent-framed → Avro via the registry, otherwise UTF-8/hex.
+    #[default]
+    Auto,
+    /// Force Confluent-Avro decode (raw with a note if not framed).
+    Avro,
+    /// Parse the bytes as plain JSON (no registry).
+    Json,
+    /// Bytes as UTF-8 or hex, never decoded.
+    Raw,
+}
+
+impl FieldFormat {
+    /// Parses a query value; unknown/empty → `Auto`.
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.unwrap_or("auto") {
+            "avro" => Self::Avro,
+            "json" => Self::Json,
+            "raw" => Self::Raw,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Decodes a record field (key or value) into a display value, according to the
+/// chosen [`FieldFormat`]. Errors (no registry, schema fetch, decode) are
+/// surfaced in the result so failures are diagnosable rather than silently
+/// shown as hex.
+pub async fn decode_field(
+    registry: Option<&SchemaRegistry>,
+    field: &Option<Bytes>,
+    format: FieldFormat,
+) -> Value {
     let Some(bytes) = field else {
         return Value::Null;
     };
 
-    // Confluent wire format: 0x00 + 4-byte big-endian schema id + payload.
-    if bytes.len() >= 5 && bytes[0] == 0x00 {
-        let id = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        let payload = &bytes[5..];
-
-        let Some(registry) = registry else {
-            return json!({ "kind": "hex", "schemaId": id, "data": hex(bytes),
-                "error": "no schema registry configured (set KOTATSU_KORA_URL)" });
-        };
-
-        return match registry.schema_by_id(id).await {
-            Ok(cached) => match &cached.avro {
-                Some(schema) => match apache_avro::from_avro_datum(schema, &mut &payload[..], None)
-                {
-                    Ok(value) => {
-                        json!({ "kind": "avro", "schemaId": id, "data": avro_to_json(&value) })
-                    }
-                    Err(e) => json!({ "kind": "avro", "schemaId": id, "data": hex(payload),
-                        "error": format!("avro decode failed: {e}") }),
-                },
-                // Schema exists but isn't Avro (JSON Schema / Protobuf).
-                None => json!({ "kind": cached.schema_type.to_lowercase(), "schemaId": id,
-                    "data": raw_text(payload) }),
-            },
-            Err(e) => json!({ "kind": "hex", "schemaId": id, "data": hex(bytes),
-                "error": format!("schema id {id}: {e}") }),
-        };
+    let framed = bytes.len() >= 5 && bytes[0] == 0x00;
+    match format {
+        FieldFormat::Raw => raw_field(bytes),
+        FieldFormat::Json => json_field(bytes),
+        FieldFormat::Avro if !framed => json!({ "kind": "raw", "data": raw_text(bytes),
+            "error": "not Confluent-framed (no 0x00 magic byte)" }),
+        FieldFormat::Avro => avro_field(registry, bytes).await,
+        FieldFormat::Auto if framed => avro_field(registry, bytes).await,
+        FieldFormat::Auto => raw_field(bytes),
     }
+}
 
-    raw_field(bytes)
+/// Decodes a Confluent-framed (`0x00` + 4-byte id) Avro payload via the registry.
+async fn avro_field(registry: Option<&SchemaRegistry>, bytes: &Bytes) -> Value {
+    let id = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+    let payload = &bytes[5..];
+
+    let Some(registry) = registry else {
+        return json!({ "kind": "hex", "schemaId": id, "data": hex(bytes),
+            "error": "no schema registry configured (set KOTATSU_KORA_URL)" });
+    };
+
+    match registry.schema_by_id(id).await {
+        Ok(cached) => match &cached.avro {
+            Some(schema) => match apache_avro::from_avro_datum(schema, &mut &payload[..], None) {
+                Ok(value) => {
+                    json!({ "kind": "avro", "schemaId": id, "data": avro_to_json(&value) })
+                }
+                Err(e) => json!({ "kind": "avro", "schemaId": id, "data": hex(payload),
+                    "error": format!("avro decode failed: {e}") }),
+            },
+            // Schema exists but isn't Avro (JSON Schema / Protobuf).
+            None => json!({ "kind": cached.schema_type.to_lowercase(), "schemaId": id,
+                "data": raw_text(payload) }),
+        },
+        Err(e) => json!({ "kind": "hex", "schemaId": id, "data": hex(bytes),
+            "error": format!("schema id {id}: {e}") }),
+    }
+}
+
+/// Parses the bytes as plain JSON; falls back to UTF-8/hex with a note.
+fn json_field(bytes: &Bytes) -> Value {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => match serde_json::from_str::<Value>(text) {
+            Ok(data) => json!({ "kind": "json", "data": data }),
+            Err(e) => {
+                json!({ "kind": "utf8", "data": text, "error": format!("not valid JSON: {e}") })
+            }
+        },
+        Err(_) => json!({ "kind": "hex", "data": hex(bytes), "error": "not valid JSON (binary)" }),
+    }
 }
 
 /// Converts a decoded Avro [`apache_avro::types::Value`] into JSON.
@@ -325,5 +374,25 @@ mod tests {
         assert_eq!(twos_complement_to_string(&[0x04, 0xd2]), "1234");
         assert_eq!(twos_complement_to_string(&[0xff]), "-1");
         assert_eq!(twos_complement_to_string(&[]), "0");
+    }
+
+    #[test]
+    fn field_format_parses() {
+        assert_eq!(FieldFormat::parse(Some("avro")), FieldFormat::Avro);
+        assert_eq!(FieldFormat::parse(Some("json")), FieldFormat::Json);
+        assert_eq!(FieldFormat::parse(Some("raw")), FieldFormat::Raw);
+        assert_eq!(FieldFormat::parse(Some("nonsense")), FieldFormat::Auto);
+        assert_eq!(FieldFormat::parse(None), FieldFormat::Auto);
+    }
+
+    #[test]
+    fn json_field_parses_and_falls_back() {
+        let ok = json_field(&Bytes::from_static(br#"{"a":1}"#));
+        assert_eq!(ok["kind"], "json");
+        assert_eq!(ok["data"]["a"], 1);
+
+        let bad = json_field(&Bytes::from_static(b"not json"));
+        assert_eq!(bad["kind"], "utf8");
+        assert!(bad.get("error").is_some());
     }
 }

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::{
     pagination::Page,
-    schema::{decode_field, SchemaError, SchemaRegistry},
+    schema::{decode_field, FieldFormat, SchemaError, SchemaRegistry},
     state::AppState,
     storage::{OffsetSpec, StorageError, StorageSource},
 };
@@ -163,6 +163,9 @@ pub struct MessagesQuery {
     offset: String,
     #[serde(default = "default_limit")]
     limit: usize,
+    /// `auto` | `avro` | `json` | `raw` (see [`FieldFormat`]).
+    value_format: Option<String>,
+    key_format: Option<String>,
 }
 
 fn default_offset() -> String {
@@ -269,14 +272,16 @@ pub async fn messages(
     let records = source.fetch(&topic, query.partition, spec, limit).await?;
 
     let registry = state.registry.as_ref();
+    let value_format = FieldFormat::parse(query.value_format.as_deref());
+    let key_format = FieldFormat::parse(query.key_format.as_deref());
     let mut rendered = Vec::with_capacity(records.len());
     for record in &records {
         rendered.push(json!({
             "offset": record.offset,
             "partition": record.partition,
             "timestamp": record.timestamp,
-            "key": decode_field(registry, &record.key).await,
-            "value": decode_field(registry, &record.value).await,
+            "key": decode_field(registry, &record.key, key_format).await,
+            "value": decode_field(registry, &record.value, value_format).await,
             "headers": record.headers.iter().map(|h| json!({
                 "key": h.key.as_ref().map(crate::schema::raw_field),
                 "value": h.value.as_ref().map(crate::schema::raw_field),
