@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-03
+
+### Added
+- **Search & pagination** on the topics, consumer-groups and schemas lists
+  (`?search=&limit=&offset=`), with loading spinners across the UI.
+- **Serializer choice** in the event browser — `auto` / `avro` / `json` / `raw`
+  per key and value, remembered per topic.
+- **Message filters** — filter by key/value substring (or regex) and header,
+  with a bounded forward scan (`max_scan`) honoring the on-demand model.
+- **Export & copy** — download the current messages as JSON / NDJSON and copy a
+  single message.
+- **Cross-navigation links** — topic ↔ schema subjects, group offsets → topics,
+  decoded message → its schema, and a lazy "consumer groups consuming this
+  topic" section.
+- **Topic configuration** on the topic detail (replication factor + config
+  overrides).
+- **Schema browser**: view any version and the subject's compatibility level.
+- **Consumer group detail**: total lag and per-member partition assignments
+  (best-effort decode of the Kafka assignment blob).
+
 ## [0.1.1] - 2026-06-02
 
 ### Fixed
@@ -48,5 +68,6 @@ Built with Rust (Axum) + Nuxt 3.
   the bundled frontend); `ci` workflow (fmt, clippy, unit + integration tests);
   `release` workflow publishing multi-arch images to `ghcr.io/popsink/kotatsu`.
 
+[0.2.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.0
