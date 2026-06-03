@@ -6,14 +6,17 @@ interface GroupOffset {
   high_watermark: number
   lag: number
 }
+interface AssignedTopic { topic: string; partitions: number[] }
+interface MemberView { id: string; assignments: AssignedTopic[] }
 interface GroupDetail {
   name: string
   state: string
   protocol_type: string | null
   protocol_name: string | null
   generation_id: number
-  members: string[]
+  members: MemberView[]
   offsets: GroupOffset[]
+  total_lag: number
 }
 
 const route = useRoute()
@@ -27,9 +30,10 @@ const { data: detail, pending, error } = await useFetch<GroupDetail>(
   { watch: [cluster] },
 )
 
-const totalLag = computed(() =>
-  (detail.value?.offsets ?? []).reduce((sum, o) => sum + o.lag, 0),
-)
+function memberAssignments(m: MemberView): string {
+  if (!m.assignments.length) return '—'
+  return m.assignments.map((a) => `${a.topic} [${a.partitions.join(', ')}]`).join('  ')
+}
 </script>
 
 <template>
@@ -46,8 +50,21 @@ const totalLag = computed(() =>
         <div><dt>protocol</dt><dd>{{ detail.protocol_type || '—' }} / {{ detail.protocol_name || '—' }}</dd></div>
         <div><dt>generation</dt><dd>{{ detail.generation_id }}</dd></div>
         <div><dt>members</dt><dd>{{ detail.members.length }}</dd></div>
-        <div><dt>total lag</dt><dd>{{ totalLag }}</dd></div>
+        <div><dt>total lag</dt><dd>{{ detail.total_lag }}</dd></div>
       </dl>
+
+      <template v-if="detail.members.length">
+        <h3>Members</h3>
+        <table class="offsets">
+          <thead><tr><th>member</th><th>assignments</th></tr></thead>
+          <tbody>
+            <tr v-for="m in detail.members" :key="m.id">
+              <td class="mono">{{ m.id }}</td>
+              <td class="mono">{{ memberAssignments(m) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
 
       <h3>Committed offsets</h3>
       <table v-if="detail.offsets.length" class="offsets">
