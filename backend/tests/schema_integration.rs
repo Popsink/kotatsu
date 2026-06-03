@@ -14,7 +14,7 @@
 use apache_avro::{types::Record, Schema};
 use bytes::Bytes;
 
-use kotatsu::schema::{decode_field, SchemaRegistry};
+use kotatsu::schema::{decode_field, FieldFormat, SchemaRegistry};
 
 const SUBJECT: &str = "kotatsu-it-value";
 const SCHEMA: &str = r#"{"type":"record","name":"ItTest","fields":[{"name":"id","type":"int"},{"name":"name","type":"string"}]}"#;
@@ -77,7 +77,12 @@ async fn decodes_confluent_framed_avro() {
     framed.extend_from_slice(&id.to_be_bytes());
     framed.extend_from_slice(&datum);
 
-    let decoded = decode_field(Some(&registry), &Some(Bytes::from(framed))).await;
+    let decoded = decode_field(
+        Some(&registry),
+        &Some(Bytes::from(framed)),
+        FieldFormat::Auto,
+    )
+    .await;
     assert_eq!(decoded["kind"], "avro");
     assert_eq!(decoded["schemaId"].as_u64(), Some(id as u64));
     assert_eq!(decoded["data"]["id"], 7);
@@ -88,7 +93,12 @@ async fn decodes_confluent_framed_avro() {
 #[ignore = "requires local Kora"]
 async fn non_framed_bytes_fall_back_to_utf8() {
     let registry = SchemaRegistry::new(kora_url());
-    let decoded = decode_field(Some(&registry), &Some(Bytes::from_static(b"hello"))).await;
+    let decoded = decode_field(
+        Some(&registry),
+        &Some(Bytes::from_static(b"hello")),
+        FieldFormat::Auto,
+    )
+    .await;
     assert_eq!(decoded["kind"], "utf8");
     assert_eq!(decoded["data"], "hello");
 }

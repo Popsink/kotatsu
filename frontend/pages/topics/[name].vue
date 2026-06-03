@@ -30,6 +30,25 @@ const offsetMode = ref<'earliest' | 'latest' | 'specific' | 'timestamp'>('latest
 const offsetValue = ref('')
 const limit = ref(50)
 
+// Serializer choice, remembered per topic.
+type Format = 'auto' | 'avro' | 'json' | 'raw'
+const fmtKey = `kotatsu:fmt:${topic}`
+const valueFormat = ref<Format>('auto')
+const keyFormat = ref<Format>('auto')
+onMounted(() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(fmtKey) || '{}')
+    if (saved.value) valueFormat.value = saved.value
+    if (saved.key) keyFormat.value = saved.key
+  } catch {}
+})
+watch([valueFormat, keyFormat], () => {
+  try {
+    localStorage.setItem(fmtKey, JSON.stringify({ value: valueFormat.value, key: keyFormat.value }))
+  } catch {}
+  if (searched.value) search() // re-decode with the new format
+})
+
 // Results
 const records = ref<Record[]>([])
 const watermark = ref<{ low: number; high: number } | null>(null)
@@ -53,6 +72,7 @@ async function search() {
   try {
     const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages`
       + `?partition=${partition.value}&offset=${encodeURIComponent(offsetParam())}&limit=${limit.value}`
+      + `&value_format=${valueFormat.value}&key_format=${keyFormat.value}`
     const res = await $fetch<any>(url)
     records.value = res.records
     watermark.value = res.watermark
@@ -138,6 +158,22 @@ function fmtTime(ms: number): string {
       </label>
       <label>Limit
         <input type="number" v-model.number="limit" min="1" max="500" />
+      </label>
+      <label>Key format
+        <select v-model="keyFormat">
+          <option value="auto">auto</option>
+          <option value="avro">avro</option>
+          <option value="json">json</option>
+          <option value="raw">raw</option>
+        </select>
+      </label>
+      <label>Value format
+        <select v-model="valueFormat">
+          <option value="auto">auto</option>
+          <option value="avro">avro</option>
+          <option value="json">json</option>
+          <option value="raw">raw</option>
+        </select>
       </label>
       <button type="submit" :disabled="loading || !cluster">
         <Spinner v-if="loading" size="14px" /> Search
