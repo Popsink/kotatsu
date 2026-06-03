@@ -28,4 +28,4 @@ jobs:
         run: |
           helm dependency build chart/kotatsu
           helm package chart/kotatsu -d dist
-          helm push dist/kotatsu-*.tgz oci://ghcr.io/popsink/kotatsu/charts
+          helm push dist/kotatsu-*.tgz oci://ghcr.io/popsink/charts
