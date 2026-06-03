@@ -292,7 +292,7 @@ pub async fn schemas(
     })))
 }
 
-/// `GET /api/schemas/{subject}` — versions + the latest schema for a subject.
+/// `GET /api/schemas/{subject}` — versions, latest schema, compatibility.
 pub async fn schema_subject(
     State(state): State<AppState>,
     Path(subject): Path<String>,
@@ -300,11 +300,23 @@ pub async fn schema_subject(
     let registry = registry(&state)?;
     let versions = registry.versions(&subject).await?;
     let latest = registry.version(&subject, "latest").await?;
+    let compatibility = registry.compatibility(&subject).await;
     Ok(Json(json!({
         "subject": subject,
         "versions": versions,
         "latest": latest,
+        "compatibility": compatibility,
     })))
+}
+
+/// `GET /api/schemas/{subject}/versions/{version}` — a specific version's schema.
+pub async fn schema_version(
+    State(state): State<AppState>,
+    Path((subject, version)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let registry = registry(&state)?;
+    let schema = registry.version(&subject, &version).await?;
+    Ok(Json(json!(schema)))
 }
 
 /// `GET /api/clusters/{cluster}/topics/{topic}/messages`
