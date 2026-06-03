@@ -156,6 +156,17 @@ pub async fn topic_detail(
     Ok(Json(json!(detail)))
 }
 
+/// `GET /api/clusters/{cluster}/topics/{topic}/groups` — consumer groups with a
+/// committed offset on this topic (scans groups; called lazily by the UI).
+pub async fn topic_groups(
+    State(state): State<AppState>,
+    Path((cluster, topic)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let groups = source.groups_consuming(&topic).await?;
+    Ok(Json(json!({ "topic": topic, "groups": groups })))
+}
+
 #[derive(Deserialize)]
 pub struct MessagesQuery {
     #[serde(default)]
