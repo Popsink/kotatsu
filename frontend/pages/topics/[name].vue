@@ -49,6 +49,14 @@ watch([valueFormat, keyFormat], () => {
   if (searched.value) search() // re-decode with the new format
 })
 
+// Filters
+const keyContains = ref('')
+const valueContains = ref('')
+const headerKey = ref('')
+const headerValue = ref('')
+const useRegex = ref(false)
+const showFilters = ref(false)
+
 // Results
 const records = ref<Record[]>([])
 const watermark = ref<{ low: number; high: number } | null>(null)
@@ -56,6 +64,9 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const expanded = ref<Set<number>>(new Set())
 const searched = ref(false)
+const scanned = ref(0)
+const filtered = ref(false)
+const exhausted = ref(true)
 
 function offsetParam(): string {
   if (offsetMode.value === 'specific') return offsetValue.value || '0'
@@ -70,12 +81,25 @@ async function search() {
   error.value = null
   expanded.value = new Set()
   try {
-    const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages`
-      + `?partition=${partition.value}&offset=${encodeURIComponent(offsetParam())}&limit=${limit.value}`
-      + `&value_format=${valueFormat.value}&key_format=${keyFormat.value}`
+    const p = new URLSearchParams({
+      partition: String(partition.value),
+      offset: offsetParam(),
+      limit: String(limit.value),
+      value_format: valueFormat.value,
+      key_format: keyFormat.value,
+    })
+    if (keyContains.value) p.set('key_contains', keyContains.value)
+    if (valueContains.value) p.set('value_contains', valueContains.value)
+    if (headerKey.value) p.set('header_key', headerKey.value)
+    if (headerValue.value) p.set('header_value', headerValue.value)
+    if (useRegex.value) p.set('regex', 'true')
+    const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages?${p}`
     const res = await $fetch<any>(url)
     records.value = res.records
     watermark.value = res.watermark
+    scanned.value = res.scanned ?? res.records.length
+    filtered.value = res.filtered ?? false
+    exhausted.value = res.exhausted ?? true
     searched.value = true
   } catch (e: any) {
     error.value = e?.data?.error || e?.message || 'request failed'
@@ -175,10 +199,35 @@ function fmtTime(ms: number): string {
           <option value="raw">raw</option>
         </select>
       </label>
+      <button type="button" class="ghost" @click="showFilters = !showFilters">
+        {{ showFilters ? 'Filters ▴' : 'Filters ▾' }}
+      </button>
       <button type="submit" :disabled="loading || !cluster">
         <Spinner v-if="loading" size="14px" /> Search
       </button>
     </form>
+
+    <form v-if="showFilters" class="controls filters" @submit.prevent="search">
+      <label>Key contains
+        <input v-model="keyContains" placeholder="substring" />
+      </label>
+      <label>Value contains
+        <input v-model="valueContains" placeholder="substring" />
+      </label>
+      <label>Header key
+        <input v-model="headerKey" placeholder="name" />
+      </label>
+      <label>Header value
+        <input v-model="headerValue" placeholder="substring" />
+      </label>
+      <label class="chk">
+        <input type="checkbox" v-model="useRegex" /> regex
+      </label>
+    </form>
+
+    <p v-if="searched && filtered" class="muted wm">
+      {{ records.length }} match{{ records.length === 1 ? '' : 'es' }} in {{ scanned }} scanned<template v-if="!exhausted"> (scan capped — narrow the range or raise max_scan)</template>
+    </p>
 
     <p v-if="watermark" class="muted wm">
       partition {{ partition }} — low {{ watermark.low }}, high {{ watermark.high }}
@@ -242,6 +291,9 @@ h2 code { color: var(--accent); }
 .controls input[type="number"] { width: 5rem; }
 .controls button { background: var(--accent); color: #051522; border: 0; border-radius: 6px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
+.controls button.ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--border); font-weight: 400; }
+.filters { margin-top: 0; padding: 0.75rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+.filters .chk { flex-direction: row; align-items: center; gap: 0.35rem; }
 .wm { font-size: 0.8rem; }
 .err { color: var(--err); }
 .msgs { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
