@@ -14,7 +14,7 @@
 use bytes::Bytes;
 use object_store::{ObjectStore, PutPayload};
 
-use kotatsu::{config::S3Config, storage::StorageSource};
+use kotatsu::{config::S3Config, pagination::Page, storage::StorageSource};
 
 const GROUP: &str = "kotatsu-it-group";
 const TOPIC: &str = "kotatsu-it-topic";
@@ -68,7 +68,11 @@ async fn seeded_group_lists_with_offsets_and_lag() {
     .await;
 
     // list_groups includes our group, derived state Empty.
-    let groups = source.list_groups().await.expect("list groups");
+    let groups = source
+        .list_groups(&Page::new(None, 200, 0))
+        .await
+        .expect("list groups")
+        .items;
     let summary = groups
         .iter()
         .find(|g| g.name == GROUP)

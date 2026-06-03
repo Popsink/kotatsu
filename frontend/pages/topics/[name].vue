@@ -140,7 +140,7 @@ function fmtTime(ms: number): string {
         <input type="number" v-model.number="limit" min="1" max="500" />
       </label>
       <button type="submit" :disabled="loading || !cluster">
-        {{ loading ? 'Loading…' : 'Search' }}
+        <Spinner v-if="loading" size="14px" /> Search
       </button>
     </form>
 

@@ -10,6 +10,7 @@ use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
 use super::{model::Watermark, StorageError, StorageSource};
+use crate::pagination::{Page, Paged};
 
 /// Minimal view of `meta.json` — only the topics map.
 #[derive(Deserialize)]
@@ -70,24 +71,29 @@ impl StorageSource {
         }
     }
 
-    /// Lists all topics with their partition count and approximate message count.
-    pub async fn list_topics(&self) -> Result<Vec<TopicSummary>, StorageError> {
+    /// Lists topics (name, partition count, approximate message count), filtered
+    /// and paginated. Watermarks are read only for the returned page.
+    pub async fn list_topics(&self, page: &Page) -> Result<Paged<TopicSummary>, StorageError> {
         let meta: MetaRaw = self.get_json(&self.keys().meta()).await?;
+        let (names, total) = page.select(meta.topics.keys().cloned().collect());
 
-        let mut summaries = Vec::with_capacity(meta.topics.len());
-        for (name, entry) in meta.topics {
-            let partitions = entry.topic.num_partitions.max(0);
+        let mut items = Vec::with_capacity(names.len());
+        for name in names {
+            let partitions = meta
+                .topics
+                .get(&name)
+                .map(|e| e.topic.num_partitions.max(0))
+                .unwrap_or(0);
             let watermarks =
                 try_join_all((0..partitions).map(|p| self.watermark_or_empty(&name, p))).await?;
             let messages = watermarks.iter().map(Watermark::count).sum();
-            summaries.push(TopicSummary {
+            items.push(TopicSummary {
                 name,
                 partitions,
                 messages,
             });
         }
-        summaries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(summaries)
+        Ok(Paged::new(items, total, page))
     }
 
     /// Reads a topic's per-partition watermarks.

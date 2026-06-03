@@ -15,6 +15,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use super::{keys::Keys, StorageError, StorageSource};
+use crate::pagination::{Page, Paged};
 
 // --- Mirrored `tansu-storage` JSON shapes (only the fields we use) ---
 
@@ -91,12 +92,13 @@ fn derive_state(detail: &GroupDetailRaw) -> &'static str {
 }
 
 impl StorageSource {
-    /// Lists consumer groups (one `{group}.json` per group).
-    pub async fn list_groups(&self) -> Result<Vec<GroupSummary>, StorageError> {
+    /// Lists consumer groups (one `{group}.json` per group), filtered and
+    /// paginated. `GroupDetail` is read only for the returned page.
+    pub async fn list_groups(&self, page: &Page) -> Result<Paged<GroupSummary>, StorageError> {
         let prefix = self.keys().groups_prefix();
         let listed = self.store().list_with_delimiter(Some(&prefix)).await?;
 
-        let mut names: Vec<String> = listed
+        let names: Vec<String> = listed
             .objects
             .iter()
             .filter_map(|meta| {
@@ -106,18 +108,18 @@ impl StorageSource {
                     .map(str::to_string)
             })
             .collect();
-        names.sort();
+        let (names, total) = page.select(names);
 
-        let mut summaries = Vec::with_capacity(names.len());
+        let mut items = Vec::with_capacity(names.len());
         for name in names {
             let detail: GroupDetailRaw = self.get_json(&self.keys().group(&name)).await?;
-            summaries.push(GroupSummary {
+            items.push(GroupSummary {
                 state: derive_state(&detail),
                 members: detail.members.len(),
                 name,
             });
         }
-        Ok(summaries)
+        Ok(Paged::new(items, total, page))
     }
 
     /// Reads a group's metadata, committed offsets and lag.
