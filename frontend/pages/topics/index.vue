@@ -8,11 +8,38 @@ interface TopicSummary {
 const { data: source } = await useFetch<any>('/api/source')
 const cluster = computed(() => source.value?.cluster)
 
-const { data, pending, error } = await useFetch<{ topics: TopicSummary[] }>(
-  () => cluster.value ? `/api/clusters/${cluster.value}/topics` : '',
-  { watch: [cluster] },
+const search = ref('')
+const q = ref('') // debounced search term
+const limit = ref(50)
+const offset = ref(0)
+let timer: any
+watch(search, (v) => {
+  clearTimeout(timer)
+  timer = setTimeout(() => {
+    offset.value = 0
+    q.value = v
+  }, 300)
+})
+
+const url = computed(() =>
+  cluster.value
+    ? `/api/clusters/${cluster.value}/topics?search=${encodeURIComponent(q.value)}&limit=${limit.value}&offset=${offset.value}`
+    : '',
 )
-const topics = computed(() => data.value?.topics ?? [])
+const { data, pending, error } = await useFetch<{ items: TopicSummary[]; total: number }>(url, {
+  watch: [url],
+})
+const items = computed(() => data.value?.items ?? [])
+const total = computed(() => data.value?.total ?? 0)
+const from = computed(() => (total.value === 0 ? 0 : offset.value + 1))
+const to = computed(() => Math.min(offset.value + limit.value, total.value))
+
+function prev() {
+  offset.value = Math.max(0, offset.value - limit.value)
+}
+function next() {
+  if (offset.value + limit.value < total.value) offset.value += limit.value
+}
 </script>
 
 <template>
@@ -20,32 +47,52 @@ const topics = computed(() => data.value?.topics ?? [])
     <h2>Topics <span v-if="cluster" class="muted">on {{ cluster }}</span></h2>
 
     <p v-if="!source?.configured" class="muted">No S3 source configured.</p>
-    <p v-else-if="pending" class="muted">Loading…</p>
-    <p v-else-if="error" class="err">{{ (error as any)?.data?.error || error.message }}</p>
 
-    <table v-else-if="topics.length" class="topics">
-      <thead>
-        <tr><th>topic</th><th>partitions</th><th>messages</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="t in topics" :key="t.name">
-          <td><NuxtLink :to="`/topics/${encodeURIComponent(t.name)}`" class="link">{{ t.name }}</NuxtLink></td>
-          <td class="mono">{{ t.partitions }}</td>
-          <td class="mono">{{ t.messages }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <template v-else>
+      <div class="toolbar">
+        <input v-model="search" class="search" placeholder="Search topics…" />
+        <Spinner v-if="pending" />
+        <span class="spacer" />
+        <span class="range muted">{{ from }}–{{ to }} of {{ total }}</span>
+        <button :disabled="offset === 0" @click="prev">‹</button>
+        <button :disabled="offset + limit >= total" @click="next">›</button>
+      </div>
 
-    <p v-else class="muted">No topics.</p>
+      <p v-if="error" class="err">{{ (error as any)?.data?.error || error.message }}</p>
+
+      <div v-else-if="pending && !items.length" class="center"><Spinner size="28px" /></div>
+
+      <table v-else-if="items.length" class="list">
+        <thead>
+          <tr><th>topic</th><th>partitions</th><th>messages</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in items" :key="t.name">
+            <td><NuxtLink :to="`/topics/${encodeURIComponent(t.name)}`" class="link">{{ t.name }}</NuxtLink></td>
+            <td class="mono">{{ t.partitions }}</td>
+            <td class="mono">{{ t.messages }}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p v-else class="muted">{{ q ? 'No topics match.' : 'No topics.' }}</p>
+    </template>
   </section>
 </template>
 
 <style scoped>
 .muted { color: var(--muted); }
 .err { color: var(--err); }
-.topics { width: 100%; max-width: 560px; border-collapse: collapse; margin-top: 1rem; }
-.topics th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.5rem; }
-.topics td { padding: 0.5rem; border-bottom: 1px solid #0e2a40; }
+.toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0 0.5rem; max-width: 560px; }
+.search { flex: 0 1 280px; background: #0e2a40; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.6rem; }
+.spacer { flex: 1; }
+.range { font-size: 0.8rem; white-space: nowrap; }
+.toolbar button { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.6rem; cursor: pointer; }
+.toolbar button:disabled { opacity: 0.4; cursor: default; }
+.center { display: flex; justify-content: center; padding: 2rem; }
+.list { width: 100%; max-width: 560px; border-collapse: collapse; margin-top: 0.5rem; }
+.list th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.5rem; }
+.list td { padding: 0.5rem; border-bottom: 1px solid #0e2a40; }
 .link { color: var(--accent); text-decoration: none; }
 .link:hover { text-decoration: underline; }
 .mono { font-family: ui-monospace, monospace; }

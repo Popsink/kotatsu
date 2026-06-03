@@ -32,7 +32,7 @@ const pretty = computed(() => {
     <NuxtLink to="/schemas" class="back">← schemas</NuxtLink>
     <h2>Subject <code>{{ subject }}</code></h2>
 
-    <p v-if="pending" class="muted">Loading…</p>
+    <div v-if="pending" class="center"><Spinner size="28px" /></div>
     <p v-else-if="error" class="err">{{ (error as any)?.data?.error || error.message }}</p>
 
     <template v-else-if="data">
@@ -50,6 +50,7 @@ const pretty = computed(() => {
 </template>
 
 <style scoped>
+.center { display: flex; justify-content: center; padding: 2rem; }
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }

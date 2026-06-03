@@ -10,10 +10,27 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
+    pagination::Page,
     schema::{decode_field, SchemaError, SchemaRegistry},
     state::AppState,
     storage::{OffsetSpec, StorageError, StorageSource},
 };
+
+/// Query params for paginated list endpoints (`?search=&limit=&offset=`).
+#[derive(Deserialize)]
+pub struct ListQuery {
+    search: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+impl From<ListQuery> for Page {
+    fn from(q: ListQuery) -> Self {
+        Page::new(q.search, q.limit, q.offset)
+    }
+}
 
 /// An API error with an HTTP status and a message.
 pub struct ApiError {
@@ -111,14 +128,21 @@ pub async fn cluster(
     Ok(Json(json!(summary)))
 }
 
-/// `GET /api/clusters/{cluster}/topics`
+/// `GET /api/clusters/{cluster}/topics?search=&limit=&offset=`
 pub async fn topics(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
-    let topics = source.list_topics().await?;
-    Ok(Json(json!({ "cluster": cluster, "topics": topics })))
+    let paged = source.list_topics(&query.into()).await?;
+    Ok(Json(json!({
+        "cluster": cluster,
+        "items": paged.items,
+        "total": paged.total,
+        "limit": paged.limit,
+        "offset": paged.offset,
+    })))
 }
 
 /// `GET /api/clusters/{cluster}/topics/{topic}`
@@ -167,14 +191,21 @@ fn parse_offset(raw: &str) -> Result<OffsetSpec, ApiError> {
     }
 }
 
-/// `GET /api/clusters/{cluster}/groups`
+/// `GET /api/clusters/{cluster}/groups?search=&limit=&offset=`
 pub async fn groups(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
-    let groups = source.list_groups().await?;
-    Ok(Json(json!({ "cluster": cluster, "groups": groups })))
+    let paged = source.list_groups(&query.into()).await?;
+    Ok(Json(json!({
+        "cluster": cluster,
+        "items": paged.items,
+        "total": paged.total,
+        "limit": paged.limit,
+        "offset": paged.offset,
+    })))
 }
 
 /// `GET /api/clusters/{cluster}/groups/{group}`
@@ -187,13 +218,21 @@ pub async fn group_detail(
     Ok(Json(json!(detail)))
 }
 
-/// `GET /api/schemas` — list subjects in the registry.
-pub async fn schemas(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+/// `GET /api/schemas?search=&limit=&offset=` — list subjects in the registry.
+pub async fn schemas(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
     let registry = registry(&state)?;
-    let subjects = registry.subjects().await?;
-    Ok(Json(
-        json!({ "registry": registry.base_url(), "subjects": subjects }),
-    ))
+    let page: Page = query.into();
+    let (items, total) = page.select(registry.subjects().await?);
+    Ok(Json(json!({
+        "registry": registry.base_url(),
+        "items": items,
+        "total": total,
+        "limit": page.limit,
+        "offset": page.offset,
+    })))
 }
 
 /// `GET /api/schemas/{subject}` — versions + the latest schema for a subject.

@@ -37,7 +37,7 @@ const totalLag = computed(() =>
     <NuxtLink to="/groups" class="back">← consumer groups</NuxtLink>
     <h2>Group <code>{{ group }}</code></h2>
 
-    <p v-if="pending" class="muted">Loading…</p>
+    <div v-if="pending" class="center"><Spinner size="28px" /></div>
     <p v-else-if="error" class="err">{{ (error as any)?.data?.error || error.message }}</p>
 
     <template v-else-if="detail">
@@ -68,6 +68,7 @@ const totalLag = computed(() =>
 </template>
 
 <style scoped>
+.center { display: flex; justify-content: center; padding: 2rem; }
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
