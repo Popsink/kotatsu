@@ -18,7 +18,8 @@ const { data: source } = await useFetch<any>('/api/source')
 const cluster = computed(() => source.value?.cluster)
 
 interface PartitionInfo { partition: number; low: number; high: number; messages: number }
-const { data: detail } = await useFetch<{ partitions: PartitionInfo[]; messages: number }>(
+interface ConfigEntry { name: string; value: string | null }
+const { data: detail } = await useFetch<{ partitions: PartitionInfo[]; messages: number; replication_factor: number; configs: ConfigEntry[] }>(
   () => cluster.value ? `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}` : '',
   { watch: [cluster] },
 )
@@ -161,6 +162,19 @@ function fmtTime(ms: number): string {
       </tfoot>
     </table>
 
+    <details v-if="detail" class="config">
+      <summary>Configuration <span class="muted">— replication {{ detail.replication_factor }}, {{ detail.configs.length }} override{{ detail.configs.length === 1 ? '' : 's' }}</span></summary>
+      <table v-if="detail.configs.length" class="cfg">
+        <tbody>
+          <tr v-for="c in detail.configs" :key="c.name">
+            <td class="mono muted">{{ c.name }}</td>
+            <td class="mono">{{ c.value ?? '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted">No config overrides (broker defaults).</p>
+    </details>
+
     <h3 class="browse-h">Messages</h3>
     <form class="controls" @submit.prevent="search">
       <label>Partition
@@ -284,6 +298,10 @@ h2 code { color: var(--accent); }
 .parts th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.35rem 0.75rem 0.35rem 0; }
 .parts td { padding: 0.3rem 0.75rem 0.3rem 0; }
 .parts tfoot td { border-top: 1px solid var(--border); }
+.config { margin: 1rem 0; max-width: 560px; }
+.config summary { cursor: pointer; font-size: 0.9rem; }
+.cfg { border-collapse: collapse; margin-top: 0.5rem; }
+.cfg td { padding: 0.25rem 1rem 0.25rem 0; font-size: 0.82rem; }
 .browse-h { margin: 1.5rem 0 0; font-size: 1rem; }
 .controls { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
 .controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); }

@@ -28,6 +28,18 @@ struct TopicEntry {
 struct TopicSpec {
     #[serde(default)]
     num_partitions: i32,
+    #[serde(default)]
+    replication_factor: i32,
+    #[serde(default)]
+    configs: Vec<ConfigEntry>,
+}
+
+/// A topic config entry from `meta.json` (Kafka `CreatableTopicConfig`).
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ConfigEntry {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 /// One row in the topics list.
@@ -48,12 +60,14 @@ pub struct PartitionInfo {
     pub messages: i64,
 }
 
-/// Topic detail: partition table + totals.
+/// Topic detail: partition table + totals + configuration.
 #[derive(Serialize)]
 pub struct TopicDetail {
     pub name: String,
     pub partitions: Vec<PartitionInfo>,
     pub messages: i64,
+    pub replication_factor: i32,
+    pub configs: Vec<ConfigEntry>,
 }
 
 impl StorageSource {
@@ -104,6 +118,8 @@ impl StorageSource {
             .get(name)
             .ok_or_else(|| StorageError::TopicNotFound(name.to_string()))?;
         let partitions = entry.topic.num_partitions.max(0);
+        let replication_factor = entry.topic.replication_factor;
+        let configs = entry.topic.configs.clone();
 
         let watermarks =
             try_join_all((0..partitions).map(|p| self.watermark_or_empty(name, p))).await?;
@@ -124,6 +140,8 @@ impl StorageSource {
             name: name.to_string(),
             partitions: infos,
             messages,
+            replication_factor,
+            configs,
         })
     }
 }
