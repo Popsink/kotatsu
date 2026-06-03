@@ -120,11 +120,11 @@ docker run -p 8080:8080 ghcr.io/popsink/kotatsu:latest
 ## Kubernetes (Helm)
 
 A Helm chart is published as an OCI artifact to
-**`oci://ghcr.io/popsink/kotatsu/charts/kotatsu`** by the `chart-release`
+**`oci://ghcr.io/popsink/charts/kotatsu`** by the `chart-release`
 workflow.
 
 ```bash
-helm install kotatsu oci://ghcr.io/popsink/kotatsu/charts/kotatsu --version 0.1.1 \
+helm install kotatsu oci://ghcr.io/popsink/charts/kotatsu --version 0.1.1 \
   --set s3.bucket=tansu \
   --set s3.cluster=demo \
   --set koraUrl=http://kora:8080
