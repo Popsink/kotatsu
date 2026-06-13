@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-12
+
+### Fixed
+- Schema-registry HTTP client now has bounded timeouts (connect 2s / request
+  5s): an unreachable Kora fails fast instead of hanging ~25–30s on message
+  search.
+- A navigation loader (`NuxtLoadingIndicator`) is shown when moving between
+  pages (the `await useFetch` route suspense previously gave no feedback).
+- User-facing errors no longer leak the registry's internal REST route or
+  in-cluster URL — `subject '<name>' not found` / `schema registry is
+  unreachable` (details kept to server logs).
+
 ## [0.2.0] - 2026-06-03
 
 ### Added
@@ -68,6 +80,7 @@ Built with Rust (Axum) + Nuxt 3.
   the bundled frontend); `ci` workflow (fmt, clippy, unit + integration tests);
   `release` workflow publishing multi-arch images to `ghcr.io/popsink/kotatsu`.
 
+[0.2.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.0
