@@ -19,10 +19,12 @@ use serde_json::{json, Value};
 pub enum SchemaError {
     #[error("no schema registry configured")]
     NotConfigured,
-    #[error("subject '{0}' not found")]
-    SubjectNotFound(String),
-    #[error("schema registry request failed: {0}")]
-    Request(String),
+    /// The registry returned 404. User-facing context (which subject) is added
+    /// by the caller; internal route/URL details stay in the logs.
+    #[error("not found")]
+    NotFound,
+    #[error("schema registry is unreachable")]
+    Unreachable,
 }
 
 /// A cached schema entry, keyed by Confluent schema id.
@@ -94,21 +96,21 @@ impl SchemaRegistry {
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, SchemaError> {
         let url = format!("{}{path}", self.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| SchemaError::Request(e.to_string()))?;
+        let resp = self.http.get(&url).send().await.map_err(|e| {
+            tracing::warn!(%url, error = %e, "schema registry request failed");
+            SchemaError::Unreachable
+        })?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(SchemaError::SubjectNotFound(path.to_string()));
+            return Err(SchemaError::NotFound);
         }
-        let resp = resp
-            .error_for_status()
-            .map_err(|e| SchemaError::Request(e.to_string()))?;
-        resp.json::<T>()
-            .await
-            .map_err(|e| SchemaError::Request(e.to_string()))
+        let resp = resp.error_for_status().map_err(|e| {
+            tracing::warn!(%url, error = %e, "schema registry returned an error");
+            SchemaError::Unreachable
+        })?;
+        resp.json::<T>().await.map_err(|e| {
+            tracing::warn!(%url, error = %e, "schema registry response decode failed");
+            SchemaError::Unreachable
+        })
     }
 
     pub async fn subjects(&self) -> Result<Vec<String>, SchemaError> {
