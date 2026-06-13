@@ -8,6 +8,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -72,9 +73,17 @@ pub struct SchemaRegistry {
 
 impl SchemaRegistry {
     pub fn new(base_url: impl Into<String>) -> Self {
+        // Bounded timeouts so an unreachable registry (e.g. a Service scaled to
+        // 0 that drops packets) fails fast instead of hanging on OS-level TCP
+        // timeouts (~25–30 s). Read-only browsing must stay responsive.
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http,
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
