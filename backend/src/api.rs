@@ -75,8 +75,8 @@ impl From<SchemaError> for ApiError {
     fn from(err: SchemaError) -> Self {
         let status = match err {
             SchemaError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
-            SchemaError::SubjectNotFound(_) => StatusCode::NOT_FOUND,
-            SchemaError::Request(_) => StatusCode::BAD_GATEWAY,
+            SchemaError::NotFound => StatusCode::NOT_FOUND,
+            SchemaError::Unreachable => StatusCode::BAD_GATEWAY,
         };
         ApiError::new(status, err.to_string())
     }
@@ -303,14 +303,32 @@ pub async fn schemas(
     })))
 }
 
+/// Maps a registry error to a user-level message, naming the subject on 404
+/// (internal route/URL details stay in the server logs).
+fn subject_err(subject: &str) -> impl Fn(SchemaError) -> ApiError + '_ {
+    move |e| match e {
+        SchemaError::NotFound => ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("subject '{subject}' not found"),
+        ),
+        other => other.into(),
+    }
+}
+
 /// `GET /api/schemas/{subject}` — versions, latest schema, compatibility.
 pub async fn schema_subject(
     State(state): State<AppState>,
     Path(subject): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let registry = registry(&state)?;
-    let versions = registry.versions(&subject).await?;
-    let latest = registry.version(&subject, "latest").await?;
+    let versions = registry
+        .versions(&subject)
+        .await
+        .map_err(subject_err(&subject))?;
+    let latest = registry
+        .version(&subject, "latest")
+        .await
+        .map_err(subject_err(&subject))?;
     let compatibility = registry.compatibility(&subject).await;
     Ok(Json(json!({
         "subject": subject,
@@ -326,7 +344,10 @@ pub async fn schema_version(
     Path((subject, version)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let registry = registry(&state)?;
-    let schema = registry.version(&subject, &version).await?;
+    let schema = registry
+        .version(&subject, &version)
+        .await
+        .map_err(subject_err(&subject))?;
     Ok(Json(json!(schema)))
 }
 
