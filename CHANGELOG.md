@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-15
+
+### Added
+- **Python bindings** (`bindings/python`): the reader's full read API is now
+  consumable as an async Python extension (PyO3 + `pyo3-async-runtimes`,
+  abi3 wheel via maturin). An async `Source` exposes clusters, topics,
+  consumer groups (with lag), schemas and messages (formats + filters +
+  bounded scan), returning plain Python objects and raising `KotatsuError`.
+  Enables reading Tansu's S3 storage directly from Python services (e.g.
+  data-plane) without a Kafka broker.
+- CI builds and import-tests the wheel on CPython 3.12.
+
+### Changed
+- The message decode/filter/bounded-scan core moved into a reusable `query`
+  module shared by the HTTP API and the Python bindings, so both behave
+  identically. No HTTP API behavior change.
+
 ## [0.2.1] - 2026-06-12
 
 ### Fixed
