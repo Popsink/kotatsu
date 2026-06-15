@@ -11,9 +11,10 @@ use serde_json::{json, Value};
 
 use crate::{
     pagination::Page,
-    schema::{decode_field, FieldFormat, SchemaError, SchemaRegistry},
+    query::{self, MessageParams, QueryError},
+    schema::{SchemaError, SchemaRegistry},
     state::AppState,
-    storage::{OffsetSpec, StorageError, StorageSource},
+    storage::{StorageError, StorageSource},
 };
 
 /// Query params for paginated list endpoints (`?search=&limit=&offset=`).
@@ -79,6 +80,15 @@ impl From<SchemaError> for ApiError {
             SchemaError::Unreachable => StatusCode::BAD_GATEWAY,
         };
         ApiError::new(status, err.to_string())
+    }
+}
+
+impl From<QueryError> for ApiError {
+    fn from(err: QueryError) -> Self {
+        match err {
+            QueryError::BadRequest(msg) => ApiError::new(StatusCode::BAD_REQUEST, msg),
+            QueryError::Storage(e) => e.into(),
+        }
     }
 }
 
@@ -193,70 +203,10 @@ fn default_offset() -> String {
     "latest".to_string()
 }
 fn default_max_scan() -> usize {
-    5000
-}
-
-/// Hard cap on records scanned per filtered request — keeps the on-demand model
-/// honest (no unbounded S3 reads).
-const MAX_SCAN_CAP: usize = 50_000;
-
-/// A compiled needle for matching a decoded field's text.
-enum Needle {
-    Sub(String),
-    Re(regex::Regex),
-}
-
-impl Needle {
-    fn build(raw: &str, regex: bool) -> Result<Self, ApiError> {
-        if regex {
-            regex::Regex::new(raw)
-                .map(Needle::Re)
-                .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid regex: {e}")))
-        } else {
-            Ok(Needle::Sub(raw.to_lowercase()))
-        }
-    }
-    fn matches(&self, hay: &str) -> bool {
-        match self {
-            Needle::Sub(s) => hay.to_lowercase().contains(s),
-            Needle::Re(r) => r.is_match(hay),
-        }
-    }
-}
-
-/// Extracts the searchable text of a decoded field (`{kind, data, …}` → its data).
-fn searchable(field: &Value) -> String {
-    match field {
-        Value::Null => String::new(),
-        Value::Object(o) => match o.get("data") {
-            Some(Value::String(s)) => s.clone(),
-            Some(v) => v.to_string(),
-            None => field.to_string(),
-        },
-        other => other.to_string(),
-    }
+    query::DEFAULT_MAX_SCAN
 }
 fn default_limit() -> usize {
     50
-}
-
-/// Maximum records returned in one request.
-const MAX_LIMIT: usize = 500;
-
-fn parse_offset(raw: &str) -> Result<OffsetSpec, ApiError> {
-    let bad =
-        |what: &str| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid offset: {what}"));
-    match raw {
-        "earliest" => Ok(OffsetSpec::Earliest),
-        "latest" => Ok(OffsetSpec::Latest),
-        _ => {
-            if let Some(ts) = raw.strip_prefix("timestamp:") {
-                ts.parse().map(OffsetSpec::Timestamp).map_err(|_| bad(raw))
-            } else {
-                raw.parse().map(OffsetSpec::At).map_err(|_| bad(raw))
-            }
-        }
-    }
 }
 
 /// `GET /api/clusters/{cluster}/groups?search=&limit=&offset=`
@@ -362,135 +312,19 @@ pub async fn messages(
     Query(query): Query<MessagesQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
-
-    let spec = parse_offset(&query.offset)?;
-    let limit = query.limit.clamp(1, MAX_LIMIT);
-
-    let registry = state.registry.as_ref();
-    let value_format = FieldFormat::parse(query.value_format.as_deref());
-    let key_format = FieldFormat::parse(query.key_format.as_deref());
-
-    // Build filters; when any is set we scan forward up to `max_scan` records.
-    let key_needle = query
-        .key_contains
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| Needle::build(s, query.regex))
-        .transpose()?;
-    let value_needle = query
-        .value_contains
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| Needle::build(s, query.regex))
-        .transpose()?;
-    let header_key = query.header_key.as_deref().filter(|s| !s.is_empty());
-    let header_value = query.header_value.as_deref().filter(|s| !s.is_empty());
-    let filtering = key_needle.is_some() || value_needle.is_some() || header_key.is_some();
-
-    let scan_limit = if filtering {
-        query.max_scan.clamp(1, MAX_SCAN_CAP)
-    } else {
-        limit
+    let params = MessageParams {
+        partition: query.partition,
+        offset: query.offset,
+        limit: query.limit,
+        key_format: query.key_format,
+        value_format: query.value_format,
+        key_contains: query.key_contains,
+        value_contains: query.value_contains,
+        header_key: query.header_key,
+        header_value: query.header_value,
+        regex: query.regex,
+        max_scan: query.max_scan,
     };
-
-    let watermark = source.watermark(&topic, query.partition).await?;
-    let records = source
-        .fetch(&topic, query.partition, spec, scan_limit)
-        .await?;
-    let exhausted = records.len() < scan_limit; // fetched fewer than asked ⇒ end of partition
-
-    let mut rendered = Vec::new();
-    let mut scanned = 0usize;
-    for record in &records {
-        scanned += 1;
-        let key = decode_field(registry, &record.key, key_format).await;
-        let value = decode_field(registry, &record.value, value_format).await;
-
-        if filtering {
-            if let Some(n) = &key_needle {
-                if !n.matches(&searchable(&key)) {
-                    continue;
-                }
-            }
-            if let Some(n) = &value_needle {
-                if !n.matches(&searchable(&value)) {
-                    continue;
-                }
-            }
-            if let Some(hk) = header_key {
-                let hit = record.headers.iter().any(|h| {
-                    let k = h.key.as_deref().and_then(|b| std::str::from_utf8(b).ok());
-                    k == Some(hk)
-                        && match header_value {
-                            Some(hv) => h
-                                .value
-                                .as_deref()
-                                .and_then(|b| std::str::from_utf8(b).ok())
-                                .is_some_and(|v| v.contains(hv)),
-                            None => true,
-                        }
-                });
-                if !hit {
-                    continue;
-                }
-            }
-        }
-
-        rendered.push(json!({
-            "offset": record.offset,
-            "partition": record.partition,
-            "timestamp": record.timestamp,
-            "key": key,
-            "value": value,
-            "headers": record.headers.iter().map(|h| json!({
-                "key": h.key.as_ref().map(crate::schema::raw_field),
-                "value": h.value.as_ref().map(crate::schema::raw_field),
-            })).collect::<Vec<_>>(),
-        }));
-        if rendered.len() >= limit {
-            break;
-        }
-    }
-
-    Ok(Json(json!({
-        "partition": query.partition,
-        "watermark": watermark,
-        "count": rendered.len(),
-        "scanned": scanned,
-        "filtered": filtering,
-        "exhausted": exhausted && scanned == records.len(),
-        "records": rendered,
-    })))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn substring_needle_is_case_insensitive() {
-        let n = Needle::build("ORDER", false).unwrap();
-        assert!(n.matches("my-orders-topic"));
-        assert!(!n.matches("events"));
-    }
-
-    #[test]
-    fn regex_needle_matches_and_rejects_bad() {
-        let n = Needle::build("widget-[12]$", true).unwrap();
-        assert!(n.matches("widget-1"));
-        assert!(!n.matches("widget-3"));
-        assert!(Needle::build("[", true).is_err());
-    }
-
-    #[test]
-    fn searchable_extracts_field_data() {
-        assert_eq!(searchable(&Value::Null), "");
-        assert_eq!(
-            searchable(&json!({"kind": "utf8", "data": "hello"})),
-            "hello"
-        );
-        // Object data is stringified so substring search still works.
-        assert!(searchable(&json!({"kind": "avro", "data": {"id": 3}})).contains("\"id\":3"));
-    }
+    let body = query::messages(source, state.registry.as_ref(), &topic, &params).await?;
+    Ok(Json(body))
 }

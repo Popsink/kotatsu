@@ -1,0 +1,19 @@
+[package]
+name = "kotatsu-py"
+version = "0.2.1"
+edition = "2021"
+description = "Python bindings for the Kotatsu reader (Tansu S3 storage)"
+license = "Apache-2.0"
+
+[lib]
+name = "kotatsu"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Renamed to avoid colliding with the `kotatsu` Python module symbol below.
+kotatsu_core = { package = "kotatsu", path = "../../backend" }
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }
+pythonize = "0.24"
+serde = "1"
+serde_json = "1"

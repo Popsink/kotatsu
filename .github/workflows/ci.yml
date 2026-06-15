@@ -45,6 +45,33 @@ jobs:
           npm install --no-audit --no-fund
           npm run generate
 
+  python-bindings:
+    name: python wheel (maturin)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bindings/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install maturin
+        run: pip install 'maturin>=1.5,<2.0'
+      - name: build wheel
+        run: maturin build --release --out dist
+      - name: import smoke test
+        run: |
+          pip install dist/*.whl
+          python -c "import kotatsu; assert kotatsu.Source; assert kotatsu.KotatsuError; print('import ok')"
+
   integration:
     name: integration (MinIO + Tansu + Kora)
     runs-on: ubuntu-latest

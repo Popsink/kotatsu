@@ -7,6 +7,7 @@ pub mod api;
 pub mod config;
 pub mod http;
 pub mod pagination;
+pub mod query;
 pub mod schema;
 pub mod state;
 pub mod storage;
