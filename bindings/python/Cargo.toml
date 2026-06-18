@@ -1,6 +1,6 @@
 [package]
 name = "kotatsu-py"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Python bindings for the Kotatsu reader (Tansu S3 storage)"
 license = "Apache-2.0"

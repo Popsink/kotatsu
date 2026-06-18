@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-18
+
+### Added
+- **GCS storage backend** — Google Cloud Storage is now a supported storage
+  provider alongside S3. Set `KOTATSU_STORAGE_PROVIDER=gcs` (default: `s3`) to
+  read from a GCS bucket. Credentials are resolved from `GOOGLE_SERVICE_ACCOUNT`
+  (JSON key content), `GOOGLE_SERVICE_ACCOUNT_PATH`, or
+  `GOOGLE_APPLICATION_CREDENTIALS`; on GKE, Workload Identity is picked up
+  automatically with no credentials needed.
+
+### Changed
+- **Helm chart** — the `s3:` values section is renamed to `storage:` and gains
+  a `provider` field (`"s3"` or `"gcs"`, default `"s3"`). Existing S3
+  deployments must rename the key in their `values.yaml` / `--set` flags.
+- CI multi-arch images are now built with native runners instead of QEMU,
+  removing the emulation overhead from release builds.
+
 ## [0.3.0] - 2026-06-15
 
 ### Added
@@ -97,6 +114,7 @@ Built with Rust (Axum) + Nuxt 3.
   the bundled frontend); `ci` workflow (fmt, clippy, unit + integration tests);
   `release` workflow publishing multi-arch images to `ghcr.io/popsink/kotatsu`.
 
+[0.3.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.3.1
 [0.2.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.1.1
