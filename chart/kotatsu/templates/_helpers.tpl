@@ -76,30 +76,30 @@ imagePullSecrets:
 {{- end -}}
 
 {{/*
-Return the name of the S3 credentials secret.
+Return the name of the storage credentials secret.
 */}}
-{{- define "kotatsu.s3SecretName" -}}
-{{- if .Values.s3.existingSecret -}}
-{{- include "common.tplvalues.render" (dict "value" .Values.s3.existingSecret "context" $) -}}
+{{- define "kotatsu.storageSecretName" -}}
+{{- if .Values.storage.existingSecret -}}
+{{- include "common.tplvalues.render" (dict "value" .Values.storage.existingSecret "context" $) -}}
 {{- else -}}
-{{- printf "%s-s3" (include "common.names.fullname" .) -}}
+{{- printf "%s-storage" (include "common.names.fullname" .) -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
-Return true if a S3 credentials secret should be created.
+Return true if a storage credentials secret should be created.
 */}}
-{{- define "kotatsu.createS3Secret" -}}
-{{- if and .Values.s3.accessKey .Values.s3.secretKey (not .Values.s3.existingSecret) -}}
+{{- define "kotatsu.createStorageSecret" -}}
+{{- if and .Values.storage.accessKey .Values.storage.secretKey (not .Values.storage.existingSecret) -}}
 true
 {{- end -}}
 {{- end -}}
 
 {{/*
-Return true if S3 credentials are configured (static or existing secret).
+Return true if storage credentials are configured (static or existing secret).
 */}}
-{{- define "kotatsu.hasS3Credentials" -}}
-{{- if or .Values.s3.existingSecret (and .Values.s3.accessKey .Values.s3.secretKey) -}}
+{{- define "kotatsu.hasStorageCredentials" -}}
+{{- if or .Values.storage.existingSecret (and .Values.storage.accessKey .Values.storage.secretKey) -}}
 true
 {{- end -}}
 {{- end -}}

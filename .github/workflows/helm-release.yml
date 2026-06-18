@@ -82,7 +82,7 @@ jobs:
           fi
 
       - name: Lint chart
-        run: helm lint ${{ env.CHART_PATH }} --set s3.bucket=test --set s3.cluster=test
+        run: helm lint ${{ env.CHART_PATH }} --set storage.bucket=test --set storage.cluster=test
 
       - name: Package Helm chart
         run: |

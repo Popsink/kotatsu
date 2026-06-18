@@ -194,18 +194,22 @@ serviceAccount:
   automountServiceAccountToken: false
   annotations: {}
 
-## @section S3 storage configuration
-## @param s3.bucket S3 bucket name [required]
-## @param s3.cluster Tansu cluster ID [required] — must match the cluster ID used by Tansu
-## @param s3.endpoint Custom S3 endpoint URL (leave empty for AWS S3; set for MinIO or other S3-compatible stores)
-## @param s3.region S3 region
-## @param s3.forcePathStyle Use path-style addressing (required for MinIO)
-## @param s3.existingSecret Name of an existing secret with S3 credentials. Keys must match s3.secretKeys.
-## @param s3.accessKey Static S3 access key. Ignored when existingSecret is set or when using IAM/IRSA.
-## @param s3.secretKey Static S3 secret key. Ignored when existingSecret is set or when using IAM/IRSA.
-## @param s3.secretKeys.accessKey Key name in the secret for the access key
-## @param s3.secretKeys.secretKey Key name in the secret for the secret key
-s3:
+## @section Storage configuration
+## @param storage.provider Storage backend: "s3" (AWS S3, MinIO, R2, …) or "gcs" (Google Cloud Storage)
+## @param storage.bucket Bucket name [required] - just the bare bucket name, no gs:// prefix
+## @param storage.cluster Tansu cluster ID [required] — must match the cluster ID used by Tansu
+## @param storage.endpoint Custom S3 endpoint URL (leave empty for AWS S3; set for MinIO or other S3-compatible stores). Ignored for GCS.
+## @param storage.region S3 region. Ignored for GCS.
+## @param storage.forcePathStyle Use path-style addressing (required for MinIO). Ignored for GCS.
+## @param storage.existingSecret Name of an existing secret with S3 credentials. Keys must match s3.secretKeys. Ignored for GCS.
+## @param storage.accessKey Static S3 access key. Ignored when existingSecret is set or when using IAM/IRSA. Ignored for GCS.
+## @param storage.secretKey Static S3 secret key. Ignored when existingSecret is set or when using IAM/IRSA. Ignored for GCS.
+## @param storage.secretKeys.accessKey Key name in the secret for the access key
+## @param storage.secretKeys.secretKey Key name in the secret for the secret key
+## GCS credentials: set GOOGLE_SERVICE_ACCOUNT (JSON key content) or GOOGLE_APPLICATION_CREDENTIALS
+## via extraEnvVars / extraEnvVarsSecret, or use Workload Identity on GKE (no credentials needed).
+storage:
+  provider: "s3"
   bucket: ""
   cluster: ""
   endpoint: ""
