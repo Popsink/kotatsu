@@ -1,6 +1,6 @@
 [package]
 name = "kotatsu"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Read-only, on-demand browser over Tansu's native S3 storage"
 license = "Apache-2.0"
@@ -16,7 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
-object_store = { version = "0.12", features = ["aws"] }
+object_store = { version = "0.12", features = ["aws", "gcp"] }
 bytes = "1"
 futures = "0.3"
 # Kafka record-batch codec (sans-io). Pinned: tested against Tansu 0.6.x.
@@ -29,7 +29,7 @@ regex = "1"
 # Used only by the #[ignore]-gated integration tests under tests/.
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-object_store = { version = "0.12", features = ["aws"] }
+object_store = { version = "0.12", features = ["aws", "gcp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 apache-avro = "0.17"
 regex = "1"

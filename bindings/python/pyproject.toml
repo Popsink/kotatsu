@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "kotatsu"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python bindings for the Kotatsu reader — reads Tansu's native S3 storage directly (no Kafka broker)."
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }

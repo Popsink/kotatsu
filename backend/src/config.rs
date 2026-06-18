@@ -2,6 +2,28 @@
 
 use std::{env, net::SocketAddr};
 
+/// Which object-storage backend to connect to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StorageProvider {
+    /// AWS S3 or any S3-compatible store (MinIO, R2, …).
+    S3,
+    /// Google Cloud Storage.
+    Gcs,
+}
+
+impl StorageProvider {
+    fn from_env() -> Self {
+        match env::var("KOTATSU_STORAGE_PROVIDER")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "gcs" => StorageProvider::Gcs,
+            _ => StorageProvider::S3,
+        }
+    }
+}
+
 /// Backend configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -23,9 +45,11 @@ pub struct Config {
     pub kora_url: Option<String>,
 }
 
-/// Configuration for the single S3 source Kotatsu reads from.
+/// Configuration for the single object-storage source Kotatsu reads from.
 #[derive(Clone)]
 pub struct S3Config {
+    /// Storage backend (`KOTATSU_STORAGE_PROVIDER`, default `s3`).
+    pub provider: StorageProvider,
     /// Bucket holding Tansu's storage (`KOTATSU_S3_BUCKET`).
     pub bucket: String,
     /// Tansu cluster name = the `clusters/{cluster}/` prefix (`KOTATSU_CLUSTER`).
@@ -53,6 +77,7 @@ impl std::fmt::Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never log credentials.
         f.debug_struct("S3Config")
+            .field("provider", &self.provider)
             .field("bucket", &self.bucket)
             .field("cluster", &self.cluster)
             .field("endpoint", &self.endpoint)
@@ -92,6 +117,7 @@ impl S3Config {
     /// Builds the S3 config from the environment. Returns `None` unless both a
     /// bucket and a cluster name are set.
     fn from_env() -> Option<Self> {
+        let provider = StorageProvider::from_env();
         let bucket = non_empty("KOTATSU_S3_BUCKET")?;
         let cluster = non_empty("KOTATSU_CLUSTER")?;
         let endpoint = non_empty("KOTATSU_S3_ENDPOINT");
@@ -101,6 +127,7 @@ impl S3Config {
             .unwrap_or(false);
 
         Some(Self {
+            provider,
             bucket,
             cluster,
             region: non_empty("KOTATSU_S3_REGION").unwrap_or_else(|| "us-east-1".to_string()),

@@ -37,10 +37,10 @@ Kotatsu is a read-only browser for Tansu (Kafka-compatible) S3 storage.
 2. Check that all pods are running:
    kubectl get pods --namespace {{ include "common.names.namespace" . }} -l "{{ include "kotatsu.selectorLabels" . | replace ": " "=" | replace "\n" "," }}"
 
-{{- if not .Values.s3.accessKey }}
+{{- if not .Values.storage.accessKey }}
 
-NOTE: No static S3 credentials configured. Kotatsu will use the ambient AWS credential
-chain (IRSA / Pod Identity / instance role). Ensure the service account has the
-necessary permissions to access the bucket '{{ .Values.s3.bucket }}'.
+NOTE: No static storage credentials configured. Kotatsu will use the ambient credential
+chain (IRSA / Pod Identity / instance role for S3, Workload Identity for GCS). Ensure
+the service account has the necessary permissions to access the bucket '{{ .Values.storage.bucket }}'.
 
 {{- end }}
