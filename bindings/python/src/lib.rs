@@ -5,7 +5,7 @@
 //! `async` and integrate with asyncio (FastAPI etc.) via `pyo3-async-runtimes`.
 
 use kotatsu_core::{
-    config::S3Config,
+    config::{S3Config, StorageProvider},
     pagination::Page,
     query::{self, MessageParams, QueryError},
     schema::{SchemaError, SchemaRegistry},
@@ -44,12 +44,16 @@ struct Source {
 
 #[pymethods]
 impl Source {
-    /// Build a source. Credentials default to the ambient AWS chain when
-    /// `access_key`/`secret_key` are omitted.
+    /// Build a source. `provider` is `"s3"` (default) or `"gcs"`.
+    /// S3 credentials default to the ambient AWS chain when
+    /// `access_key`/`secret_key` are omitted. GCS credentials are read from
+    /// `GOOGLE_SERVICE_ACCOUNT` / `GOOGLE_APPLICATION_CREDENTIALS`, or picked
+    /// up automatically via Workload Identity on GKE.
     #[new]
     #[pyo3(signature = (
         bucket,
         cluster,
+        provider="s3",
         endpoint=None,
         region=None,
         access_key=None,
@@ -62,6 +66,7 @@ impl Source {
     fn new(
         bucket: String,
         cluster: String,
+        provider: &str,
         endpoint: Option<String>,
         region: Option<String>,
         access_key: Option<String>,
@@ -70,11 +75,21 @@ impl Source {
         force_path_style: bool,
         kora_url: Option<String>,
     ) -> PyResult<Self> {
+        let storage_provider = match provider.to_lowercase().as_str() {
+            "gcs" => StorageProvider::Gcs,
+            "s3" => StorageProvider::S3,
+            other => {
+                return Err(KotatsuError::new_err(format!(
+                    "unknown provider {other:?}: expected \"s3\" or \"gcs\""
+                )))
+            }
+        };
         let allow_http = endpoint
             .as_deref()
             .map(|e| e.starts_with("http://"))
             .unwrap_or(false);
         let cfg = S3Config {
+            provider: storage_provider,
             bucket,
             cluster,
             endpoint,
@@ -86,7 +101,7 @@ impl Source {
             allow_http,
         };
         let source = StorageSource::from_config(&cfg)
-            .map_err(|e| KotatsuError::new_err(format!("building S3 source: {e}")))?;
+            .map_err(|e| KotatsuError::new_err(format!("building storage source: {e}")))?;
         let registry = kora_url.map(SchemaRegistry::new);
         Ok(Self { source, registry })
     }

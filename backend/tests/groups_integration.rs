@@ -21,6 +21,7 @@ const TOPIC: &str = "kotatsu-it-topic";
 
 fn demo_source() -> StorageSource {
     let cfg = S3Config {
+        provider: kotatsu::config::StorageProvider::S3,
         bucket: "tansu".into(),
         cluster: "demo".into(),
         endpoint: Some("http://127.0.0.1:9000".into()),
