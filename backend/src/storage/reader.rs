@@ -27,14 +27,46 @@ struct WatermarkRaw {
 
 impl StorageSource {
     /// Reads a partition's low/high watermark.
+    ///
+    /// Tansu's S3 engine (beta.6+) persists `watermark.json` `high` *lazily* —
+    /// only on a cold `ListOffsets`/fetch, never on the produce hot path (that
+    /// would make `watermark.json` a per-write hot object). So a partition that
+    /// has been produced to but not yet consumed carries a null/zero `high` here
+    /// even though records exist. When the stored `high` is unusable we derive
+    /// the real one from the last record batch.
     pub async fn watermark(&self, topic: &str, partition: i32) -> Result<Watermark, StorageError> {
         let raw: WatermarkRaw = self
             .get_json(&self.keys().watermark(topic, partition))
             .await?;
-        Ok(Watermark {
-            low: raw.low.unwrap_or(0),
-            high: raw.high.unwrap_or(0),
-        })
+        let low = raw.low.unwrap_or(0);
+        let high = match raw.high {
+            Some(high) if high > low => high,
+            _ => match self.high_from_last_batch(topic, partition).await? {
+                Some(high) => high,
+                None => raw.high.unwrap_or(low),
+            },
+        };
+        Ok(Watermark { low, high })
+    }
+
+    /// Derives the high watermark from the last record batch object —
+    /// `base offset + lastOffsetDelta + 1` — for partitions whose stored
+    /// `watermark.json` high is null/stale. Reads only the last batch's header
+    /// (a small range GET), not its body. Returns `None` for a partition with no
+    /// record objects (genuinely empty).
+    async fn high_from_last_batch(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<Option<i64>, StorageError> {
+        let bases = self.list_base_offsets(topic, partition).await?;
+        match bases.last() {
+            None => Ok(None),
+            Some(&last) => {
+                let header = self.batch_header(topic, partition, last).await?;
+                Ok(Some(last + header.last_offset_delta as i64 + 1))
+            }
+        }
     }
 
     /// Lists the base offsets of every record batch in a partition, sorted

@@ -1,8 +1,9 @@
-//! Topic listing and detail, read from `meta.json` + per-partition watermarks.
+//! Topic listing and detail, read from per-topic metadata + watermarks.
 //!
-//! A topic is a directory under `clusters/{cluster}/topics/`; its partition
-//! count comes from `meta.json`. Stats are limited to what watermarks give
-//! (low/high, approximate count) — never a full `.batch` scan.
+//! Topic names and specs come from `clusters/{cluster}/topic-metadata/{name}.json`
+//! (Tansu's decomposed metadata), falling back to the legacy monolithic
+//! `meta.json` for clusters not yet migrated. Stats are limited to what
+//! watermarks give (low/high, approximate count) — never a full `.batch` scan.
 
 use std::collections::BTreeMap;
 
@@ -12,13 +13,17 @@ use serde::{Deserialize, Serialize};
 use super::{model::Watermark, StorageError, StorageSource};
 use crate::pagination::{Page, Paged};
 
-/// Minimal view of `meta.json` — only the topics map.
+/// Minimal view of the legacy `meta.json` — only the topics map (fallback for
+/// unmigrated clusters).
 #[derive(Deserialize)]
 struct MetaRaw {
     #[serde(default)]
     topics: BTreeMap<String, TopicEntry>,
 }
 
+/// One topic's metadata. Shared shape between a per-topic
+/// `topic-metadata/{name}.json` object and a `meta.json` topics entry — both are
+/// `{ id?, topic: { … } }`, and the unused `id` is ignored on deserialize.
 #[derive(Deserialize)]
 struct TopicEntry {
     topic: TopicSpec,
@@ -85,19 +90,68 @@ impl StorageSource {
         }
     }
 
+    /// Topic names for the configured cluster.
+    ///
+    /// Primary source is the per-topic metadata prefix
+    /// (`topic-metadata/{name}.json`, written by Tansu's decomposed metadata). A
+    /// cluster not yet migrated to per-topic objects (empty prefix) falls back to
+    /// the legacy monolithic `meta.json` topics map.
+    pub(super) async fn topic_names(&self) -> Result<Vec<String>, StorageError> {
+        let listed = self
+            .store()
+            .list_with_delimiter(Some(&self.keys().topic_metadata_prefix()))
+            .await?;
+
+        let mut names: Vec<String> = listed
+            .objects
+            .iter()
+            .filter_map(|o| {
+                o.location
+                    .filename()
+                    .and_then(|f| f.strip_suffix(".json"))
+                    .map(str::to_string)
+            })
+            .collect();
+
+        if names.is_empty() {
+            match self.get_json::<MetaRaw>(&self.keys().meta()).await {
+                Ok(meta) => names = meta.topics.into_keys().collect(),
+                Err(StorageError::NotFound(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
+    /// A topic's spec, preferring the per-topic object and falling back to the
+    /// legacy `meta.json` entry for an unmigrated cluster.
+    async fn topic_spec(&self, name: &str) -> Result<TopicSpec, StorageError> {
+        match self
+            .get_json::<TopicEntry>(&self.keys().topic_metadata(name))
+            .await
+        {
+            Ok(entry) => Ok(entry.topic),
+            Err(StorageError::NotFound(_)) => {
+                let mut meta: MetaRaw = self.get_json(&self.keys().meta()).await?;
+                meta.topics
+                    .remove(name)
+                    .map(|entry| entry.topic)
+                    .ok_or_else(|| StorageError::TopicNotFound(name.to_string()))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Lists topics (name, partition count, approximate message count), filtered
-    /// and paginated. Watermarks are read only for the returned page.
+    /// and paginated. Specs and watermarks are read only for the returned page.
     pub async fn list_topics(&self, page: &Page) -> Result<Paged<TopicSummary>, StorageError> {
-        let meta: MetaRaw = self.get_json(&self.keys().meta()).await?;
-        let (names, total) = page.select(meta.topics.keys().cloned().collect());
+        let (names, total) = page.select(self.topic_names().await?);
 
         let mut items = Vec::with_capacity(names.len());
         for name in names {
-            let partitions = meta
-                .topics
-                .get(&name)
-                .map(|e| e.topic.num_partitions.max(0))
-                .unwrap_or(0);
+            let partitions = self.topic_spec(&name).await?.num_partitions.max(0);
             let watermarks =
                 try_join_all((0..partitions).map(|p| self.watermark_or_empty(&name, p))).await?;
             let messages = watermarks.iter().map(Watermark::count).sum();
@@ -112,14 +166,10 @@ impl StorageSource {
 
     /// Reads a topic's per-partition watermarks.
     pub async fn topic_detail(&self, name: &str) -> Result<TopicDetail, StorageError> {
-        let meta: MetaRaw = self.get_json(&self.keys().meta()).await?;
-        let entry = meta
-            .topics
-            .get(name)
-            .ok_or_else(|| StorageError::TopicNotFound(name.to_string()))?;
-        let partitions = entry.topic.num_partitions.max(0);
-        let replication_factor = entry.topic.replication_factor;
-        let configs = entry.topic.configs.clone();
+        let spec = self.topic_spec(name).await?;
+        let partitions = spec.num_partitions.max(0);
+        let replication_factor = spec.replication_factor;
+        let configs = spec.configs.clone();
 
         let watermarks =
             try_join_all((0..partitions).map(|p| self.watermark_or_empty(name, p))).await?;
@@ -158,5 +208,24 @@ mod tests {
         let meta: MetaRaw = serde_json::from_slice(META).unwrap();
         let orders = meta.topics.get("orders").expect("orders topic present");
         assert_eq!(orders.topic.num_partitions, 1);
+    }
+
+    #[test]
+    fn parses_per_topic_object() {
+        // Shape of a `topic-metadata/{name}.json` object (Tansu's TopicMetadata
+        // { id, topic }); the `id` is ignored, the topic spec is extracted.
+        let json = serde_json::json!({
+            "id": "019ec674-8c31-70f0-abf1-7a0a136214bd",
+            "topic": {
+                "name": "orders",
+                "num_partitions": 3,
+                "replication_factor": 1,
+                "configs": [{ "name": "cleanup.policy", "value": "delete" }]
+            }
+        });
+        let entry: TopicEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.topic.num_partitions, 3);
+        assert_eq!(entry.topic.replication_factor, 1);
+        assert_eq!(entry.topic.configs.len(), 1);
     }
 }

@@ -47,6 +47,20 @@ impl Keys {
         Path::from(format!("clusters/{}/topics/", self.cluster))
     }
 
+    /// `clusters/{cluster}/topic-metadata/` — prefix for listing per-topic
+    /// metadata objects (Tansu's decomposed topic metadata).
+    pub fn topic_metadata_prefix(&self) -> Path {
+        Path::from(format!("clusters/{}/topic-metadata/", self.cluster))
+    }
+
+    /// `clusters/{cluster}/topic-metadata/{topic}.json`
+    pub fn topic_metadata(&self, topic: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/topic-metadata/{}.json",
+            self.cluster, topic
+        ))
+    }
+
     /// `clusters/{cluster}/topics/{topic}/partitions/` — prefix for listing partitions.
     pub fn partitions_prefix(&self, topic: &str) -> Path {
         Path::from(format!(

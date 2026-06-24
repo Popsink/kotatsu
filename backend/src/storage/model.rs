@@ -64,6 +64,9 @@ pub struct RecordHeader {
 /// whole batch — used by time-seek via a range GET.
 #[derive(Clone, Copy, Debug)]
 pub struct BatchHeader {
+    /// Offset of the last record in the batch, relative to `baseOffset`. The
+    /// batch's exclusive end offset is `base + last_offset_delta + 1`.
+    pub last_offset_delta: i32,
     pub base_timestamp: i64,
     pub max_timestamp: i64,
 }
@@ -75,15 +78,18 @@ impl BatchHeader {
 
     /// Parses the header from at least [`BatchHeader::PREFIX_LEN`] leading bytes.
     /// Field offsets per the Kafka record-batch format:
-    /// `baseTimestamp` @ 27, `maxTimestamp` @ 35 (both i64 big-endian).
+    /// `lastOffsetDelta` @ 23 (i32), `baseTimestamp` @ 27, `maxTimestamp` @ 35
+    /// (both i64), all big-endian.
     pub fn parse(prefix: &[u8]) -> Result<Self, StorageError> {
         if prefix.len() < Self::PREFIX_LEN as usize {
             return Err(StorageError::Decode("batch header too short".into()));
         }
-        let be = |o: usize| i64::from_be_bytes(prefix[o..o + 8].try_into().unwrap());
+        let be64 = |o: usize| i64::from_be_bytes(prefix[o..o + 8].try_into().unwrap());
+        let be32 = |o: usize| i32::from_be_bytes(prefix[o..o + 4].try_into().unwrap());
         Ok(Self {
-            base_timestamp: be(27),
-            max_timestamp: be(35),
+            last_offset_delta: be32(23),
+            base_timestamp: be64(27),
+            max_timestamp: be64(35),
         })
     }
 }
@@ -214,5 +220,7 @@ mod tests {
         let header = BatchHeader::parse(OFFSET_0).unwrap();
         assert!(header.base_timestamp > 0);
         assert!(header.max_timestamp >= header.base_timestamp);
+        // Single-record batch ⇒ last record sits at base + 0.
+        assert_eq!(header.last_offset_delta, 0);
     }
 }
