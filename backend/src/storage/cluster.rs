@@ -10,13 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{keys::Keys, StorageError, StorageSource};
 
-/// Counts the three top-level maps in `meta.json`.
-#[derive(Deserialize)]
+/// Counts the producer/transaction maps in `meta.json`. Topics are no longer
+/// sourced here — they live in per-topic objects (see [`StorageSource::topic_names`]).
+#[derive(Default, Deserialize)]
 struct MetaCounts {
     #[serde(default)]
     producers: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    topics: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     transactions: BTreeMap<String, serde_json::Value>,
 }
@@ -47,12 +46,19 @@ impl StorageSource {
         Ok(names)
     }
 
-    /// Summarizes the configured cluster's `meta.json`.
+    /// Summarizes the configured cluster: topic count from the per-topic objects,
+    /// producer/transaction counts from `meta.json` (absent on a fresh cluster
+    /// with no producers/transactions yet → zero).
     pub async fn cluster_summary(&self) -> Result<ClusterSummary, StorageError> {
-        let counts: MetaCounts = self.get_json(&self.keys().meta()).await?;
+        let topics = self.topic_names().await?.len();
+        let counts = match self.get_json::<MetaCounts>(&self.keys().meta()).await {
+            Ok(counts) => counts,
+            Err(StorageError::NotFound(_)) => MetaCounts::default(),
+            Err(err) => return Err(err),
+        };
         Ok(ClusterSummary {
             cluster: self.keys().cluster().to_string(),
-            topics: counts.topics.len(),
+            topics,
             producers: counts.producers.len(),
             transactions: counts.transactions.len(),
         })
