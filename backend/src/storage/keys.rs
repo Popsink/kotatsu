@@ -93,6 +93,17 @@ impl Keys {
         ))
     }
 
+    /// Start-after key for a bounded tail listing: `.../records/{offset:020}`
+    /// (no `.batch` suffix). It sorts immediately before that offset's batch
+    /// (`{offset:020}.batch`), so `list_with_offset` from here returns the batch
+    /// at `offset` and every later one — and nothing before it.
+    pub fn batch_floor(&self, topic: &str, partition: i32, offset: i64) -> Path {
+        Path::from(format!(
+            "clusters/{}/topics/{}/partitions/{:0>10}/records/{:0>20}",
+            self.cluster, topic, partition, offset
+        ))
+    }
+
     /// `clusters/{cluster}/groups/consumers/` — prefix for listing groups.
     pub fn groups_prefix(&self) -> Path {
         Path::from(format!("clusters/{}/groups/consumers/", self.cluster))
@@ -163,6 +174,23 @@ mod tests {
             "clusters/c1/groups/consumers/g1/offsets/orders/partitions/0000000000.json"
         );
         assert_eq!(k.groups_prefix().as_ref(), "clusters/c1/groups/consumers");
+    }
+
+    #[test]
+    fn batch_floor_sorts_between_previous_and_target_batch() {
+        let k = Keys::new("c1");
+        let floor = k.batch_floor("orders", 0, 5);
+        // start-after = floor → list returns keys strictly greater than it.
+        // The target batch (5) must be > floor (included), the previous (4) < floor.
+        assert!(
+            k.batch("orders", 0, 5).as_ref() > floor.as_ref(),
+            "batch 5 included"
+        );
+        assert!(
+            k.batch("orders", 0, 4).as_ref() < floor.as_ref(),
+            "batch 4 excluded"
+        );
+        assert!(!floor.as_ref().ends_with(".batch"));
     }
 
     #[test]
