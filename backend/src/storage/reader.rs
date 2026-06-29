@@ -28,44 +28,119 @@ struct WatermarkRaw {
 impl StorageSource {
     /// Reads a partition's low/high watermark.
     ///
-    /// Tansu's S3 engine (beta.6+) persists `watermark.json` `high` *lazily* —
-    /// only on a cold `ListOffsets`/fetch, never on the produce hot path (that
-    /// would make `watermark.json` a per-write hot object). So a partition that
-    /// has been produced to but not yet consumed carries a null/zero `high` here
-    /// even though records exist. When the stored `high` is unusable we derive
-    /// the real one from the last record batch.
+    /// In Tansu's beta.6 S3 engine `watermark.json` is only a *lazily persisted
+    /// hint*: `low`/`high` are written on a cold ListOffsets/fetch, never on the
+    /// produce hot path (that would make it a per-write hot object). So both can
+    /// be null or stale (frozen at the last cold read) while the real offsets
+    /// have moved far past. The record objects are the authority:
+    /// - `low`  — stored value if present, else the earliest surviving batch's
+    ///   base offset (the log start after retention/compaction), else 0.
+    /// - `high` — the last batch's `base + lastOffsetDelta + 1`, via a bounded
+    ///   tail scan floored by the stored/cached high (see
+    ///   [`Self::high_watermark`]).
     pub async fn watermark(&self, topic: &str, partition: i32) -> Result<Watermark, StorageError> {
         let raw: WatermarkRaw = self
             .get_json(&self.keys().watermark(topic, partition))
             .await?;
-        let low = raw.low.unwrap_or(0);
-        let high = match raw.high {
-            Some(high) if high > low => high,
-            _ => match self.high_from_last_batch(topic, partition).await? {
-                Some(high) => high,
-                None => raw.high.unwrap_or(low),
-            },
+
+        let low = match raw.low {
+            Some(low) => low,
+            None => self.first_base_offset(topic, partition).await?.unwrap_or(0),
         };
+        let high = self.high_watermark(topic, partition, raw.high).await?;
+
         Ok(Watermark { low, high })
     }
 
-    /// Derives the high watermark from the last record batch object —
-    /// `base offset + lastOffsetDelta + 1` — for partitions whose stored
-    /// `watermark.json` high is null/stale. Reads only the last batch's header
-    /// (a small range GET), not its body. Returns `None` for a partition with no
-    /// record objects (genuinely empty).
-    async fn high_from_last_batch(
+    /// True high watermark, derived from the record objects (the authority).
+    ///
+    /// `watermark.json` `high` is only a stale floor in beta.6, so trusting it
+    /// caps the watermark below the real tail. Instead: take the larger of the
+    /// in-memory cached high and the stored high as a floor, list only the
+    /// batches at/after it (`list_with_offset` — bounded, not a full-partition
+    /// scan), and take the last batch's `base + lastOffsetDelta + 1`. The high
+    /// is monotonic, so the cached floor never needs a TTL.
+    async fn high_watermark(
+        &self,
+        topic: &str,
+        partition: i32,
+        stored: Option<i64>,
+    ) -> Result<i64, StorageError> {
+        let floor = [self.cached_high(topic, partition), stored]
+            .into_iter()
+            .flatten()
+            .max();
+
+        let high = match self.tail_last_base(topic, partition, floor).await? {
+            Some(base) => {
+                let header = self.batch_header(topic, partition, base).await?;
+                base + header.last_offset_delta as i64 + 1
+            }
+            // No batch at/after the floor: the floor is the best we know.
+            None => floor.unwrap_or(0),
+        }
+        .max(floor.unwrap_or(0));
+
+        self.set_cached_high(topic, partition, high);
+        Ok(high)
+    }
+
+    /// Base offset of the earliest record batch (first key under `records/`),
+    /// or `None` when the partition has no batches.
+    async fn first_base_offset(
         &self,
         topic: &str,
         partition: i32,
     ) -> Result<Option<i64>, StorageError> {
-        let bases = self.list_base_offsets(topic, partition).await?;
-        match bases.last() {
-            None => Ok(None),
-            Some(&last) => {
-                let header = self.batch_header(topic, partition, last).await?;
-                Ok(Some(last + header.last_offset_delta as i64 + 1))
+        let prefix = self.keys().records_prefix(topic, partition);
+        let mut stream = self.store().list(Some(&prefix));
+        while let Some(meta) = stream.next().await {
+            if let Some(offset) = Keys::base_offset_from_batch(&meta?.location) {
+                return Ok(Some(offset));
             }
+        }
+        Ok(None)
+    }
+
+    /// Highest base offset at/after `floor`. With a floor, lists only the tail
+    /// (`list_with_offset`); cold (no floor) it falls back to a full scan.
+    async fn tail_last_base(
+        &self,
+        topic: &str,
+        partition: i32,
+        floor: Option<i64>,
+    ) -> Result<Option<i64>, StorageError> {
+        let prefix = self.keys().records_prefix(topic, partition);
+        let mut stream = match floor {
+            Some(f) => self
+                .store()
+                .list_with_offset(Some(&prefix), &self.keys().batch_floor(topic, partition, f)),
+            None => self.store().list(Some(&prefix)),
+        };
+        let mut last = None;
+        while let Some(meta) = stream.next().await {
+            if let Some(offset) = Keys::base_offset_from_batch(&meta?.location) {
+                last = Some(offset.max(last.unwrap_or(i64::MIN)));
+            }
+        }
+        Ok(last)
+    }
+
+    /// Cached high watermark for a partition, if computed earlier this process.
+    fn cached_high(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.high_cache
+            .lock()
+            .ok()?
+            .get(&(topic.to_string(), partition))
+            .copied()
+    }
+
+    /// Records a high watermark, only ever raising the cached value (the high is
+    /// monotonic, so a cached entry stays a valid floor).
+    fn set_cached_high(&self, topic: &str, partition: i32, high: i64) {
+        if let Ok(mut cache) = self.high_cache.lock() {
+            let entry = cache.entry((topic.to_string(), partition)).or_insert(high);
+            *entry = (*entry).max(high);
         }
     }
 
@@ -222,5 +297,77 @@ mod tests {
         assert_eq!(predecessor_index(&bases, 3), 1); // mid-batch → base 2
         assert_eq!(predecessor_index(&bases, 4), 2); // exact
         assert_eq!(predecessor_index(&bases, 100), 3); // past end → last batch
+    }
+
+    // Real single-record batch (lastOffsetDelta = 0) → high = base + 1.
+    const BATCH: &[u8] = include_bytes!("../../tests/fixtures/offset-0.batch");
+
+    async fn seed(store: &object_store::memory::InMemory, src: &StorageSource, base: i64) {
+        use object_store::{ObjectStore, PutPayload};
+        store
+            .put(
+                &src.keys().batch("t", 0, base),
+                PutPayload::from(BATCH.to_vec()),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// #72/#71: a stale `watermark.json` (high far below the real tail, null low)
+    /// must NOT cap the watermark — high is derived from the last batch, low from
+    /// the earliest batch.
+    #[tokio::test]
+    async fn high_derived_from_records_ignores_stale_watermark_floor() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+        // stale hint: high=5 (real tail is higher), low absent
+        store
+            .put(
+                &src.keys().watermark("t", 0),
+                PutPayload::from(br#"{"low":null,"high":5,"timestamps":null}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+        for base in [0_i64, 10, 20] {
+            seed(&store, &src, base).await;
+        }
+
+        let wm = src.watermark("t", 0).await.unwrap();
+        assert_eq!(
+            wm.high, 21,
+            "high = last base (20) + 1, not the stale floor 5"
+        );
+        assert_eq!(
+            wm.low, 0,
+            "low derived from earliest batch when null in file"
+        );
+    }
+
+    /// #73: the cached high floors the next bounded scan, and that scan still
+    /// catches batches appended above the floor.
+    #[tokio::test]
+    async fn cached_high_floors_scan_and_catches_new_tail() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+        store
+            .put(
+                &src.keys().watermark("t", 0),
+                PutPayload::from(br#"{"low":null,"high":null,"timestamps":null}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+        for base in [0_i64, 10, 20] {
+            seed(&store, &src, base).await;
+        }
+        assert_eq!(src.watermark("t", 0).await.unwrap().high, 21); // caches 21
+
+        seed(&store, &src, 30).await; // new batch above the cached floor
+        assert_eq!(
+            src.watermark("t", 0).await.unwrap().high,
+            31,
+            "bounded scan from the cached floor still finds the new tail"
+        );
     }
 }

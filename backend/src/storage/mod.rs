@@ -19,7 +19,8 @@ pub use keys::Keys;
 pub use model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, RecordHeader, Watermark};
 pub use topics::{PartitionInfo, TopicDetail, TopicSummary};
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use object_store::{aws::AmazonS3Builder, gcp::GoogleCloudStorageBuilder, path::Path, ObjectStore};
@@ -32,6 +33,11 @@ use crate::config::{S3Config, StorageProvider};
 pub struct StorageSource {
     store: Arc<dyn ObjectStore>,
     keys: Keys,
+    /// In-memory high-watermark cache, keyed by (topic, partition). The high
+    /// watermark is monotonic, so a cached value is always a valid floor for the
+    /// next bounded tail scan — no TTL. Shared across clones (and thus requests)
+    /// via the `Arc`.
+    high_cache: Arc<Mutex<HashMap<(String, i32), i64>>>,
 }
 
 impl StorageSource {
@@ -86,11 +92,22 @@ impl StorageSource {
         Ok(Self {
             store,
             keys: Keys::new(&cfg.cluster),
+            high_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     pub fn keys(&self) -> &Keys {
         &self.keys
+    }
+
+    /// Builds a source over an arbitrary (e.g. in-memory) store for tests.
+    #[cfg(test)]
+    pub(crate) fn with_store(store: Arc<dyn ObjectStore>, cluster: &str) -> Self {
+        Self {
+            store,
+            keys: Keys::new(cluster),
+            high_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// The underlying object store, for modules that need raw reads (#9).
