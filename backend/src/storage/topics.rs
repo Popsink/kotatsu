@@ -8,9 +8,10 @@
 use std::collections::BTreeMap;
 
 use futures::future::try_join_all;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use super::{model::Watermark, StorageError, StorageSource};
+use super::{keys::Keys, model::Watermark, StorageError, StorageSource};
 use crate::pagination::{Page, Paged};
 
 /// Minimal view of the legacy `meta.json` — only the topics map (fallback for
@@ -54,6 +55,9 @@ pub struct TopicSummary {
     pub partitions: i32,
     /// Approximate message count = Σ(high − low) over partitions.
     pub messages: i64,
+    /// On-disk size in S3 (compressed bytes of the record segments) across all
+    /// partitions. `0` for an empty topic.
+    pub storage_bytes: i64,
 }
 
 /// Per-partition offsets for the topic detail view.
@@ -63,6 +67,9 @@ pub struct PartitionInfo {
     pub low: i64,
     pub high: i64,
     pub messages: i64,
+    /// On-disk size in S3 (compressed bytes of this partition's record
+    /// segments). `0` when the partition has no batches.
+    pub storage_bytes: i64,
 }
 
 /// Topic detail: partition table + totals + configuration.
@@ -71,6 +78,9 @@ pub struct TopicDetail {
     pub name: String,
     pub partitions: Vec<PartitionInfo>,
     pub messages: i64,
+    /// On-disk size in S3 (compressed bytes of the record segments) across all
+    /// partitions. `0` for an empty topic.
+    pub storage_bytes: i64,
     pub replication_factor: i32,
     pub configs: Vec<ConfigEntry>,
 }
@@ -133,6 +143,36 @@ impl StorageSource {
         Ok(self.topic_spec(name).await?.num_partitions.max(0))
     }
 
+    /// Per-partition on-disk size (compressed bytes of the record segments),
+    /// computed from S3 object metadata in a single recursive listing of the
+    /// topic's `partitions/` prefix — cheap (object `size`, no content scan) and
+    /// one list call regardless of partition count. Only `.batch` segment objects
+    /// count; the tiny `watermark.json` sidecars are excluded. Partitions with no
+    /// batches are simply absent from the map (callers default them to `0`).
+    async fn partition_storage_bytes(
+        &self,
+        topic: &str,
+    ) -> Result<BTreeMap<i32, i64>, StorageError> {
+        let prefix = self.keys().partitions_prefix(topic);
+        let mut sizes: BTreeMap<i32, i64> = BTreeMap::new();
+        let mut stream = self.store().list(Some(&prefix));
+        while let Some(meta) = stream.next().await {
+            let meta = meta?;
+            if meta
+                .location
+                .parts()
+                .last()
+                .is_none_or(|f| !f.as_ref().ends_with(".batch"))
+            {
+                continue;
+            }
+            if let Some(p) = Keys::partition_from_records_path(&meta.location) {
+                *sizes.entry(p).or_insert(0) += meta.size as i64;
+            }
+        }
+        Ok(sizes)
+    }
+
     /// A topic's spec, preferring the per-topic object and falling back to the
     /// legacy `meta.json` entry for an unmigrated cluster.
     async fn topic_spec(&self, name: &str) -> Result<TopicSpec, StorageError> {
@@ -163,10 +203,12 @@ impl StorageSource {
             let watermarks =
                 try_join_all((0..partitions).map(|p| self.watermark_or_empty(&name, p))).await?;
             let messages = watermarks.iter().map(Watermark::count).sum();
+            let storage_bytes = self.partition_storage_bytes(&name).await?.values().sum();
             items.push(TopicSummary {
                 name,
                 partitions,
                 messages,
+                storage_bytes,
             });
         }
         Ok(Paged::new(items, total, page))
@@ -181,6 +223,7 @@ impl StorageSource {
 
         let watermarks =
             try_join_all((0..partitions).map(|p| self.watermark_or_empty(name, p))).await?;
+        let storage = self.partition_storage_bytes(name).await?;
 
         let infos: Vec<PartitionInfo> = watermarks
             .into_iter()
@@ -190,14 +233,17 @@ impl StorageSource {
                 low: wm.low,
                 high: wm.high,
                 messages: wm.count(),
+                storage_bytes: storage.get(&(p as i32)).copied().unwrap_or(0),
             })
             .collect();
 
         let messages = infos.iter().map(|p| p.messages).sum();
+        let storage_bytes = infos.iter().map(|p| p.storage_bytes).sum();
         Ok(TopicDetail {
             name: name.to_string(),
             partitions: infos,
             messages,
+            storage_bytes,
             replication_factor,
             configs,
         })
@@ -216,6 +262,42 @@ mod tests {
         let meta: MetaRaw = serde_json::from_slice(META).unwrap();
         let orders = meta.topics.get("orders").expect("orders topic present");
         assert_eq!(orders.topic.num_partitions, 1);
+    }
+
+    #[tokio::test]
+    async fn partition_storage_bytes_sums_batch_objects_per_partition() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        // Two batches on partition 0, one on partition 1.
+        for (part, base, len) in [(0, 0_i64, 100_usize), (0, 10, 55), (1, 0, 40)] {
+            store
+                .put(
+                    &src.keys().batch("orders", part, base),
+                    PutPayload::from(vec![0u8; len]),
+                )
+                .await
+                .unwrap();
+        }
+        // A watermark.json sidecar must NOT be counted as storage.
+        store
+            .put(
+                &src.keys().watermark("orders", 0),
+                PutPayload::from(vec![0u8; 999]),
+            )
+            .await
+            .unwrap();
+
+        let sizes = src.partition_storage_bytes("orders").await.unwrap();
+        assert_eq!(sizes.get(&0), Some(&155)); // 100 + 55, watermark excluded
+        assert_eq!(sizes.get(&1), Some(&40));
+        // An empty topic yields an empty map (callers default to 0).
+        assert!(src
+            .partition_storage_bytes("empty")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
