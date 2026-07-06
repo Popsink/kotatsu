@@ -151,6 +151,16 @@ impl Keys {
         let name = name.as_ref().strip_suffix(".batch")?;
         name.get(..20)?.parse().ok()
     }
+
+    /// The partition index encoded in a record-batch object path
+    /// `.../partitions/{partition:010}/records/{offset:020}.batch` → the
+    /// zero-padded partition. Used to attribute an object's bytes to a partition
+    /// when a whole topic is listed in one pass.
+    pub fn partition_from_records_path(path: &Path) -> Option<i32> {
+        let parts: Vec<String> = path.parts().map(|p| p.as_ref().to_string()).collect();
+        let idx = parts.iter().position(|p| p == "partitions")?;
+        parts.get(idx + 1)?.parse().ok()
+    }
 }
 
 #[cfg(test)]
@@ -201,5 +211,19 @@ mod tests {
 
         let not_batch = k.watermark("orders", 3);
         assert_eq!(Keys::base_offset_from_batch(&not_batch), None);
+    }
+
+    #[test]
+    fn parses_partition_from_records_path() {
+        let k = Keys::new("c1");
+        let p = k.batch("orders", 7, 1234);
+        assert_eq!(Keys::partition_from_records_path(&p), Some(7));
+        // The watermark object also sits under partitions/{p}/ and resolves too.
+        assert_eq!(
+            Keys::partition_from_records_path(&k.watermark("orders", 3)),
+            Some(3)
+        );
+        // A path with no partitions segment yields None.
+        assert_eq!(Keys::partition_from_records_path(&k.meta()), None);
     }
 }
