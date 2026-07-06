@@ -38,14 +38,19 @@ const keySubject = computed(() => subjects.value.includes(`${topic}-key`) ? `${t
 interface ConsumingGroup { group: string; offsets: { partition: number; lag: number }[] }
 const topicGroups = ref<ConsumingGroup[] | null>(null)
 const loadingGroups = ref(false)
+const groupsError = ref(false)
 async function loadGroups() {
   if (!cluster.value) return
   loadingGroups.value = true
+  groupsError.value = false
   try {
     const r = await $fetch<any>(`/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/groups`)
     topicGroups.value = r.groups
   } catch {
+    // Distinguish a failed load from a topic that genuinely has no groups (#66):
+    // keep the panel expanded but flag the error so the template can say so.
     topicGroups.value = []
+    groupsError.value = true
   } finally {
     loadingGroups.value = false
   }
@@ -165,14 +170,24 @@ function exportNdjson() {
   )
 }
 const copied = ref<number | null>(null)
+const copyFailed = ref<number | null>(null)
 async function copyMsg(r: Record) {
   try {
     await navigator.clipboard.writeText(JSON.stringify(r, null, 2))
+    copyFailed.value = null
     copied.value = r.offset
     setTimeout(() => {
       if (copied.value === r.offset) copied.value = null
     }, 1500)
-  } catch {}
+  } catch {
+    // Clipboard write can reject (denied permission, insecure context, oversized
+    // payload); surface it instead of leaving the user thinking the copy worked (#65).
+    copied.value = null
+    copyFailed.value = r.offset
+    setTimeout(() => {
+      if (copyFailed.value === r.offset) copyFailed.value = null
+    }, 1500)
+  }
 }
 
 function fieldText(f: FieldValue): string {
@@ -246,7 +261,8 @@ function fmtTime(ms: number): string {
       </button>
       <template v-else>
         <span class="muted">Consumer groups:</span>
-        <span v-if="!topicGroups.length" class="muted">none</span>
+        <span v-if="groupsError" class="err">couldn't load consumer groups</span>
+        <span v-else-if="!topicGroups.length" class="muted">none</span>
         <NuxtLink v-for="g in topicGroups" :key="g.group" :to="`/groups/${encodeURIComponent(g.group)}`" class="link">
           {{ g.group }} <span class="muted">(lag {{ groupLag(g) }})</span>
         </NuxtLink>
@@ -369,8 +385,8 @@ function fmtTime(ms: number): string {
                 <span class="lbl">headers</span>
                 <pre>{{ r.headers.map(h => `${fieldText(h.key)}: ${fieldText(h.value)}`).join('\n') }}</pre>
               </div>
-              <button type="button" class="ghost copy" @click="copyMsg(r)">
-                {{ copied === r.offset ? 'Copied ✓' : 'Copy JSON' }}
+              <button type="button" class="ghost copy" :class="{ copyfail: copyFailed === r.offset }" @click="copyMsg(r)">
+                {{ copied === r.offset ? 'Copied ✓' : copyFailed === r.offset ? 'Copy failed' : 'Copy JSON' }}
               </button>
             </td>
           </tr>
@@ -401,6 +417,7 @@ h2 code { color: var(--accent); }
 .exporttb { display: flex; gap: 0.5rem; margin: 0.75rem 0 0; }
 .exporttb .ghost, .copy { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
 .copy { margin-top: 0.5rem; }
+.copy.copyfail { color: var(--err); border-color: var(--err); }
 .controls { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin: 0.75rem 0 0.5rem; }
 .controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); }
 .controls input, .controls select { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem; }
