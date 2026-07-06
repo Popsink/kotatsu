@@ -125,6 +125,14 @@ impl StorageSource {
         Ok(names)
     }
 
+    /// A topic's partition count, or [`StorageError::TopicNotFound`] if the
+    /// topic has no metadata object. Used to validate `partition` query params
+    /// before touching the storage layout (so an out-of-range partition yields a
+    /// clean error instead of a leaked object key — #63).
+    pub async fn topic_partitions(&self, name: &str) -> Result<i32, StorageError> {
+        Ok(self.topic_spec(name).await?.num_partitions.max(0))
+    }
+
     /// A topic's spec, preferring the per-topic object and falling back to the
     /// legacy `meta.json` entry for an unmigrated cluster.
     async fn topic_spec(&self, name: &str) -> Result<TopicSpec, StorageError> {

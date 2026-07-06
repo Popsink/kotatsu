@@ -43,6 +43,17 @@ pub fn parse_offset(raw: &str) -> Result<OffsetSpec, QueryError> {
     }
 }
 
+/// User-facing message for an out-of-range partition — names the requested
+/// partition and the topic's real count, without exposing any storage layout.
+fn partition_out_of_range(partition: i32, partitions: i32) -> String {
+    format!(
+        "partition {} out of range (topic has {} partition{})",
+        partition,
+        partitions,
+        if partitions == 1 { "" } else { "s" },
+    )
+}
+
 /// A compiled needle for matching a decoded field's text.
 enum Needle {
     Sub(String),
@@ -126,6 +137,19 @@ pub async fn messages(
     p: &MessageParams,
 ) -> Result<Value, QueryError> {
     let spec = parse_offset(&p.offset)?;
+
+    // Validate topic + partition up front so a missing topic or an out-of-range
+    // partition returns a clean, distinct error rather than a storage NotFound
+    // whose message leaks the internal S3 object key (#63). A missing topic
+    // surfaces as `StorageError::TopicNotFound` from `topic_partitions`.
+    let partitions = source.topic_partitions(topic).await?;
+    if p.partition < 0 || p.partition >= partitions {
+        return Err(QueryError::BadRequest(partition_out_of_range(
+            p.partition,
+            partitions,
+        )));
+    }
+
     let limit = p.limit.clamp(1, MAX_LIMIT);
     let key_format = FieldFormat::parse(p.key_format.as_deref());
     let value_format = FieldFormat::parse(p.value_format.as_deref());
@@ -247,6 +271,16 @@ mod tests {
             "hello"
         );
         assert!(searchable(&json!({"kind": "avro", "data": {"id": 3}})).contains("\"id\":3"));
+    }
+
+    #[test]
+    fn partition_out_of_range_message_is_sanitized_and_pluralized() {
+        // Names the partition + real count, never a storage object key (#63).
+        let single = partition_out_of_range(999, 1);
+        assert_eq!(single, "partition 999 out of range (topic has 1 partition)");
+        let many = partition_out_of_range(5, 3);
+        assert_eq!(many, "partition 5 out of range (topic has 3 partitions)");
+        assert!(!single.contains("watermark") && !single.contains("clusters/"));
     }
 
     #[test]
