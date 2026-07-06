@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-06
+
+### Added
+- **Per-topic storage size** — the topic API now exposes `storage_bytes`, the
+  physical on-disk size in S3 (compressed bytes of the record segments):
+  top-level and per-partition on `GET /api/clusters/{cluster}/topics/{topic}`,
+  and a per-topic total on the topics list. Computed from S3 object metadata in
+  a single recursive listing of the topic's `partitions/` prefix (no content
+  scan). Fills the data-plane datamodel Usage tab's "Storage size" tile (#76).
+
+### Fixed
+- **Storage errors no longer leak the S3 object layout** — storage-layer
+  not-found responses returned the raw object key (e.g.
+  `clusters/tansu/topics/x/partitions/0000000000/watermark.json`), exposing the
+  bucket path layout and partition encoding. A missing topic and an
+  out-of-range partition now return distinct, sanitized messages; the raw key
+  stays in the server logs only, mirroring the schema-registry error hygiene
+  (#63).
+- **Invisible failure states on the topic page** — a failed consumer-groups
+  load rendered as "none", indistinguishable from a topic with zero groups, and
+  now shows "couldn't load consumer groups" (#66); a rejected "Copy JSON" was
+  silently swallowed, leaving the button on its default label, and now shows a
+  transient "Copy failed" (#65).
+
 ## [0.3.3] - 2026-06-25
 
 ### Fixed
@@ -138,6 +162,7 @@ Built with Rust (Axum) + Nuxt 3.
   the bundled frontend); `ci` workflow (fmt, clippy, unit + integration tests);
   `release` workflow publishing multi-arch images to `ghcr.io/popsink/kotatsu`.
 
+[0.4.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.4.0
 [0.3.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.3.1
 [0.2.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.0
