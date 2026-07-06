@@ -57,18 +57,30 @@ impl IntoResponse for ApiError {
 
 impl From<StorageError> for ApiError {
     fn from(err: StorageError) -> Self {
-        let status = match err {
-            StorageError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
-            StorageError::NotFound(_) => StatusCode::NOT_FOUND,
-            StorageError::ClusterNotFound(_) => StatusCode::NOT_FOUND,
-            StorageError::TopicNotFound(_) => StatusCode::NOT_FOUND,
-            StorageError::GroupNotFound(_) => StatusCode::NOT_FOUND,
-            StorageError::Unreachable(_) => StatusCode::BAD_GATEWAY,
-            StorageError::Decode(_) | StorageError::Parse { .. } | StorageError::ObjectStore(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
+        match err {
+            // User-facing, already sanitized (no internal layout in the message).
+            StorageError::NotConfigured => {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, err.to_string())
             }
-        };
-        ApiError::new(status, err.to_string())
+            StorageError::ClusterNotFound(_)
+            | StorageError::TopicNotFound(_)
+            | StorageError::GroupNotFound(_) => {
+                ApiError::new(StatusCode::NOT_FOUND, err.to_string())
+            }
+            StorageError::Unreachable(_) => ApiError::new(StatusCode::BAD_GATEWAY, err.to_string()),
+
+            // Internal-detail-bearing errors: the raw object key / store error
+            // stays in the server logs only; the client gets a generic message
+            // so we don't leak the S3 object layout (#63, same class as #56).
+            StorageError::NotFound(_) => {
+                tracing::warn!(error = %err, "storage object not found");
+                ApiError::new(StatusCode::NOT_FOUND, "not found")
+            }
+            StorageError::Decode(_) | StorageError::Parse { .. } | StorageError::ObjectStore(_) => {
+                tracing::error!(error = %err, "storage read failed");
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal storage error")
+            }
+        }
     }
 }
 
