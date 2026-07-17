@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-17
+
+### Added
+- **Tansu coalesced record-batch objects** — with Tansu's server-side produce
+  coalescing (Tansu `#50`), a `records/{base}.batch` object can hold several
+  Kafka record batches concatenated (a `deflated::Frame`), still named by the
+  first batch's base offset. Each object is now decoded as a sequence of
+  batches: absolute offsets run from the object-name base, advancing by
+  `lastOffsetDelta + 1` per sub-batch; control sub-batches are skipped
+  individually; the high watermark sums the tail object's span over all its
+  sub-batches; and time-seek compares against each object's newest timestamp
+  across all sub-batches. A single-batch object is a one-element frame and
+  decodes exactly as before (#80).
+
 ## [0.4.0] - 2026-07-06
 
 ### Added
@@ -162,6 +176,7 @@ Built with Rust (Axum) + Nuxt 3.
   the bundled frontend); `ci` workflow (fmt, clippy, unit + integration tests);
   `release` workflow publishing multi-arch images to `ghcr.io/popsink/kotatsu`.
 
+[0.5.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Popsink/kotatsu/releases/tag/v0.4.0
 [0.3.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.3.1
 [0.2.1]: https://github.com/Popsink/kotatsu/releases/tag/v0.2.1
