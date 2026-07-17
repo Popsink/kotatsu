@@ -94,48 +94,118 @@ impl BatchHeader {
     }
 }
 
+/// Splits a `.batch` object into its constituent sub-batch byte slices.
+///
+/// With Tansu's produce coalescing (#50) one object may hold several record
+/// batches concatenated (a `deflated::Frame`), each on the wire as
+/// `base_offset (i64) + batch_length (i32) + batch_length bytes`
+/// (`12 + batch_length` total). A legacy or non-coalesced object is a
+/// one-element frame. A trailing run that does not form a whole batch is
+/// ignored, mirroring `deflated::Batch::try_from`.
+fn split_frame(bytes: &Bytes) -> Vec<Bytes> {
+    // base_offset (i64) + batch_length (i32) precede the `batch_length` body.
+    const PREFIX: usize = 12;
+
+    let mut slices = Vec::new();
+    let mut offset = 0usize;
+    while offset + PREFIX <= bytes.len() {
+        let len = i32::from_be_bytes(bytes[offset + 8..offset + PREFIX].try_into().unwrap());
+        let total = match usize::try_from(len) {
+            Ok(len) => PREFIX + len,
+            Err(_) => break,
+        };
+        if offset + total > bytes.len() {
+            break;
+        }
+        slices.push(bytes.slice(offset..offset + total));
+        offset += total;
+    }
+    slices
+}
+
+/// Total offset span of a frame: `Σ (last_offset_delta + 1)` over its
+/// sub-batches. This is the number of offsets the object occupies (which after
+/// compaction can exceed the record count), used to derive the high watermark
+/// of a coalesced tail object. Parses only fixed batch headers — no inflation.
+pub fn frame_offset_span(bytes: &Bytes) -> i64 {
+    split_frame(bytes)
+        .iter()
+        .filter_map(|slice| BatchHeader::parse(slice).ok())
+        .map(|h| h.last_offset_delta as i64 + 1)
+        .sum()
+}
+
+/// Largest `maxTimestamp` over a frame's sub-batches — the object's newest
+/// record time, used by frame-aware time-seek. A coalesced object's newest
+/// record sits in its last sub-batch, so the first header alone under-reports
+/// it. Returns `None` for a frame with no parseable sub-batch.
+pub fn frame_max_timestamp(bytes: &Bytes) -> Option<i64> {
+    split_frame(bytes)
+        .iter()
+        .filter_map(|slice| BatchHeader::parse(slice).ok())
+        .map(|h| h.max_timestamp)
+        .max()
+}
+
 /// Decodes a `.batch` object into records with **absolute** offsets.
 ///
+/// An object may hold a single batch (legacy / coalescing off) or several
+/// batches concatenated (Tansu coalescing, #50); both are handled — a
+/// single-batch object yields byte-for-byte the same records as before.
+///
 /// Critical: the absolute offset comes from the filename's base offset, not the
-/// batch's own `base_offset` field (Tansu overwrites the latter). Control
-/// batches (transaction markers) are skipped — they carry no user records.
+/// batch's own `base_offset` field (Tansu overwrites the latter). Within a
+/// coalesced object the running base advances by each sub-batch's offset span
+/// (`last_offset_delta + 1`), so the second sub-batch starts where the first
+/// ended. Control batches (transaction markers) are skipped individually but
+/// still advance the running base — they occupy offsets.
 pub fn decode_batch(
     bytes: Bytes,
     base_offset: i64,
     partition: i32,
 ) -> Result<Vec<DecodedRecord>, StorageError> {
-    let deflated =
-        deflated::Batch::try_from(bytes).map_err(|e| StorageError::Decode(e.to_string()))?;
+    let mut out = Vec::new();
+    let mut sub_base = base_offset;
 
-    if deflated.is_control() {
-        return Ok(Vec::new());
+    for slice in split_frame(&bytes) {
+        let deflated =
+            deflated::Batch::try_from(slice).map_err(|e| StorageError::Decode(e.to_string()))?;
+        // The offset span of this sub-batch, captured before `deflated` is
+        // consumed by inflation. Advances the running base even for control
+        // batches, which occupy offsets but carry no user records.
+        let span = deflated.last_offset_delta as i64 + 1;
+
+        if deflated.is_control() {
+            sub_base += span;
+            continue;
+        }
+
+        let inflated =
+            inflated::Batch::try_from(deflated).map_err(|e| StorageError::Decode(e.to_string()))?;
+        let base_timestamp = inflated.base_timestamp;
+
+        out.extend(inflated.records.into_iter().map(|r| {
+            DecodedRecord {
+                offset: sub_base + r.offset_delta as i64,
+                partition,
+                timestamp: base_timestamp + r.timestamp_delta,
+                key: r.key,
+                value: r.value,
+                headers: r
+                    .headers
+                    .into_iter()
+                    .map(|h| RecordHeader {
+                        key: h.key,
+                        value: h.value,
+                    })
+                    .collect(),
+            }
+        }));
+
+        sub_base += span;
     }
 
-    let inflated =
-        inflated::Batch::try_from(deflated).map_err(|e| StorageError::Decode(e.to_string()))?;
-    let base_timestamp = inflated.base_timestamp;
-
-    let records = inflated
-        .records
-        .into_iter()
-        .map(|r| DecodedRecord {
-            offset: base_offset + r.offset_delta as i64,
-            partition,
-            timestamp: base_timestamp + r.timestamp_delta,
-            key: r.key,
-            value: r.value,
-            headers: r
-                .headers
-                .into_iter()
-                .map(|h| RecordHeader {
-                    key: h.key,
-                    value: h.value,
-                })
-                .collect(),
-        })
-        .collect();
-
-    Ok(records)
+    Ok(out)
 }
 
 /// Serializes optional bytes as a UTF-8 string when valid, else hex — matching
@@ -179,6 +249,17 @@ mod tests {
     // Real `.batch` objects produced by Tansu (one message per batch).
     const OFFSET_0: &[u8] = include_bytes!("../../tests/fixtures/offset-0.batch");
     const OFFSET_2: &[u8] = include_bytes!("../../tests/fixtures/offset-2.batch");
+    const OFFSET_4: &[u8] = include_bytes!("../../tests/fixtures/offset-4.batch");
+
+    /// Concatenates single-batch objects into one coalesced-frame object, the
+    /// exact wire layout Tansu's coalescing produce path writes (#50).
+    fn coalesced(parts: &[&[u8]]) -> Bytes {
+        let mut buf = Vec::new();
+        for part in parts {
+            buf.extend_from_slice(part);
+        }
+        Bytes::from(buf)
+    }
 
     fn key_str(r: &DecodedRecord) -> String {
         String::from_utf8(r.key.as_ref().unwrap().to_vec()).unwrap()
@@ -213,6 +294,49 @@ mod tests {
         // own `base_offset` field, the absolute offset must follow the argument.
         let records = decode_batch(Bytes::from_static(OFFSET_0), 99, 0).unwrap();
         assert_eq!(records[0].offset, 99);
+    }
+
+    #[test]
+    fn decodes_coalesced_frame_with_running_absolute_offsets() {
+        // Two single-record batches concatenated = one coalesced object, named
+        // by the first batch's base offset. Each sub-batch spans one offset, so
+        // the second record sits at object_base + 1 — driven by the running
+        // base, not either fixture's own `base_offset` field.
+        let records = decode_batch(coalesced(&[OFFSET_0, OFFSET_2]), 0, 0).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].offset, 0);
+        assert_eq!(records[1].offset, 1);
+        assert_eq!(key_str(&records[0]), "key-1");
+        assert_eq!(key_str(&records[1]), "key-3");
+        assert!(records[1].timestamp > 0);
+    }
+
+    #[test]
+    fn coalesced_frame_offsets_run_from_the_object_base() {
+        let records = decode_batch(coalesced(&[OFFSET_0, OFFSET_2, OFFSET_4]), 100, 0).unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            [100, 101, 102]
+        );
+    }
+
+    #[test]
+    fn frame_offset_span_sums_sub_batches() {
+        // Three single-record sub-batches ⇒ span 3.
+        assert_eq!(
+            frame_offset_span(&coalesced(&[OFFSET_0, OFFSET_2, OFFSET_4])),
+            3
+        );
+        // A legacy single-batch object is a one-element frame ⇒ span 1.
+        assert_eq!(frame_offset_span(&Bytes::from_static(OFFSET_0)), 1);
+    }
+
+    #[test]
+    fn frame_max_timestamp_covers_the_latest_sub_batch() {
+        let single = frame_max_timestamp(&Bytes::from_static(OFFSET_0)).unwrap();
+        let frame = frame_max_timestamp(&coalesced(&[OFFSET_0, OFFSET_2])).unwrap();
+        // The frame's newest record is at least as new as its first sub-batch's.
+        assert!(frame >= single);
     }
 
     #[test]
