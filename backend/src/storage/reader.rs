@@ -4,8 +4,10 @@
 //! - Absolute offset = filename base offset + record `offset_delta`.
 //! - To read from offset X we use the **predecessor** batch (largest base
 //!   offset ≤ X), because X may sit mid-batch.
-//! - Time-seek reads batch headers via range GETs; the `watermark.json`
-//!   `timestamps` map is always null in S3 storage and is not used.
+//! - Time-seek and the high-watermark tail read the tail/probe object in full,
+//!   because a coalesced object (Tansu #50) holds several batches and its span
+//!   and newest timestamp span all of them, not just the leading header; the
+//!   `watermark.json` `timestamps` map is always null in S3 storage and unused.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -14,7 +16,9 @@ use serde::Deserialize;
 
 use super::{
     keys::Keys,
-    model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, Watermark},
+    model::{
+        decode_batch, frame_max_timestamp, frame_offset_span, DecodedRecord, OffsetSpec, Watermark,
+    },
     StorageError, StorageSource,
 };
 
@@ -73,8 +77,12 @@ impl StorageSource {
 
         let high = match self.tail_last_base(topic, partition, floor).await? {
             Some(base) => {
-                let header = self.batch_header(topic, partition, base).await?;
-                base + header.last_offset_delta as i64 + 1
+                // The tail object may be coalesced, so its span covers all its
+                // sub-batches, not just the first header.
+                let bytes = self
+                    .get_bytes(&self.keys().batch(topic, partition, base))
+                    .await?;
+                base + frame_offset_span(&bytes)
             }
             // No batch at/after the floor: the floor is the best we know.
             None => floor.unwrap_or(0),
@@ -212,12 +220,15 @@ impl StorageSource {
         Ok(out)
     }
 
-    /// Returns the base offset of the first batch that could contain a record
-    /// at or after `target_ts`, found by binary-searching batch headers (each
-    /// read with a small range GET — no full-batch downloads).
+    /// Returns the base offset of the first object that could contain a record
+    /// at or after `target_ts`, found by binary-searching objects on their
+    /// newest timestamp.
     ///
-    /// Slightly over-inclusive: the returned batch may start with a few records
-    /// older than `target_ts`. Returns `high` when no batch reaches the target.
+    /// An object may be coalesced (Tansu #50), so its newest record sits in its
+    /// last sub-batch; the search compares against the object's max timestamp
+    /// across all sub-batches, which needs the full object. Slightly
+    /// over-inclusive: the returned object may start with a few records older
+    /// than `target_ts`. Returns `high` when no object reaches the target.
     pub async fn seek_time(
         &self,
         topic: &str,
@@ -229,12 +240,15 @@ impl StorageSource {
             return Ok(0);
         }
 
-        // Leftmost batch whose max_timestamp >= target_ts.
+        // Leftmost object whose max_timestamp >= target_ts.
         let (mut lo, mut hi) = (0usize, bases.len());
         while lo < hi {
             let mid = (lo + hi) / 2;
-            let header = self.batch_header(topic, partition, bases[mid]).await?;
-            if header.max_timestamp >= target_ts {
+            let max_ts = self
+                .object_max_timestamp(topic, partition, bases[mid])
+                .await?;
+            // A frame with no parseable sub-batch can't reach the target.
+            if max_ts.is_some_and(|ts| ts >= target_ts) {
                 hi = mid;
             } else {
                 lo = mid + 1;
@@ -247,20 +261,17 @@ impl StorageSource {
         }
     }
 
-    /// Reads just the fixed header of a batch via a range GET.
-    async fn batch_header(
+    /// The newest record timestamp of an object, across all its sub-batches.
+    async fn object_max_timestamp(
         &self,
         topic: &str,
         partition: i32,
         base: i64,
-    ) -> Result<BatchHeader, StorageError> {
-        let path = self.keys().batch(topic, partition, base);
+    ) -> Result<Option<i64>, StorageError> {
         let bytes = self
-            .store()
-            .get_range(&path, 0..BatchHeader::PREFIX_LEN)
-            .await
-            .map_err(|e| StorageError::from_object(e, &path))?;
-        BatchHeader::parse(&bytes)
+            .get_bytes(&self.keys().batch(topic, partition, base))
+            .await?;
+        Ok(frame_max_timestamp(&bytes))
     }
 
     /// Reads an object's full bytes.
@@ -299,8 +310,9 @@ mod tests {
         assert_eq!(predecessor_index(&bases, 100), 3); // past end → last batch
     }
 
-    // Real single-record batch (lastOffsetDelta = 0) → high = base + 1.
+    // Real single-record batches (lastOffsetDelta = 0) → each spans one offset.
     const BATCH: &[u8] = include_bytes!("../../tests/fixtures/offset-0.batch");
+    const BATCH2: &[u8] = include_bytes!("../../tests/fixtures/offset-2.batch");
 
     async fn seed(store: &object_store::memory::InMemory, src: &StorageSource, base: i64) {
         use object_store::{ObjectStore, PutPayload};
@@ -309,6 +321,25 @@ mod tests {
                 &src.keys().batch("t", 0, base),
                 PutPayload::from(BATCH.to_vec()),
             )
+            .await
+            .unwrap();
+    }
+
+    /// Seeds a coalesced object (several batches concatenated, Tansu #50) at
+    /// `base`, named by the first sub-batch's offset.
+    async fn seed_coalesced(
+        store: &object_store::memory::InMemory,
+        src: &StorageSource,
+        base: i64,
+        parts: &[&[u8]],
+    ) {
+        use object_store::{ObjectStore, PutPayload};
+        let mut buf = Vec::new();
+        for part in parts {
+            buf.extend_from_slice(part);
+        }
+        store
+            .put(&src.keys().batch("t", 0, base), PutPayload::from(buf))
             .await
             .unwrap();
     }
@@ -368,6 +399,55 @@ mod tests {
             src.watermark("t", 0).await.unwrap().high,
             31,
             "bounded scan from the cached floor still finds the new tail"
+        );
+    }
+
+    /// #80: when the tail object is coalesced, the high watermark must span
+    /// every sub-batch, not just the first — else it under-reports the tail.
+    #[tokio::test]
+    async fn high_watermark_spans_all_sub_batches_of_coalesced_tail() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+        store
+            .put(
+                &src.keys().watermark("t", 0),
+                PutPayload::from(br#"{"low":null,"high":null,"timestamps":null}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+        seed(&store, &src, 0).await; // legacy single batch at 0
+                                     // Tail object at base 10 holds two single-record batches ⇒ span 2.
+        seed_coalesced(&store, &src, 10, &[BATCH, BATCH2]).await;
+
+        assert_eq!(
+            src.watermark("t", 0).await.unwrap().high,
+            12,
+            "high = tail base (10) + span over both sub-batches (2)"
+        );
+    }
+
+    /// #80: reading a coalesced object returns every record with contiguous
+    /// absolute offsets, end-to-end through `fetch`.
+    #[tokio::test]
+    async fn fetch_returns_all_records_of_a_coalesced_object() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+        store
+            .put(
+                &src.keys().watermark("t", 0),
+                PutPayload::from(br#"{"low":null,"high":null,"timestamps":null}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+        seed_coalesced(&store, &src, 0, &[BATCH, BATCH2]).await;
+
+        let records = src.fetch("t", 0, OffsetSpec::Earliest, 100).await.unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            [0, 1],
+            "both sub-batch records surface, with contiguous offsets"
         );
     }
 }
