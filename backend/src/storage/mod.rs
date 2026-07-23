@@ -10,6 +10,7 @@ mod groups;
 mod keys;
 mod model;
 mod reader;
+mod segment;
 mod topics;
 
 pub use cluster::ClusterSummary;
