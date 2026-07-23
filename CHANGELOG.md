@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-23
+
+### Added
+- **Cached topic/group catalog** — listing and searching topics and consumer
+  groups are now served from a short-TTL in-process cache instead of re-scanning
+  the object store on every request. The name index is cached (so search filters
+  an in-memory list per keystroke rather than re-listing the prefix), and the
+  per-row summaries (topic partition/message/size counts; group state/members)
+  are filled lazily as pages are served and reused within the TTL. Warmed on a
+  miss with no background poller; per-cluster and per-process, like the existing
+  high-watermark and segment-footer caches. Detail views remain exact and
+  uncached (#84).
+
 ## [0.6.0] - 2026-07-23
 
 ### Added
