@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use super::{keys::Keys, StorageError, StorageSource};
+use super::{catalog, keys::Keys, StorageError, StorageSource};
 use crate::pagination::{Page, Paged};
 
 // --- Mirrored `tansu-storage` JSON shapes (only the fields we use) ---
@@ -55,7 +55,7 @@ struct OffsetCommitRaw {
 
 // --- API view types ---
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct GroupSummary {
     pub name: String,
     pub state: &'static str,
@@ -196,10 +196,39 @@ impl StorageSource {
     /// Lists consumer groups (one `{group}.json` per group), filtered and
     /// paginated. `GroupDetail` is read only for the returned page.
     pub async fn list_groups(&self, page: &Page) -> Result<Paged<GroupSummary>, StorageError> {
+        let (names, total) = page.select(self.catalog_group_names().await?);
+
+        let mut items = Vec::with_capacity(names.len());
+        for name in names {
+            let summary = match catalog::cached_summary(&self.group_catalog, &name) {
+                Some(summary) => summary,
+                None => {
+                    let summary = self.compute_group_summary(&name).await?;
+                    catalog::store_summary(&self.group_catalog, name, summary.clone());
+                    summary
+                }
+            };
+            items.push(summary);
+        }
+        Ok(Paged::new(items, total, page))
+    }
+
+    /// The group-name index, served from the short-TTL catalog cache and
+    /// re-listed only on a miss (#84).
+    async fn catalog_group_names(&self) -> Result<Vec<String>, StorageError> {
+        if let Some(names) = catalog::fresh_names(&self.group_catalog) {
+            return Ok(names);
+        }
+        let names = self.group_names().await?;
+        catalog::set_names(&self.group_catalog, names.clone());
+        Ok(names)
+    }
+
+    /// Lists consumer-group names (one `{group}.json` per group).
+    async fn group_names(&self) -> Result<Vec<String>, StorageError> {
         let prefix = self.keys().groups_prefix();
         let listed = self.store().list_with_delimiter(Some(&prefix)).await?;
-
-        let names: Vec<String> = listed
+        let mut names: Vec<String> = listed
             .objects
             .iter()
             .filter_map(|meta| {
@@ -209,18 +238,19 @@ impl StorageSource {
                     .map(str::to_string)
             })
             .collect();
-        let (names, total) = page.select(names);
+        names.sort();
+        Ok(names)
+    }
 
-        let mut items = Vec::with_capacity(names.len());
-        for name in names {
-            let detail: GroupDetailRaw = self.get_json(&self.keys().group(&name)).await?;
-            items.push(GroupSummary {
-                state: derive_state(&detail),
-                members: detail.members.len(),
-                name,
-            });
-        }
-        Ok(Paged::new(items, total, page))
+    /// Computes one group's list-row summary (state + member count) from its
+    /// `{group}.json`. Cached per row by [`list_groups`].
+    async fn compute_group_summary(&self, name: &str) -> Result<GroupSummary, StorageError> {
+        let detail: GroupDetailRaw = self.get_json(&self.keys().group(name)).await?;
+        Ok(GroupSummary {
+            state: derive_state(&detail),
+            members: detail.members.len(),
+            name: name.to_string(),
+        })
     }
 
     /// Reads a group's metadata, committed offsets and lag.
@@ -412,5 +442,39 @@ mod tests {
         );
         assert_eq!(value_to_bytes(&serde_json::json!([300])), None);
         assert_eq!(value_to_bytes(&serde_json::json!("nope")), None);
+    }
+
+    /// #84: the consumer-group catalog is cached like the topic catalog — after
+    /// warming, listing and search are served from memory within the TTL.
+    #[tokio::test]
+    async fn group_catalog_serves_listing_from_cache() {
+        use crate::pagination::Page;
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        store
+            .put(&src.keys().group("g1"), PutPayload::from(GROUP.to_vec()))
+            .await
+            .unwrap();
+
+        let first = src.list_groups(&Page::new(None, 50, 0)).await.unwrap();
+        assert_eq!(first.total, 1);
+        let warmed_state = first.items[0].state;
+
+        // Remove the object; within the TTL the catalog still answers.
+        store.delete(&src.keys().group("g1")).await.unwrap();
+        let cached = src.list_groups(&Page::new(None, 50, 0)).await.unwrap();
+        assert_eq!(cached.total, 1, "name index served from cache");
+        assert_eq!(
+            cached.items[0].state, warmed_state,
+            "summary served from cache"
+        );
+
+        let miss = src
+            .list_groups(&Page::new(Some("zzz".into()), 50, 0))
+            .await
+            .unwrap();
+        assert_eq!(miss.total, 0, "search resolves against the cached index");
     }
 }

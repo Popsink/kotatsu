@@ -11,7 +11,7 @@ use futures::future::try_join_all;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use super::{keys::Keys, model::Watermark, StorageError, StorageSource};
+use super::{catalog, keys::Keys, model::Watermark, StorageError, StorageSource};
 use crate::pagination::{Page, Paged};
 
 /// Minimal view of the legacy `meta.json` — only the topics map (fallback for
@@ -49,7 +49,7 @@ pub struct ConfigEntry {
 }
 
 /// One row in the topics list.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TopicSummary {
     pub name: String,
     pub partitions: i32,
@@ -195,23 +195,49 @@ impl StorageSource {
     /// Lists topics (name, partition count, approximate message count), filtered
     /// and paginated. Specs and watermarks are read only for the returned page.
     pub async fn list_topics(&self, page: &Page) -> Result<Paged<TopicSummary>, StorageError> {
-        let (names, total) = page.select(self.topic_names().await?);
+        let (names, total) = page.select(self.catalog_topic_names().await?);
 
         let mut items = Vec::with_capacity(names.len());
         for name in names {
-            let partitions = self.topic_spec(&name).await?.num_partitions.max(0);
-            let watermarks =
-                try_join_all((0..partitions).map(|p| self.watermark_or_empty(&name, p))).await?;
-            let messages = watermarks.iter().map(Watermark::count).sum();
-            let storage_bytes = self.partition_storage_bytes(&name).await?.values().sum();
-            items.push(TopicSummary {
-                name,
-                partitions,
-                messages,
-                storage_bytes,
-            });
+            let summary = match catalog::cached_summary(&self.topic_catalog, &name) {
+                Some(summary) => summary,
+                None => {
+                    let summary = self.compute_topic_summary(&name).await?;
+                    catalog::store_summary(&self.topic_catalog, name, summary.clone());
+                    summary
+                }
+            };
+            items.push(summary);
         }
         Ok(Paged::new(items, total, page))
+    }
+
+    /// The topic-name index, served from the short-TTL catalog cache and
+    /// re-listed only on a miss (#84) — so listing and every debounced search
+    /// keystroke filter an in-memory list instead of re-scanning `topic-metadata/`.
+    async fn catalog_topic_names(&self) -> Result<Vec<String>, StorageError> {
+        if let Some(names) = catalog::fresh_names(&self.topic_catalog) {
+            return Ok(names);
+        }
+        let names = self.topic_names().await?;
+        catalog::set_names(&self.topic_catalog, names.clone());
+        Ok(names)
+    }
+
+    /// Computes one topic's list-row summary (partition count, approximate
+    /// message count, on-disk bytes) from S3. Cached per row by [`list_topics`].
+    async fn compute_topic_summary(&self, name: &str) -> Result<TopicSummary, StorageError> {
+        let partitions = self.topic_spec(name).await?.num_partitions.max(0);
+        let watermarks =
+            try_join_all((0..partitions).map(|p| self.watermark_or_empty(name, p))).await?;
+        let messages = watermarks.iter().map(Watermark::count).sum();
+        let storage_bytes = self.partition_storage_bytes(name).await?.values().sum();
+        Ok(TopicSummary {
+            name: name.to_string(),
+            partitions,
+            messages,
+            storage_bytes,
+        })
     }
 
     /// Reads a topic's per-partition watermarks.
@@ -298,6 +324,62 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// #84: once warmed, listing and search are served from the in-process
+    /// catalog within the TTL — no S3 re-scan and no per-row re-fetch. Proven by
+    /// deleting every object after warming and still getting the right answer.
+    #[tokio::test]
+    async fn catalog_serves_listing_and_search_from_cache() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        let meta = serde_json::json!({
+            "topic": { "name": "orders", "num_partitions": 1, "replication_factor": 1, "configs": [] }
+        });
+        store
+            .put(
+                &src.keys().topic_metadata("orders"),
+                PutPayload::from(serde_json::to_vec(&meta).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                &src.keys().watermark("orders", 0),
+                PutPayload::from(br#"{"low":0,"high":5,"timestamps":null}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+
+        // Warm the cache.
+        let first = src.list_topics(&Page::new(None, 50, 0)).await.unwrap();
+        assert_eq!(first.total, 1);
+        assert_eq!(first.items[0].messages, 5);
+
+        // Remove every object; within the TTL the catalog still answers.
+        for p in [
+            src.keys().topic_metadata("orders"),
+            src.keys().watermark("orders", 0),
+        ] {
+            store.delete(&p).await.unwrap();
+        }
+        let cached = src.list_topics(&Page::new(None, 50, 0)).await.unwrap();
+        assert_eq!(cached.total, 1, "name index served from cache");
+        assert_eq!(cached.items[0].messages, 5, "row summary served from cache");
+
+        // Search resolves against the cached name index (no re-scan).
+        let hit = src
+            .list_topics(&Page::new(Some("ord".into()), 50, 0))
+            .await
+            .unwrap();
+        assert_eq!(hit.total, 1);
+        let miss = src
+            .list_topics(&Page::new(Some("zzz".into()), 50, 0))
+            .await
+            .unwrap();
+        assert_eq!(miss.total, 0);
     }
 
     #[test]
