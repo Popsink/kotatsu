@@ -21,6 +21,7 @@
 //! monotonic but, because compaction (#66) rewrites merged low-offset segments
 //! under a fresh higher sequence, sequence order is **not** offset order.
 
+#[cfg(test)]
 use bytes::Bytes;
 
 use super::StorageError;
@@ -230,6 +231,54 @@ pub fn decode_whole_segment(bytes: &Bytes) -> Result<FooterOutcome, StorageError
     decode_segment_footer(bytes)
 }
 
+/// One sub-stream to place in a test segment: `(topic, partition, base_offset,
+/// record_count, region_bytes, max_timestamp)`. `region_bytes` is the
+/// sub-stream's concatenated `RecordBatch` wire bytes (e.g. real `.batch`
+/// fixtures joined).
+#[cfg(test)]
+pub(crate) type TestRegion<'a> = (&'a str, i32, i64, i64, &'a [u8], i64);
+
+/// Builds a v1/v2 segment object (regions, then footer, then the 18-byte
+/// trailer) the way Tansu's writer does — for reader integration tests. Emits no
+/// producer coordinates (their skip-decode is covered by a dedicated unit test).
+#[cfg(test)]
+pub(crate) fn build_test_segment(version: u16, writer_epoch: i64, regions: &[TestRegion]) -> Bytes {
+    let v2 = version >= SEGMENT_FORMAT_VERSION_V2;
+    let mut body = Vec::new();
+    let mut footer = Vec::new();
+    footer.extend_from_slice(&writer_epoch.to_be_bytes());
+    if v2 {
+        footer.extend_from_slice(&0u64.to_be_bytes()); // nonce
+    }
+
+    for (topic, partition, base_offset, record_count, region, max_ts) in regions {
+        let byte_start = body.len() as u64;
+        body.extend_from_slice(region);
+        let byte_len = body.len() as u64 - byte_start;
+
+        let t = topic.as_bytes();
+        footer.extend_from_slice(&(t.len() as u16).to_be_bytes());
+        footer.extend_from_slice(t);
+        footer.extend_from_slice(&partition.to_be_bytes());
+        footer.extend_from_slice(&base_offset.to_be_bytes());
+        footer.extend_from_slice(&record_count.to_be_bytes());
+        footer.extend_from_slice(&byte_start.to_be_bytes());
+        footer.extend_from_slice(&byte_len.to_be_bytes());
+        footer.extend_from_slice(&max_ts.to_be_bytes());
+        if v2 {
+            footer.extend_from_slice(&0u16.to_be_bytes()); // pcoord_count
+        }
+    }
+
+    let mut out = body;
+    out.extend_from_slice(&footer);
+    out.extend_from_slice(&(footer.len() as u64).to_be_bytes());
+    out.extend_from_slice(&(regions.len() as u32).to_be_bytes());
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&SEGMENT_MAGIC.to_be_bytes());
+    Bytes::from(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +308,7 @@ mod tests {
         }
 
         /// Append a sub-stream region of `region` raw bytes.
+        #[allow(clippy::too_many_arguments)]
         fn region(
             mut self,
             topic: &str,
@@ -342,7 +392,10 @@ mod tests {
         assert_eq!(footer.writer_epoch, 0);
         assert_eq!(footer.entries.len(), 2);
         let e = footer.get("orders", 0).unwrap();
-        assert_eq!((e.base_offset, e.record_count, e.end_offset()), (100, 3, 103));
+        assert_eq!(
+            (e.base_offset, e.record_count, e.end_offset()),
+            (100, 3, 103)
+        );
         assert_eq!((e.byte_start, e.byte_len), (0, 4));
         assert_eq!(e.max_timestamp, 555);
         let e1 = footer.get("orders", 1).unwrap();
@@ -365,7 +418,10 @@ mod tests {
         assert_eq!(footer.entries.len(), 2);
         assert_eq!(footer.get("t", 0).unwrap().max_timestamp, 10);
         let e1 = footer.get("t", 1).unwrap();
-        assert_eq!(e1.byte_start, 4, "second region starts after the first (4B)");
+        assert_eq!(
+            e1.byte_start, 4,
+            "second region starts after the first (4B)"
+        );
         assert_eq!(e1.record_count, 4);
     }
 
@@ -373,10 +429,7 @@ mod tests {
     fn legacy_object_without_trailer_is_legacy() {
         // Bytes whose trailing 4 do not spell TSEG.
         let bytes = Bytes::from_static(b"not-a-segment-just-record-bytes");
-        assert_eq!(
-            decode_whole_segment(&bytes).unwrap(),
-            FooterOutcome::Legacy
-        );
+        assert_eq!(decode_whole_segment(&bytes).unwrap(), FooterOutcome::Legacy);
         // Too short to even hold a trailer → legacy.
         assert_eq!(
             decode_whole_segment(&Bytes::from_static(b"tiny")).unwrap(),

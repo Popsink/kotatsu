@@ -11,6 +11,7 @@ mod keys;
 mod model;
 mod reader;
 mod segment;
+mod segview;
 mod topics;
 
 pub use cluster::ClusterSummary;
@@ -39,6 +40,12 @@ pub struct StorageSource {
     /// next bounded tail scan — no TTL. Shared across clones (and thus requests)
     /// via the `Arc`.
     high_cache: Arc<Mutex<HashMap<(String, i32), i64>>>,
+    /// In-memory segment-footer cache, keyed by the segment object's full path.
+    /// Segments are immutable and create-only, so a decoded footer never changes
+    /// — no TTL. Each query still re-lists the prefix to discover new/compacted
+    /// segments; this only spares re-reading a footer already seen. Shared across
+    /// clones via the `Arc`.
+    segment_footers: Arc<Mutex<HashMap<String, segment::SegmentFooter>>>,
 }
 
 impl StorageSource {
@@ -94,6 +101,7 @@ impl StorageSource {
             store,
             keys: Keys::new(&cfg.cluster),
             high_cache: Arc::new(Mutex::new(HashMap::new())),
+            segment_footers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -108,6 +116,7 @@ impl StorageSource {
             store,
             keys: Keys::new(cluster),
             high_cache: Arc::new(Mutex::new(HashMap::new())),
+            segment_footers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
