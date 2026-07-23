@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-23
+
+### Added
+- **Tansu prefix-coalesced virtual-topic segments** — Kotatsu now reads Tansu's
+  virtual-topic segments (Tansu `#56`, shipped in tansu `0.7.0-beta.13`)
+  alongside the legacy per-topic layout in the same bucket. Many topics'
+  records are multiplexed into shared, immutable per-prefix segment objects
+  (`prefixes/{prefix}/segments/{seq:020}.seg`) with a self-describing footer
+  index, read via ranged GET. The footer decoder accepts format versions `1`
+  and `2` (the v2 per-flush nonce and per-batch producer coordinates are
+  parsed-and-skipped) and rejects unknown versions; an object with no `TSEG`
+  trailer is treated as a legacy v0 batch concatenation. Watermark, earliest,
+  time-seek and message reads derive from the footer; overlapping segments left
+  by a compaction or writer failover resolve by highest `writer_epoch`; hybrid
+  topics stitch legacy `records/` `[0, C)` and segments `[C, ∞)` across the
+  seam; and a segment deleted by compaction mid-read is retried. `watermark.json`
+  is now optional, matching the leaseless writer that never persists it on the
+  produce path (#82).
+
 ## [0.5.0] - 2026-07-17
 
 ### Added
