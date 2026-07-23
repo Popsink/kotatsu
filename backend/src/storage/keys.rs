@@ -104,6 +104,54 @@ impl Keys {
         ))
     }
 
+    /// The connector **prefix** a topic coalesces under (Tansu `prefix_of`,
+    /// Popsink/tansu#57): the first three dot-separated components
+    /// (`org.env.conn`) — the tenant/retention/isolation boundary the
+    /// virtual-topics epic groups on. A topic with fewer than three components
+    /// is its own prefix. (Tansu's `prefix_map` override is not implemented
+    /// there yet, so this derivation is the only mapping.)
+    pub fn prefix_of(topic: &str) -> String {
+        let mut parts = topic.split('.');
+        let mut prefix = String::new();
+        for i in 0..3 {
+            match parts.next() {
+                Some(part) => {
+                    if i > 0 {
+                        prefix.push('.');
+                    }
+                    prefix.push_str(part);
+                }
+                None => return topic.to_owned(),
+            }
+        }
+        prefix
+    }
+
+    /// `clusters/{cluster}/prefixes/{prefix}/segments/` — prefix for listing a
+    /// connector's virtual-topic segment objects.
+    pub fn segment_prefix(&self, prefix: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/prefixes/{}/segments/",
+            self.cluster, prefix
+        ))
+    }
+
+    /// `clusters/{cluster}/prefixes/{prefix}/segments/{seq:020}.seg`
+    pub fn segment(&self, prefix: &str, seq: u64) -> Path {
+        Path::from(format!(
+            "clusters/{}/prefixes/{}/segments/{:0>20}.seg",
+            self.cluster, prefix, seq
+        ))
+    }
+
+    /// The segment sequence encoded in a segment object filename, e.g.
+    /// `.../segments/00000000000000000042.seg` → `42`.
+    pub fn seq_from_segment(path: &Path) -> Option<u64> {
+        let name = path.parts().last()?;
+        let name = name.as_ref().strip_suffix(".seg")?;
+        name.parse().ok()
+    }
+
     /// `clusters/{cluster}/groups/consumers/` — prefix for listing groups.
     pub fn groups_prefix(&self) -> Path {
         Path::from(format!("clusters/{}/groups/consumers/", self.cluster))
@@ -211,6 +259,34 @@ mod tests {
 
         let not_batch = k.watermark("orders", 3);
         assert_eq!(Keys::base_offset_from_batch(&not_batch), None);
+    }
+
+    #[test]
+    fn prefix_of_takes_first_three_dotted_components() {
+        assert_eq!(Keys::prefix_of("org.env.conn.orders"), "org.env.conn");
+        assert_eq!(Keys::prefix_of("org.env.conn"), "org.env.conn");
+        // Fewer than three components ⇒ the topic is its own prefix.
+        assert_eq!(Keys::prefix_of("orders"), "orders");
+        assert_eq!(Keys::prefix_of("a.b"), "a.b");
+        // A fourth component and beyond stays out of the prefix.
+        assert_eq!(Keys::prefix_of("a.b.c.d.e"), "a.b.c");
+    }
+
+    #[test]
+    fn builds_and_parses_segment_keys() {
+        let k = Keys::new("c1");
+        assert_eq!(
+            k.segment_prefix("org.env.conn").as_ref(),
+            "clusters/c1/prefixes/org.env.conn/segments"
+        );
+        let seg = k.segment("org.env.conn", 42);
+        assert_eq!(
+            seg.as_ref(),
+            "clusters/c1/prefixes/org.env.conn/segments/00000000000000000042.seg"
+        );
+        assert_eq!(Keys::seq_from_segment(&seg), Some(42));
+        // A non-segment path yields None.
+        assert_eq!(Keys::seq_from_segment(&k.meta()), None);
     }
 
     #[test]
