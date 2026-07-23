@@ -4,6 +4,7 @@
 //! client, no broker. Every method is invoked on-demand from an API handler;
 //! there are no background tasks or timers here.
 
+mod catalog;
 mod cluster;
 mod error;
 mod groups;
@@ -46,6 +47,11 @@ pub struct StorageSource {
     /// segments; this only spares re-reading a footer already seen. Shared across
     /// clones via the `Arc`.
     segment_footers: Arc<Mutex<HashMap<String, segment::SegmentFooter>>>,
+    /// Cached topic catalog (name index + per-row summaries) for the list/search
+    /// views, short-TTL and lazily warmed (#84). `None` until first filled.
+    topic_catalog: Arc<Mutex<Option<catalog::Catalog<TopicSummary>>>>,
+    /// Cached consumer-group catalog, same scheme as [`Self::topic_catalog`].
+    group_catalog: Arc<Mutex<Option<catalog::Catalog<GroupSummary>>>>,
 }
 
 impl StorageSource {
@@ -102,6 +108,8 @@ impl StorageSource {
             keys: Keys::new(&cfg.cluster),
             high_cache: Arc::new(Mutex::new(HashMap::new())),
             segment_footers: Arc::new(Mutex::new(HashMap::new())),
+            topic_catalog: Arc::new(Mutex::new(None)),
+            group_catalog: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -117,6 +125,8 @@ impl StorageSource {
             keys: Keys::new(cluster),
             high_cache: Arc::new(Mutex::new(HashMap::new())),
             segment_footers: Arc::new(Mutex::new(HashMap::new())),
+            topic_catalog: Arc::new(Mutex::new(None)),
+            group_catalog: Arc::new(Mutex::new(None)),
         }
     }
 
