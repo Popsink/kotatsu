@@ -43,6 +43,21 @@ impl Page {
             .collect();
         (page, total)
     }
+
+    /// Like [`select`](Self::select) but over arbitrary items keyed by a name
+    /// extractor — search, sort, and page on `key(item)`. Used by the topic-tree
+    /// group levels, whose rows carry a summary alongside the name.
+    pub fn select_by<T>(&self, items: Vec<T>, key: impl Fn(&T) -> &str) -> (Vec<T>, usize) {
+        let mut filtered: Vec<T> = items.into_iter().filter(|i| self.matches(key(i))).collect();
+        filtered.sort_by(|a, b| key(a).cmp(key(b)));
+        let total = filtered.len();
+        let page = filtered
+            .into_iter()
+            .skip(self.offset)
+            .take(self.limit)
+            .collect();
+        (page, total)
+    }
 }
 
 /// A page of results plus the total match count.

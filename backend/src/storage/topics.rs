@@ -60,6 +60,25 @@ pub struct TopicSummary {
     pub storage_bytes: i64,
 }
 
+/// One node in the prefix tree (an org, env, or connector level), or a terminal
+/// topic surfaced directly at a group level.
+#[derive(Clone, Serialize)]
+pub struct TreeNode {
+    /// The path component at this level (org, env, or connector name).
+    pub segment: String,
+    /// Full dotted path from the root to this node — what the UI drills into.
+    pub path: String,
+    /// Number of distinct topics beneath this node.
+    pub topics: usize,
+    /// Whether this node has deeper structure to drill into. `false` marks a
+    /// terminal node that is itself a complete topic.
+    pub group: bool,
+    /// The full topic name when this node is a terminal topic (`group == false`),
+    /// so the UI links straight to its detail instead of drilling deeper.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+}
+
 /// Per-partition offsets for the topic detail view.
 #[derive(Serialize)]
 pub struct PartitionInfo {
@@ -83,6 +102,72 @@ pub struct TopicDetail {
     pub storage_bytes: i64,
     pub replication_factor: i32,
     pub configs: Vec<ConfigEntry>,
+}
+
+/// Prefix depth at which a tree path names a full connector (`org.env.conn`,
+/// Tansu's coalescing prefix) — below this we group by component, at or beyond
+/// it we list the connector's topics. Matches [`Keys::prefix_of`].
+pub const CONNECTOR_DEPTH: usize = 3;
+
+/// Groups topic names into the next tree level below `prefix` (the already-chosen
+/// path components). Pure over the name index — no storage reads. A name shorter
+/// than or diverging from `prefix` is skipped; a name that ends exactly at this
+/// level is a terminal topic (linkable directly), otherwise its component here is
+/// a navigable group.
+fn group_level(names: &[String], prefix: &[&str]) -> Vec<TreeNode> {
+    struct Acc {
+        topics: usize,
+        has_deeper: bool,
+        terminal: Option<String>,
+    }
+
+    let depth = prefix.len();
+    let mut groups: BTreeMap<String, Acc> = BTreeMap::new();
+    for name in names {
+        let comps: Vec<&str> = name.split('.').collect();
+        if comps.len() <= depth || comps[..depth] != *prefix {
+            continue;
+        }
+        let acc = groups.entry(comps[depth].to_string()).or_insert(Acc {
+            topics: 0,
+            has_deeper: false,
+            terminal: None,
+        });
+        acc.topics += 1;
+        if comps.len() > depth + 1 {
+            acc.has_deeper = true;
+        } else {
+            acc.terminal = Some(name.clone());
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(segment, acc)| {
+            let path = if prefix.is_empty() {
+                segment.clone()
+            } else {
+                format!("{}.{}", prefix.join("."), segment)
+            };
+            TreeNode {
+                path,
+                segment,
+                topics: acc.topics,
+                group: acc.has_deeper,
+                // A pure terminal (no deeper components) links straight to its
+                // topic detail; a group (even if a same-named topic also exists)
+                // is drilled into, where that topic reappears as a leaf.
+                topic: if acc.has_deeper { None } else { acc.terminal },
+            }
+        })
+        .collect()
+}
+
+/// Whether `name` is the topic `prefix` itself or lives under `prefix.` — the
+/// membership test for a connector's leaf listing.
+fn topic_under(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
 impl StorageSource {
@@ -212,6 +297,57 @@ impl StorageSource {
         Ok(Paged::new(items, total, page))
     }
 
+    /// Lists the next prefix-tree level below `prefix` (empty = root): the
+    /// distinct org / env / connector components, with a per-node topic count.
+    /// Pure grouping over the cached name index — no per-node storage reads — so
+    /// it stays cheap at 15k topics. Filtered and paginated on the component name.
+    pub async fn topic_groups_at(
+        &self,
+        prefix: &str,
+        page: &Page,
+    ) -> Result<Paged<TreeNode>, StorageError> {
+        let names = self.catalog_topic_names().await?;
+        let parts: Vec<&str> = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            prefix.split('.').collect()
+        };
+        let (items, total) = page.select_by(group_level(&names, &parts), |n| &n.segment);
+        Ok(Paged::new(items, total, page))
+    }
+
+    /// Lists the topics under a connector `prefix` (`org.env.conn`) — the leaf
+    /// level of the tree — filtered by name and paginated, with per-row summaries
+    /// computed (and cached) only for the returned page, exactly like
+    /// [`list_topics`](Self::list_topics).
+    pub async fn list_topics_under(
+        &self,
+        prefix: &str,
+        page: &Page,
+    ) -> Result<Paged<TopicSummary>, StorageError> {
+        let under: Vec<String> = self
+            .catalog_topic_names()
+            .await?
+            .into_iter()
+            .filter(|n| topic_under(n, prefix))
+            .collect();
+        let (names, total) = page.select(under);
+
+        let mut items = Vec::with_capacity(names.len());
+        for name in names {
+            let summary = match catalog::cached_summary(&self.topic_catalog, &name) {
+                Some(summary) => summary,
+                None => {
+                    let summary = self.compute_topic_summary(&name).await?;
+                    catalog::store_summary(&self.topic_catalog, name, summary.clone());
+                    summary
+                }
+            };
+            items.push(summary);
+        }
+        Ok(Paged::new(items, total, page))
+    }
+
     /// The topic-name index, served from the short-TTL catalog cache and
     /// re-listed only on a miss (#84) — so listing and every debounced search
     /// keystroke filter an in-memory list instead of re-scanning `topic-metadata/`.
@@ -282,6 +418,66 @@ mod tests {
 
     // Real meta.json produced by Tansu.
     const META: &[u8] = include_bytes!("../../tests/fixtures/meta.json");
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn groups_root_by_org() {
+        let ns = names(&[
+            "acme.prod.db2.orders",
+            "acme.staging.mssql.stock",
+            "globex.prod.oracle.audit",
+        ]);
+        let nodes = group_level(&ns, &[]);
+        let segs: Vec<&str> = nodes.iter().map(|n| n.segment.as_str()).collect();
+        assert_eq!(segs, ["acme", "globex"]); // BTreeMap-sorted
+        let acme = &nodes[0];
+        assert_eq!(acme.path, "acme");
+        assert_eq!(acme.topics, 2);
+        assert!(acme.group);
+        assert!(acme.topic.is_none());
+    }
+
+    #[test]
+    fn groups_below_a_prefix() {
+        let ns = names(&[
+            "acme.prod.db2.orders",
+            "acme.prod.db2.customers",
+            "acme.prod.mssql.stock",
+            "globex.prod.oracle.audit", // filtered out
+        ]);
+        let nodes = group_level(&ns, &["acme", "prod"]);
+        let segs: Vec<&str> = nodes.iter().map(|n| n.segment.as_str()).collect();
+        assert_eq!(segs, ["db2", "mssql"]);
+        assert_eq!(nodes[0].path, "acme.prod.db2");
+        assert_eq!(nodes[0].topics, 2);
+        assert!(nodes[0].group);
+    }
+
+    #[test]
+    fn terminal_topic_surfaces_as_a_leaf_node() {
+        // A topic shorter than org.env.conn terminates early and must be a
+        // directly-linkable leaf, not a dead-end group.
+        let ns = names(&["orders", "acme.prod.db2.stock"]);
+        let nodes = group_level(&ns, &[]);
+        let orders = nodes.iter().find(|n| n.segment == "orders").unwrap();
+        assert!(!orders.group);
+        assert_eq!(orders.topic.as_deref(), Some("orders"));
+        assert_eq!(orders.topics, 1);
+        let acme = nodes.iter().find(|n| n.segment == "acme").unwrap();
+        assert!(acme.group);
+        assert!(acme.topic.is_none());
+    }
+
+    #[test]
+    fn topic_under_matches_self_and_children_only() {
+        assert!(topic_under("acme.prod.db2", "acme.prod.db2")); // exact
+        assert!(topic_under("acme.prod.db2.orders", "acme.prod.db2")); // child
+        assert!(!topic_under("acme.prod.db2x", "acme.prod.db2")); // not a boundary
+        assert!(!topic_under("acme.prod.mssql", "acme.prod.db2"));
+    }
 
     #[test]
     fn parses_real_meta_topics() {
