@@ -20,7 +20,7 @@ pub use error::StorageError;
 pub use groups::{ConsumingGroup, GroupDetailView, GroupOffset, GroupSummary};
 pub use keys::Keys;
 pub use model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, RecordHeader, Watermark};
-pub use topics::{PartitionInfo, TopicDetail, TopicSummary};
+pub use topics::{PartitionInfo, TopicDetail, TopicSummary, TreeNode, CONNECTOR_DEPTH};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

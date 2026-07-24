@@ -1,0 +1,9 @@
+# Build artifacts must never enter the build context — the multi-stage
+# Dockerfile compiles from source, and copying these in bloats the context
+# (backend/target alone is ~9 GB) and can exhaust the builder's disk.
+backend/target
+frontend/node_modules
+frontend/.nuxt
+frontend/.output
+frontend/dist
+.git

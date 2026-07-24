@@ -168,6 +168,65 @@ pub async fn topics(
     })))
 }
 
+/// Query params for the topic-tree endpoint: a `prefix` (the chosen dotted path,
+/// empty at the root) plus the usual search/paging.
+#[derive(Deserialize)]
+pub struct TreeQuery {
+    #[serde(default)]
+    prefix: String,
+    search: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+/// `GET /api/clusters/{cluster}/topic-tree?prefix=&search=&limit=&offset=`
+///
+/// One level of the prefix tree. Below `org.env.conn` (depth < 3) it returns the
+/// distinct next components as group nodes; at the connector level it returns the
+/// topics under that prefix as summary rows (`level` tells the client which).
+pub async fn topic_tree(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+    Query(query): Query<TreeQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let source = cluster_source(&state, &cluster)?;
+    let prefix = query.prefix.trim_matches('.').to_string();
+    let depth = if prefix.is_empty() {
+        0
+    } else {
+        prefix.split('.').count()
+    };
+    let page: Page = Page::new(query.search, query.limit, query.offset);
+
+    if depth >= crate::storage::CONNECTOR_DEPTH {
+        let paged = source.list_topics_under(&prefix, &page).await?;
+        Ok(Json(json!({
+            "cluster": cluster,
+            "prefix": prefix,
+            "depth": depth,
+            "level": "topic",
+            "items": paged.items,
+            "total": paged.total,
+            "limit": paged.limit,
+            "offset": paged.offset,
+        })))
+    } else {
+        let paged = source.topic_groups_at(&prefix, &page).await?;
+        Ok(Json(json!({
+            "cluster": cluster,
+            "prefix": prefix,
+            "depth": depth,
+            "level": "group",
+            "items": paged.items,
+            "total": paged.total,
+            "limit": paged.limit,
+            "offset": paged.offset,
+        })))
+    }
+}
+
 /// `GET /api/clusters/{cluster}/topics/{topic}`
 pub async fn topic_detail(
     State(state): State<AppState>,
