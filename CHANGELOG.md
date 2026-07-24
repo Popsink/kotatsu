@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-24
+
+### Added
+- **Browse topics by prefix** — the flat, alphabetical topic list is replaced by
+  a drill-down that follows the Tansu coalescing prefix, **org → env → connector
+  → topic**, with search scoped to each level. New endpoint
+  `GET /api/clusters/{cluster}/topic-tree?prefix=&search=&limit=&offset=`: below
+  the connector level it groups the cached name index by the next dotted
+  component (a pure in-memory grouping, no per-node storage reads, so it stays
+  cheap at ~15k topics); at the connector level it lists the topics under the
+  prefix with per-page summaries, like the existing list. A topic with fewer than
+  three components surfaces as a directly-linkable leaf. The chosen path lives in
+  the URL (`?p=`) for back-button and deep-link support, with a breadcrumb and an
+  on-disk size column at the leaf.
+
+### Changed
+- Added a `.dockerignore` so `backend/target` (~9 GB) no longer enters the Docker
+  build context.
+
 ## [0.7.0] - 2026-07-23
 
 ### Added
