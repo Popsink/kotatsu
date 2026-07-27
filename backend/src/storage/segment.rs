@@ -218,7 +218,11 @@ fn decode_footer(
             // fail loudly: the cursor lands mid-coordinate and every following
             // coordinate and entry decodes as garbage, so a v3 footer read with
             // the v2 stride silently mis-resolves sub-streams.
-            let stride = if version >= SEGMENT_FORMAT_VERSION_V3 { 23 } else { 22 };
+            let stride = if version >= SEGMENT_FORMAT_VERSION_V3 {
+                23
+            } else {
+                22
+            };
             let pcoord_count = be_u16(take(&mut cursor, 2)?) as usize;
             let _ = take(&mut cursor, pcoord_count.saturating_mul(stride))?;
         }
@@ -463,7 +467,10 @@ mod tests {
         assert_eq!(footer.entries.len(), 2);
         assert_eq!(footer.get("t", 0).unwrap().max_timestamp, 10);
         let e1 = footer.get("t", 1).unwrap();
-        assert_eq!(e1.byte_start, 4, "second region starts after the first (4B)");
+        assert_eq!(
+            e1.byte_start, 4,
+            "second region starts after the first (4B)"
+        );
         assert_eq!(e1.record_count, 4);
         assert_eq!(e1.max_timestamp, 20);
     }
