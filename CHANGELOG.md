@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-27
+
+### Added
+- **Accept segment footer v3** — the segment decoder now accepts format version 3
+  in addition to v1/v2, reading the producer-coordinate table with a
+  version-dependent stride: **23 bytes at v3, 22 below it**, because v3 adds a
+  one-byte `flags` field per coordinate. Nothing in Tansu emits v3 yet; this ships
+  first so that when the broker's writer flips (Popsink/tansu#174), this reader
+  does not mis-parse every segment it opens. Without the stride change a v3
+  segment's coordinate table would be read one byte short per entry, desynchronising
+  the cursor and corrupting the footer index that follows it.
+
 ## [0.8.0] - 2026-07-24
 
 ### Added
