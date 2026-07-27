@@ -46,6 +46,14 @@ const SEGMENT_FORMAT_VERSION_V1: u16 = 1;
 /// Adds a per-flush nonce and per-batch producer coordinates (#87). This is what
 /// the leaseless writer emits in production (`beta.13`).
 const SEGMENT_FORMAT_VERSION_V2: u16 = 2;
+/// Appends one `flags: u8` per producer coordinate and widens coordinate emission
+/// to transactional and control batches (Popsink/tansu#174). Accepted here before
+/// tansu emits it: the broker rejects an unknown version with a hard error that
+/// propagates into fetch, and so does this reader — so a writer flipping to v3
+/// while any reader lacks it is a read outage, not a degraded read. The
+/// coordinates themselves are still discarded; what matters is the **stride**,
+/// which grows from 22 to 23 bytes (see `decode_footer`).
+const SEGMENT_FORMAT_VERSION_V3: u16 = 3;
 
 /// One `(topic, partition)` sub-stream's self-describing footer entry: where its
 /// batches live in the shared object and what offset span they cover.
@@ -154,7 +162,10 @@ pub fn decode_segment_footer(tail: &[u8]) -> Result<FooterOutcome, StorageError>
     let footer_len = be_u64(&trailer[0..8]) as usize;
     let entry_count = be_u32(&trailer[8..12]) as usize;
     let version = be_u16(&trailer[12..14]);
-    if version != SEGMENT_FORMAT_VERSION_V1 && version != SEGMENT_FORMAT_VERSION_V2 {
+    if version != SEGMENT_FORMAT_VERSION_V1
+        && version != SEGMENT_FORMAT_VERSION_V2
+        && version != SEGMENT_FORMAT_VERSION_V3
+    {
         return Err(StorageError::Decode(format!(
             "unsupported segment format version {version}"
         )));
@@ -200,11 +211,16 @@ fn decode_footer(
         let max_timestamp = be_i64(take(&mut cursor, 8)?);
 
         if v2 {
-            // Per-(idempotent-)batch producer coordinates (v2): parse-and-skip.
-            // Each is producer_id(i64) + producer_epoch(i16) + base_sequence(i32)
-            // + last_sequence(i32) + offset_delta(u32) = 22 bytes.
+            // Per-batch producer coordinates (v2+): parse-and-skip. Each is
+            // producer_id(i64) + producer_epoch(i16) + base_sequence(i32) +
+            // last_sequence(i32) + offset_delta(u32) = 22 bytes, **plus a
+            // flags(u8) at v3** = 23. Skipping by the wrong stride does not
+            // fail loudly: the cursor lands mid-coordinate and every following
+            // coordinate and entry decodes as garbage, so a v3 footer read with
+            // the v2 stride silently mis-resolves sub-streams.
+            let stride = if version >= SEGMENT_FORMAT_VERSION_V3 { 23 } else { 22 };
             let pcoord_count = be_u16(take(&mut cursor, 2)?) as usize;
-            let _ = take(&mut cursor, pcoord_count.saturating_mul(22))?;
+            let _ = take(&mut cursor, pcoord_count.saturating_mul(stride))?;
         }
 
         entries.push(SubstreamEntry {
@@ -354,12 +370,15 @@ mod tests {
                 if v2 {
                     buf.extend_from_slice(&pc.to_be_bytes());
                     for i in 0..pc {
-                        // dummy 22-byte producer coord
+                        // dummy producer coord: 22 bytes at v2, 23 at v3
                         buf.extend_from_slice(&(i as i64).to_be_bytes()); // producer_id
                         buf.extend_from_slice(&0i16.to_be_bytes()); // producer_epoch
                         buf.extend_from_slice(&0i32.to_be_bytes()); // base_sequence
                         buf.extend_from_slice(&0i32.to_be_bytes()); // last_sequence
                         buf.extend_from_slice(&0u32.to_be_bytes()); // offset_delta
+                        if self.version >= SEGMENT_FORMAT_VERSION_V3 {
+                            buf.push(0b11); // flags: transactional | control
+                        }
                     }
                 }
             }
@@ -423,6 +442,30 @@ mod tests {
             "second region starts after the first (4B)"
         );
         assert_eq!(e1.record_count, 4);
+    }
+
+    #[test]
+    fn decodes_v3_footer_skipping_flagged_producer_coords() {
+        // A v3 coordinate is 23 bytes, not 22: it carries a trailing flags byte
+        // (Popsink/tansu#174). Skipping the block with the v2 stride does not
+        // fail loudly — the cursor lands mid-coordinate and every following
+        // coordinate and entry decodes as garbage — so this pins the stride by
+        // reading a second entry back correctly from behind three coordinates.
+        let seg = SegBuilder::new(3, 9)
+            .region("t", 0, 0, 5, 10, b"XXXX", 3)
+            .region("t", 1, 0, 4, 20, b"YYYYYY", 1)
+            .build();
+        let footer = match decode_whole_segment(&seg).unwrap() {
+            FooterOutcome::Footer(f) => f,
+            other => panic!("expected footer, got {other:?}"),
+        };
+        assert_eq!(footer.writer_epoch, 9);
+        assert_eq!(footer.entries.len(), 2);
+        assert_eq!(footer.get("t", 0).unwrap().max_timestamp, 10);
+        let e1 = footer.get("t", 1).unwrap();
+        assert_eq!(e1.byte_start, 4, "second region starts after the first (4B)");
+        assert_eq!(e1.record_count, 4);
+        assert_eq!(e1.max_timestamp, 20);
     }
 
     #[test]
