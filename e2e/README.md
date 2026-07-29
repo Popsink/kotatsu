@@ -21,7 +21,8 @@ e2e/
     ├── messages/   # record read-back, pagination, filters (prefix MSG)
     ├── schemas/    # Avro decode, Kora registry            (prefix SCH)
     ├── groups/     # consumer groups, offsets, lag         (prefix GRP)
-    └── navigation/ # hierarchical topic-tree browsing      (prefix NAV)
+    ├── navigation/ # hierarchical topic-tree browsing      (prefix NAV)
+    └── health/     # health probe, source meta, stats      (prefix HLT)
 ```
 
 Each module holds `test-cases/TCxx/test-case.md`. Test Case IDs use the module
