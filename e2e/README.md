@@ -18,9 +18,10 @@ e2e/
 └── modules/
     ├── source/     # S3 connection & source status        (prefix SRC)
     ├── topics/     # topic listing, detail, watermarks     (prefix TOP)
-    ├── messages/   # record read-back, pagination, keys    (prefix MSG)
+    ├── messages/   # record read-back, pagination, filters (prefix MSG)
     ├── schemas/    # Avro decode, Kora registry            (prefix SCH)
-    └── groups/     # consumer groups, offsets, lag         (prefix GRP)
+    ├── groups/     # consumer groups, offsets, lag         (prefix GRP)
+    └── navigation/ # hierarchical topic-tree browsing      (prefix NAV)
 ```
 
 Each module holds `test-cases/TCxx/test-case.md`. Test Case IDs use the module
@@ -74,12 +75,15 @@ printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\n' | \
 | `GET /api/source`                                    | S3 source + connection      |
 | `GET /api/clusters`                                  | discovered clusters         |
 | `GET /api/clusters/{cluster}`                        | cluster stats               |
+| `GET /api/clusters/{cluster}/topic-tree`             | hierarchical topic tree     |
 | `GET /api/clusters/{cluster}/topics`                 | topic list                  |
 | `GET /api/clusters/{cluster}/topics/{topic}`         | topic detail                |
 | `GET /api/clusters/{cluster}/topics/{topic}/messages`| records + watermarks        |
 | `GET /api/clusters/{cluster}/groups`                 | consumer groups             |
 | `GET /api/clusters/{cluster}/groups/{group}`         | group detail                |
 | `GET /api/schemas`                                   | registered subjects         |
+| `GET /api/schemas/{subject}`                         | subject detail + versions   |
+| `GET /api/schemas/{subject}/versions/{version}`      | one schema version          |
 
 ## Tear down
 
