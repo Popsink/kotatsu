@@ -13,6 +13,10 @@ locally running stack (Tansu → S3 → Kotatsu).
 ```
 e2e/
 ├── README.md
+├── ci/                    # automated Playwright smoke (run in CI)
+├── scripts/
+│   └── seed.sh            # seed fictitious demo data (local + CI)
+├── reports/               # execution reports + screenshots
 ├── test_plans/
 │   └── SMOKE_TEST_PLAN.md
 └── modules/
