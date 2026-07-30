@@ -22,3 +22,6 @@ dist/
 
 # AI
 /.agent-shell/
+
+# Playwright CLI session scratch (semi-manual e2e runs)
+.playwright-cli/
