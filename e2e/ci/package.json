@@ -1,0 +1,13 @@
+{
+  "name": "kotatsu-e2e-ci",
+  "private": true,
+  "description": "Automated e2e smoke for Kotatsu (Playwright), run in CI against the docker-compose stack",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

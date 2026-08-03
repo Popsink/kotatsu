@@ -1,0 +1,144 @@
+import { test, expect } from '@playwright/test';
+
+/**
+ * Kotatsu CI smoke — mirrors e2e/test_plans/SMOKE_TEST_PLAN.md.
+ *
+ * Two layers:
+ *  - API: deterministic assertions on the read path (health, source, topics,
+ *    messages, Avro decode, schemas, groups/lag).
+ *  - UI: the Nuxt SPA renders each screen and its figures match the API.
+ *
+ * Preconditions: the docker-compose stack is up AND seeded (e2e/scripts/seed.sh)
+ * with topics orders/events/empty-topic/avro-orders and group qa-group.
+ */
+
+const CLUSTER = 'demo';
+
+test.describe('API smoke', () => {
+  test('health is ok', async ({ request }) => {
+    const res = await request.get('/api/health');
+    expect(res.ok()).toBeTruthy();
+    expect(await res.json()).toMatchObject({ service: 'kotatsu', status: 'ok' });
+  });
+
+  test('source is connected', async ({ request }) => {
+    const body = await (await request.get('/api/source')).json();
+    expect(body.configured).toBe(true);
+    expect(body.status.connected).toBe(true);
+    expect(body.cluster).toBe(CLUSTER);
+  });
+
+  test('cluster demo is discovered', async ({ request }) => {
+    const body = await (await request.get('/api/clusters')).json();
+    expect(body.clusters).toContain(CLUSTER);
+  });
+
+  test('topics are listed with counts', async ({ request }) => {
+    const body = await (await request.get(`/api/clusters/${CLUSTER}/topics`)).json();
+    const names = body.items.map((t: { name: string }) => t.name);
+    expect(names).toEqual(expect.arrayContaining(['orders', 'events', 'empty-topic', 'avro-orders']));
+    const orders = body.items.find((t: { name: string }) => t.name === 'orders');
+    expect(orders.messages).toBe(3);
+    expect(orders.partitions).toBe(1);
+  });
+
+  test('orders messages read back faithfully', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/orders/messages?offset=earliest`,
+    )).json();
+    expect(body.count).toBe(3);
+    expect(body.watermark).toMatchObject({ low: 0, high: 3 });
+    expect(body.records.map((r: { offset: number }) => r.offset)).toEqual([0, 1, 2]);
+    expect(body.records[0].key.data).toBe('key-1');
+    expect(body.records[0].value.data).toContain('widget');
+  });
+
+  test('empty-topic returns no records', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/empty-topic/messages`,
+    )).json();
+    expect(body.count).toBe(0);
+    expect(body.records).toHaveLength(0);
+    expect(body.watermark).toMatchObject({ low: 0, high: 0 });
+  });
+
+  test('avro-orders values decode via the registry', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/avro-orders/messages?offset=earliest`,
+    )).json();
+    expect(body.count).toBe(2);
+    expect(body.records[0].value.kind).toBe('avro');
+    expect(body.records[0].value.data).toMatchObject({ id: 1, item: 'widget' });
+  });
+
+  test('schema subject is registered', async ({ request }) => {
+    const body = await (await request.get('/api/schemas')).json();
+    expect(body.items).toContain('avro-orders-value');
+  });
+
+  test('qa-group reports committed offsets and lag', async ({ request }) => {
+    const body = await (await request.get(`/api/clusters/${CLUSTER}/groups/qa-group`)).json();
+    expect(body.name).toBe('qa-group');
+    const orders = body.offsets.find(
+      (o: { topic: string }) => o.topic === 'orders',
+    );
+    expect(orders).toMatchObject({ committed_offset: 3, high_watermark: 3, lag: 0 });
+    expect(body.total_lag).toBe(0);
+  });
+
+  test('invalid offset returns 400', async ({ request }) => {
+    const res = await request.get(
+      `/api/clusters/${CLUSTER}/topics/orders/messages?offset=abc`,
+    );
+    expect(res.status()).toBe(400);
+  });
+
+  test('unknown topic returns 404', async ({ request }) => {
+    const res = await request.get(`/api/clusters/${CLUSTER}/topics/nope/messages`);
+    expect(res.status()).toBe(404);
+  });
+});
+
+test.describe('UI smoke', () => {
+  test('overview shows source connected and cluster stats', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+    await expect(page.getByText('connected')).toBeVisible();
+    await expect(page.getByText('demo')).toBeVisible();
+  });
+
+  test('topics page lists the seeded topics', async ({ page }) => {
+    await page.goto('/topics');
+    for (const name of ['orders', 'events', 'empty-topic', 'avro-orders']) {
+      await expect(page.getByText(name, { exact: false }).first()).toBeVisible();
+    }
+  });
+
+  test('orders topic renders its messages', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await expect(page.getByRole('heading', { name: 'Messages' })).toBeVisible();
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.getByText('partition 0 — low 0, high 3 (3 messages)')).toBeVisible();
+    await expect(page.getByText('key-1')).toBeVisible();
+    await expect(page.getByText('{"id":1,"item":"widget"}')).toBeVisible();
+  });
+
+  test('avro-orders decodes in the event browser', async ({ page }) => {
+    await page.goto('/topics/avro-orders');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.getByText('{"id":1,"item":"widget"}')).toBeVisible();
+  });
+
+  test('schemas page lists the subject', async ({ page }) => {
+    await page.goto('/schemas');
+    await expect(page.getByRole('link', { name: 'avro-orders-value' })).toBeVisible();
+  });
+
+  test('consumer group detail shows zero lag', async ({ page }) => {
+    await page.goto('/groups/qa-group');
+    await expect(page.getByRole('heading', { name: 'Group qa-group' })).toBeVisible();
+    await expect(page.getByText('orders').first()).toBeVisible();
+  });
+});
