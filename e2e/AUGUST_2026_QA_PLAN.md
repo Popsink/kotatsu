@@ -21,12 +21,16 @@ baselines with a focus on **p99 tail latency**.
 - **k6** — new here; there is **no `loadtest/` yet**. Scaffold one by copying
   `kora/loadtest/` (scenario taxonomy + tagged `helpers.js` pattern).
 - **Dedicated env** with **Balkis (SRE)**; k6 → **Prometheus → Grafana**.
+- **Object store = rustfs** (S3-compatible) in the test env — it mirrors the Popsink
+  standard: prod runs on **AWS S3**, the devspace dev env already uses **rustfs**.
+  (The local docker-compose MinIO is not used here.) Kotatsu reaches the store
+  **directly, no auth** — only kora sits behind Traefik/basic-auth.
 - Existing semi-manual ISTQB cases under `e2e/modules/` stay as-is (functional layer);
   this plan adds the **non-functional** layer on top.
 
 ## What makes Kotatsu different (test design implications)
 
-- It is **read-only** and reads directly from **S3 (MinIO locally)** — decode
+- It is **read-only** and reads directly from **S3 (rustfs in the test env, AWS S3 in prod)** — decode
   `.batch` files, resolve Avro against Kora. So a slow result may be the **object
   store or Kora**, not Kotatsu. Every report must **isolate the tier** (S3 fetch
   vs decode vs Kora resolve vs Kotatsu HTTP).
@@ -38,7 +42,7 @@ baselines with a focus on **p99 tail latency**.
 ### WS-T1 — Scaffold the k6 harness
 - Create `kotatsu/loadtest/` from the kora template: `helpers.js` (tagged helpers
   for the read endpoints), `justfile` recipes, `docker-compose.loadtest.yml`
-  (Kotatsu + MinIO + Kora + Kora-DB), a seed script that produces synthetic topics
+  (Kotatsu + rustfs + Kora + Kora-DB), a seed script that produces synthetic topics
   and Avro schemas.
 - Baseline (`smoke`, 1 VU) capturing p50 / p95 / **p99** per endpoint on a small seed.
 
@@ -73,6 +77,8 @@ baselines with a focus on **p99 tail latency**.
 
 ## Risks
 
-- MinIO throughput can mask/inflate Kotatsu latency → always report the tier breakdown.
+- A local S3-compatible store (rustfs) is **faster than prod AWS S3** → latency
+  numbers are optimistic; always report the tier breakdown, and consider a real-S3
+  validation run later for prod-representative figures.
 - WS-T3 depends on Kora's 30k seed (WS-K2) → sequence after Kora.
 - August holidays (FR) → lock the dedicated-env slot with Balkis early.
