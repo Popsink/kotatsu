@@ -6,15 +6,18 @@ use tansu_sans_io::record::{deflated, inflated};
 
 use super::StorageError;
 
-/// Low/high offsets for a partition, from `watermark.json`.
+/// Low/high offsets for a partition — what the broker would serve.
 ///
-/// Tansu stores `{ low, high, timestamps }`; `timestamps` is always `null` in
-/// the S3 storage engine, so we don't model it (time-seek uses batch headers).
+/// Neither is read from `watermark.json` as a value: `low` was deleted from that
+/// object by Popsink/tansu#180 and comes from the segment footers, `high` from the
+/// footers floored by the object's persisted `high` (#93, #94).
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Watermark {
-    /// Earliest available offset (log start). `null` in the file ⇒ 0.
+    /// Earliest readable offset — the base of the oldest live segment slice. An
+    /// empty log starts where it ends, so `low == high` there rather than 0
+    /// (Popsink/tansu#299): a 0 would advertise records no fetch can return.
     pub low: i64,
-    /// Next offset to be written (high watermark). `null` ⇒ 0.
+    /// Next offset to be written (log end).
     pub high: i64,
 }
 
@@ -61,7 +64,12 @@ pub struct RecordHeader {
 }
 
 /// The fixed-size prefix of a Kafka record batch, parsed without decoding the
-/// whole batch — used by time-seek via a range GET.
+/// whole batch.
+///
+/// Nothing on the read path needs it any more — the segment footer carries every
+/// sub-stream's offset span and newest timestamp, so neither the high watermark
+/// nor time-seek reads a batch header (#93). Kept as the wire-format reference
+/// this module documents itself against.
 #[derive(Clone, Copy, Debug)]
 pub struct BatchHeader {
     /// Offset of the last record in the batch, relative to `baseOffset`. The
@@ -94,14 +102,13 @@ impl BatchHeader {
     }
 }
 
-/// Splits a `.batch` object into its constituent sub-batch byte slices.
+/// Splits a segment region into its constituent sub-batch byte slices.
 ///
-/// With Tansu's produce coalescing (#50) one object may hold several record
-/// batches concatenated (a `deflated::Frame`), each on the wire as
-/// `base_offset (i64) + batch_length (i32) + batch_length bytes`
-/// (`12 + batch_length` total). A legacy or non-coalesced object is a
-/// one-element frame. A trailing run that does not form a whole batch is
-/// ignored, mirroring `deflated::Batch::try_from`.
+/// A region holds several record batches concatenated (a `deflated::Frame`), each
+/// on the wire as `base_offset (i64) + batch_length (i32) + batch_length bytes`
+/// (`12 + batch_length` total); a single-batch region is a one-element frame. A
+/// trailing run that does not form a whole batch is ignored, mirroring
+/// `deflated::Batch::try_from`.
 fn split_frame(bytes: &Bytes) -> Vec<Bytes> {
     // base_offset (i64) + batch_length (i32) precede the `batch_length` body.
     const PREFIX: usize = 12;
@@ -123,39 +130,14 @@ fn split_frame(bytes: &Bytes) -> Vec<Bytes> {
     slices
 }
 
-/// Total offset span of a frame: `Σ (last_offset_delta + 1)` over its
-/// sub-batches. This is the number of offsets the object occupies (which after
-/// compaction can exceed the record count), used to derive the high watermark
-/// of a coalesced tail object. Parses only fixed batch headers — no inflation.
-pub fn frame_offset_span(bytes: &Bytes) -> i64 {
-    split_frame(bytes)
-        .iter()
-        .filter_map(|slice| BatchHeader::parse(slice).ok())
-        .map(|h| h.last_offset_delta as i64 + 1)
-        .sum()
-}
-
-/// Largest `maxTimestamp` over a frame's sub-batches — the object's newest
-/// record time, used by frame-aware time-seek. A coalesced object's newest
-/// record sits in its last sub-batch, so the first header alone under-reports
-/// it. Returns `None` for a frame with no parseable sub-batch.
-pub fn frame_max_timestamp(bytes: &Bytes) -> Option<i64> {
-    split_frame(bytes)
-        .iter()
-        .filter_map(|slice| BatchHeader::parse(slice).ok())
-        .map(|h| h.max_timestamp)
-        .max()
-}
-
-/// Decodes a `.batch` object into records with **absolute** offsets.
+/// Decodes a segment region into records with **absolute** offsets.
 ///
-/// An object may hold a single batch (legacy / coalescing off) or several
-/// batches concatenated (Tansu coalescing, #50); both are handled — a
-/// single-batch object yields byte-for-byte the same records as before.
+/// A region is one `(topic, partition)` sub-stream's record batches
+/// concatenated, so it may hold one batch or many; both are handled.
 ///
-/// Critical: the absolute offset comes from the filename's base offset, not the
-/// batch's own `base_offset` field (Tansu overwrites the latter). Within a
-/// coalesced object the running base advances by each sub-batch's offset span
+/// Critical: the absolute offset comes from the footer's base offset for the
+/// region, not the batch's own `base_offset` field (Tansu overwrites the latter).
+/// Within a region the running base advances by each sub-batch's offset span
 /// (`last_offset_delta + 1`), so the second sub-batch starts where the first
 /// ended. Control batches (transaction markers) are skipped individually but
 /// still advance the running base — they occupy offsets.
@@ -321,22 +303,19 @@ mod tests {
     }
 
     #[test]
-    fn frame_offset_span_sums_sub_batches() {
-        // Three single-record sub-batches ⇒ span 3.
+    fn split_frame_walks_every_sub_batch() {
+        // Three single-record sub-batches ⇒ three slices, and a single-batch
+        // region is a one-element frame.
         assert_eq!(
-            frame_offset_span(&coalesced(&[OFFSET_0, OFFSET_2, OFFSET_4])),
+            split_frame(&coalesced(&[OFFSET_0, OFFSET_2, OFFSET_4])).len(),
             3
         );
-        // A legacy single-batch object is a one-element frame ⇒ span 1.
-        assert_eq!(frame_offset_span(&Bytes::from_static(OFFSET_0)), 1);
-    }
-
-    #[test]
-    fn frame_max_timestamp_covers_the_latest_sub_batch() {
-        let single = frame_max_timestamp(&Bytes::from_static(OFFSET_0)).unwrap();
-        let frame = frame_max_timestamp(&coalesced(&[OFFSET_0, OFFSET_2])).unwrap();
-        // The frame's newest record is at least as new as its first sub-batch's.
-        assert!(frame >= single);
+        assert_eq!(split_frame(&Bytes::from_static(OFFSET_0)).len(), 1);
+        // A trailing run that cannot form a whole batch is ignored.
+        assert_eq!(
+            split_frame(&coalesced(&[OFFSET_0, &OFFSET_2[..8]])).len(),
+            1
+        );
     }
 
     #[test]

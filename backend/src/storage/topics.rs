@@ -3,15 +3,15 @@
 //! Topic names and specs come from `clusters/{cluster}/topic-metadata/{name}.json`
 //! (Tansu's decomposed metadata), falling back to the legacy monolithic
 //! `meta.json` for clusters not yet migrated. Stats are limited to what
-//! watermarks give (low/high, approximate count) — never a full `.batch` scan.
+//! watermarks give (low/high, approximate count) plus the segment footers
+//! (per-sub-stream byte spans) — never a scan of record content.
 
 use std::collections::BTreeMap;
 
 use futures::future::try_join_all;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use super::{catalog, keys::Keys, model::Watermark, StorageError, StorageSource};
+use super::{catalog, model::Watermark, StorageError, StorageSource};
 use crate::pagination::{Page, Paged};
 
 /// Minimal view of the legacy `meta.json` — only the topics map (fallback for
@@ -106,7 +106,8 @@ pub struct TopicDetail {
 
 /// Prefix depth at which a tree path names a full connector (`org.env.conn`,
 /// Tansu's coalescing prefix) — below this we group by component, at or beyond
-/// it we list the connector's topics. Matches [`Keys::prefix_of`].
+/// it we list the connector's topics. Matches `Keys::prefix_of` — the grouping is
+/// over topic *names*, unaffected by where their records are routed.
 pub const CONNECTOR_DEPTH: usize = 3;
 
 /// Groups topic names into the next tree level below `prefix` (the already-chosen
@@ -226,36 +227,6 @@ impl StorageSource {
     /// clean error instead of a leaked object key — #63).
     pub async fn topic_partitions(&self, name: &str) -> Result<i32, StorageError> {
         Ok(self.topic_spec(name).await?.num_partitions.max(0))
-    }
-
-    /// Per-partition on-disk size (compressed bytes of the record segments),
-    /// computed from S3 object metadata in a single recursive listing of the
-    /// topic's `partitions/` prefix — cheap (object `size`, no content scan) and
-    /// one list call regardless of partition count. Only `.batch` segment objects
-    /// count; the tiny `watermark.json` sidecars are excluded. Partitions with no
-    /// batches are simply absent from the map (callers default them to `0`).
-    async fn partition_storage_bytes(
-        &self,
-        topic: &str,
-    ) -> Result<BTreeMap<i32, i64>, StorageError> {
-        let prefix = self.keys().partitions_prefix(topic);
-        let mut sizes: BTreeMap<i32, i64> = BTreeMap::new();
-        let mut stream = self.store().list(Some(&prefix));
-        while let Some(meta) = stream.next().await {
-            let meta = meta?;
-            if meta
-                .location
-                .parts()
-                .last()
-                .is_none_or(|f| !f.as_ref().ends_with(".batch"))
-            {
-                continue;
-            }
-            if let Some(p) = Keys::partition_from_records_path(&meta.location) {
-                *sizes.entry(p).or_insert(0) += meta.size as i64;
-            }
-        }
-        Ok(sizes)
     }
 
     /// A topic's spec, preferring the per-topic object and falling back to the
@@ -391,7 +362,7 @@ impl StorageSource {
         let watermarks =
             try_join_all((0..partitions).map(|p| self.watermark_or_empty(name, p))).await?;
         let messages = watermarks.iter().map(Watermark::count).sum();
-        let storage_bytes = self.partition_storage_bytes(name).await?.values().sum();
+        let storage_bytes = self.topic_storage_bytes(name).await?.values().sum();
         Ok(TopicSummary {
             name: name.to_string(),
             partitions,
@@ -409,7 +380,7 @@ impl StorageSource {
 
         let watermarks =
             try_join_all((0..partitions).map(|p| self.watermark_or_empty(name, p))).await?;
-        let storage = self.partition_storage_bytes(name).await?;
+        let storage = self.topic_storage_bytes(name).await?;
 
         let infos: Vec<PartitionInfo> = watermarks
             .into_iter()
@@ -510,37 +481,62 @@ mod tests {
         assert_eq!(orders.topic.num_partitions, 1);
     }
 
+    /// #93: on-disk size comes from the footers' per-sub-stream byte spans, so a
+    /// segment-backed topic reports a size at all (listing `.batch` objects under
+    /// `partitions/` reported 0 for every topic on a current cluster), and it is
+    /// charged its own share of a shared segment — never a co-tenant's bytes.
     #[tokio::test]
-    async fn partition_storage_bytes_sums_batch_objects_per_partition() {
+    async fn storage_bytes_are_the_substream_spans_in_shared_segments() {
         use object_store::{memory::InMemory, ObjectStore, PutPayload};
         let store = std::sync::Arc::new(InMemory::new());
         let src = StorageSource::with_store(store.clone(), "c");
+        let topic = "acme.prod.db2.orders";
+        let other = "acme.prod.db2.stock"; // co-tenant of the same prefix
 
-        // Two batches on partition 0, one on partition 1.
-        for (part, base, len) in [(0, 0_i64, 100_usize), (0, 10, 55), (1, 0, 40)] {
+        // Two segments under `acme.prod.db2`: our topic holds 100 + 55 bytes on
+        // partition 0 and 40 on partition 1; the co-tenant holds 999.
+        for (seq, regions) in [
+            (
+                0u64,
+                vec![
+                    (topic, 0, 0_i64, 1_i64, vec![0u8; 100], 1_i64),
+                    (other, 0, 0, 1, vec![0u8; 999], 1),
+                ],
+            ),
+            (
+                1,
+                vec![
+                    (topic, 0, 1, 1, vec![0u8; 55], 2),
+                    (topic, 1, 0, 1, vec![0u8; 40], 2),
+                ],
+            ),
+        ] {
+            let regions: Vec<super::super::segment::TestRegion> = regions
+                .iter()
+                .map(|(t, p, base, count, bytes, ts)| {
+                    (*t, *p, *base, *count, bytes.as_slice(), *ts)
+                })
+                .collect();
+            let bytes = super::super::segment::build_test_segment(3, 1, &regions);
             store
                 .put(
-                    &src.keys().batch("orders", part, base),
-                    PutPayload::from(vec![0u8; len]),
+                    &src.keys().segment("acme.prod.db2", seq),
+                    PutPayload::from(bytes.to_vec()),
                 )
                 .await
                 .unwrap();
         }
-        // A watermark.json sidecar must NOT be counted as storage.
-        store
-            .put(
-                &src.keys().watermark("orders", 0),
-                PutPayload::from(vec![0u8; 999]),
-            )
-            .await
-            .unwrap();
 
-        let sizes = src.partition_storage_bytes("orders").await.unwrap();
-        assert_eq!(sizes.get(&0), Some(&155)); // 100 + 55, watermark excluded
+        let sizes = src.topic_storage_bytes(topic).await.unwrap();
+        assert_eq!(
+            sizes.get(&0),
+            Some(&155),
+            "100 + 55, the co-tenant excluded"
+        );
         assert_eq!(sizes.get(&1), Some(&40));
-        // An empty topic yields an empty map (callers default to 0).
+        // A topic with no segment yields an empty map (callers default to 0).
         assert!(src
-            .partition_storage_bytes("empty")
+            .topic_storage_bytes("acme.prod.other.empty")
             .await
             .unwrap()
             .is_empty());
@@ -565,10 +561,22 @@ mod tests {
             )
             .await
             .unwrap();
+        // Five messages: one segment slice at offsets 0..5. The count comes from
+        // the footer, so `watermark.json` — lazily persisted, `{"high":null}` on a
+        // live partition — is seeded as it actually looks.
         store
             .put(
                 &src.keys().watermark("orders", 0),
-                PutPayload::from(br#"{"low":0,"high":5,"timestamps":null}"#.to_vec()),
+                PutPayload::from(br#"{"high":null}"#.to_vec()),
+            )
+            .await
+            .unwrap();
+        let segment =
+            super::super::segment::build_test_segment(3, 1, &[("orders", 0, 0, 5, &[0u8; 32], 1)]);
+        store
+            .put(
+                &src.keys().segment("orders", 0),
+                PutPayload::from(segment.to_vec()),
             )
             .await
             .unwrap();
@@ -582,6 +590,7 @@ mod tests {
         for p in [
             src.keys().topic_metadata("orders"),
             src.keys().watermark("orders", 0),
+            src.keys().segment("orders", 0),
         ] {
             store.delete(&p).await.unwrap();
         }
