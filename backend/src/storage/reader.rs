@@ -111,14 +111,25 @@ impl StorageSource {
         view: &super::segview::SegView,
         raw: &WatermarkRaw,
     ) -> Watermark {
-        let high = [view.high(), raw.high, self.cached_high(topic, partition)]
-            .into_iter()
-            .flatten()
-            .max()
-            .unwrap_or(0);
-        // No live segment ⇒ an empty log, which starts at its end. The truncation
-        // floor applies to both arms: the records below it are physically present
-        // in the shared segments, and only the floor says they are deleted.
+        // The truncation floor is folded into `high` as well as `low`: a log cannot
+        // end below where it starts, and the two can otherwise cross. A partition
+        // whose watermark is `{"high":null,"truncate":N}` — exactly what the broker
+        // writes after a `DeleteRecords`, since `high` is not persisted on the
+        // produce path — reports no `high` at all once its segments expire, and a
+        // `low` above `high` would then advertise a negative range.
+        let high = [
+            view.high(),
+            raw.high,
+            self.cached_high(topic, partition),
+            raw.truncate,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0);
+        // No live segment ⇒ an empty log, which starts at its end. The floor applies
+        // to both arms: the records below it are physically present in the shared
+        // segments, and only the floor says they are deleted.
         let low = view
             .low()
             .unwrap_or(high)
@@ -206,7 +217,10 @@ impl StorageSource {
             let start = match spec {
                 OffsetSpec::Earliest => wm.low,
                 OffsetSpec::Latest => (wm.high - limit as i64).max(wm.low),
-                OffsetSpec::At(offset) => offset.clamp(wm.low, wm.high),
+                // `max` then `min`, not `clamp`: `clamp` panics when `min > max`,
+                // and an inconsistent watermark object must degrade to an empty
+                // read, never take down the request.
+                OffsetSpec::At(offset) => offset.max(wm.low).min(wm.high),
                 OffsetSpec::Timestamp(ts) => self.seek_time(topic, partition, ts).await?,
             }
             // Nothing below the truncation floor is served (#95). `wm.low` already
@@ -732,6 +746,35 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// #95: a truncated partition whose segments have since expired — the shape the
+    /// broker actually leaves behind, since `high` is not persisted on the produce
+    /// path, so the object is `{"high":null,"truncate":N}` with no segment to supply
+    /// a tail. The floor must not end up above `high`: that is a negative range, and
+    /// it used to reach `clamp(low, high)` with `low > high`, which panics.
+    #[tokio::test]
+    async fn floor_above_a_missing_high_does_not_cross_the_watermark() {
+        use object_store::memory::InMemory;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":null,"truncate":2}"#).await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!((wm.low, wm.high, wm.count()), (2, 2, 0));
+        for spec in [
+            OffsetSpec::Earliest,
+            OffsetSpec::Latest,
+            OffsetSpec::At(1),
+            OffsetSpec::At(9),
+            OffsetSpec::Timestamp(1),
+        ] {
+            assert!(
+                src.fetch(SEG_TOPIC, 0, spec, 10).await.unwrap().is_empty(),
+                "{spec:?} reads empty without panicking"
+            );
+        }
     }
 
     /// #95: a certified `[served.end, high)` gap holds offsets a segment expiry
