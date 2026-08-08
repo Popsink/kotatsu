@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Decode with the Popsink `tansu-sans-io`, not crates.io 0.6** (#96) — the
+  record-batch decoder is now a git dependency on `Popsink/tansu` pinned to
+  `v0.7.0-beta.39`, the version the deployed broker writes with. It was resolving
+  upstream `tansu-io` 0.6.0 from crates.io — a different codebase from the writer,
+  missing every decode-side fix made in the fork since: the record format decided
+  at the magic byte rather than by CRC accident (Popsink/tansu#323), no record
+  `Vec` sized from the wire's `record_count` (Popsink/tansu#306 — the reachable
+  one, since Kotatsu decodes whatever objects are in the bucket), and the
+  per-struct tag buffer counted (Popsink/tansu#324). Pinned to a tag rather than
+  floating on `main`: a decoder that changes under us is worse than one that lags
+  visibly, and the version to track is the broker's — the same one the test stack
+  runs, so `TANSU_VERSION` in `docker-compose.yml` and this tag move together.
+- **Footer v3 is what production writes** (#96) — this supersedes the 0.9.0 note
+  below, which said "nothing in Tansu emits v3 yet". Since Popsink/tansu#188
+  (`0.7.0-beta.25`) v3 is emitted unconditionally on every write path, including
+  both compactions; v1 and v2 are read-only history. The decoding itself was
+  already right — the producer-coordinate stride is 22 bytes at v1/v2 and 23 at
+  v3, checked against `encode_footer` at `v0.7.0-beta.39` — only the comments
+  implied the v3 branch was untested speculation rather than the only branch that
+  runs on current data.
+
 ## [0.9.0] - 2026-07-27
 
 ### Added

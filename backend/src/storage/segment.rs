@@ -1,9 +1,9 @@
 //! Decoding of Tansu's prefix-coalesced virtual-topic segments (#82).
 //!
-//! Wire contract: Popsink/tansu `docs/virtual-topics-format.md`, plus the v2
-//! footer additions shipped in tansu `0.7.0-beta.13` (which the doc still lags —
-//! see Popsink/tansu#138). Many topics' records are multiplexed into shared,
-//! immutable per-prefix **segment** objects:
+//! Wire contract: Popsink/tansu `docs/virtual-topics-format.md`, verified
+//! against `encode_footer` at `v0.7.0-beta.39` — the version the deployed broker
+//! runs and this crate's decoder is pinned to (#96). Many topics' records are
+//! multiplexed into shared, immutable per-prefix **segment** objects:
 //!
 //! ```text
 //! clusters/{cluster}/prefixes/{prefix}/segments/{seq:020}.seg
@@ -41,17 +41,20 @@ pub const SEGMENT_TRAILER_LEN: usize = 8 + 4 + 2 + 4;
 /// (a prefix with very many sub-streams) falls back to a second exact GET.
 pub const SEGMENT_FOOTER_OVER_READ: u64 = 64 * 1024;
 
-/// First self-describing multi-topic footer (#64).
+/// First self-describing multi-topic footer (#64). Read-only history: no writer
+/// emits it any more.
 const SEGMENT_FORMAT_VERSION_V1: u16 = 1;
-/// Adds a per-flush nonce and per-batch producer coordinates (#87). This is what
-/// the leaseless writer emits in production (`beta.13`).
+/// Adds a per-flush nonce and per-batch producer coordinates (#87). Emitted by
+/// the leaseless writer from `beta.13` until v3 superseded it — read-only
+/// history too, and what the older segments still in a bucket carry.
 const SEGMENT_FORMAT_VERSION_V2: u16 = 2;
 /// Appends one `flags: u8` per producer coordinate and widens coordinate emission
-/// to transactional and control batches (Popsink/tansu#174). Accepted here before
-/// tansu emits it: the broker rejects an unknown version with a hard error that
-/// propagates into fetch, and so does this reader — so a writer flipping to v3
-/// while any reader lacks it is a read outage, not a degraded read. The
-/// coordinates themselves are still discarded; what matters is the **stride**,
+/// to transactional and control batches (Popsink/tansu#174). **This is what
+/// production writes** — unconditionally, on every write path including both
+/// compactions, since Popsink/tansu#188 (`0.7.0-beta.25`). So it is the only
+/// branch that runs on current data; v1/v2 are what history decodes under.
+///
+/// The coordinates themselves are discarded; what matters is the **stride**,
 /// which grows from 22 to 23 bytes (see `decode_footer`).
 const SEGMENT_FORMAT_VERSION_V3: u16 = 3;
 
