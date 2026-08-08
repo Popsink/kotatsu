@@ -146,15 +146,20 @@ impl StorageSource {
         }
     }
 
-    /// Builds the segment view for a topition by listing its connector prefix's
-    /// segments and resolving overlaps. Empty when the topic is not segment-backed
-    /// (a pure-legacy topic) — the caller then uses the legacy record path.
+    /// Builds the segment view for a topition by listing its routed prefix's
+    /// segments and resolving overlaps. Empty when the topition has no live
+    /// segment — an empty log.
+    ///
+    /// The prefix comes from the **pin** (#92), not from a derivation over the
+    /// topic name: a compacted topic is routed under its own name, and looking for
+    /// its segments under `org.env.conn` finds none, which renders as an empty
+    /// topic rather than as an error.
     pub(super) async fn build_segment_view(
         &self,
         topic: &str,
         partition: i32,
     ) -> Result<SegView, StorageError> {
-        let prefix = Keys::prefix_of(topic);
+        let prefix = self.routed_prefix_of(topic).await?;
         let list_prefix = self.keys().segment_prefix(&prefix);
 
         let mut placed = Vec::new();

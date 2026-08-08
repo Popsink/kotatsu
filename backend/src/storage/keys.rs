@@ -104,12 +104,30 @@ impl Keys {
         ))
     }
 
-    /// The connector **prefix** a topic coalesces under (Tansu `prefix_of`,
+    /// `clusters/{cluster}/topic-routing/{topic}.json` — the pinned routing
+    /// prefix (Popsink/tansu#236), `{"prefix": "…"}`. Written create-only with the
+    /// topic, immutable for its lifetime, deleted with it.
+    pub fn topic_routing(&self, topic: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/topic-routing/{}.json",
+            self.cluster, topic
+        ))
+    }
+
+    /// The connector prefix Tansu **derives** for a topic (`prefix_of`,
     /// Popsink/tansu#57): the first three dot-separated components
     /// (`org.env.conn`) — the tenant/retention/isolation boundary the
-    /// virtual-topics epic groups on. A topic with fewer than three components
-    /// is its own prefix. (Tansu's `prefix_map` override is not implemented
-    /// there yet, so this derivation is the only mapping.)
+    /// virtual-topics epic groups on. A topic with fewer than three components is
+    /// its own prefix.
+    ///
+    /// This is **not** the mapping from a topic to where its records live: since
+    /// Popsink/tansu#236 that is pinned per topic at creation, in
+    /// [`Self::topic_routing`], because the derivation depends on `cleanup.policy`
+    /// (a compacted topic routes under its own name) and `AlterConfigs` can flip
+    /// that after records have been written. Resolve through the pin
+    /// (`routed_prefix_of`); this remains only the fallback derivation for a topic
+    /// created before pinning existed, and the grouping the topic tree navigates
+    /// by name ([`super::CONNECTOR_DEPTH`]).
     pub fn prefix_of(topic: &str) -> String {
         let mut parts = topic.split('.');
         let mut prefix = String::new();

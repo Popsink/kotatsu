@@ -277,6 +277,30 @@ impl StorageSource {
         }
     }
 
+    /// Whether `topic`'s `cleanup.policy` names `compact`, read off the stored
+    /// config — a substring test, so `compact,delete` counts, exactly as the
+    /// broker's `topic_is_compacted` does.
+    ///
+    /// Only the routing fallback needs this (#92), for a topic with no
+    /// `topic-routing/` pin. A topic whose metadata has gone (deleted under us)
+    /// reads as not compacted, which is the derivation the broker would also land
+    /// on, rather than failing a page render.
+    pub(super) async fn topic_is_compacted(&self, topic: &str) -> Result<bool, StorageError> {
+        let spec = match self.topic_spec(topic).await {
+            Ok(spec) => spec,
+            Err(StorageError::NotFound(_) | StorageError::TopicNotFound(_)) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+
+        Ok(spec.configs.iter().any(|config| {
+            config.name == "cleanup.policy"
+                && config
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| value.contains("compact"))
+        }))
+    }
+
     /// Lists topics (name, partition count, approximate message count), filtered
     /// and paginated. Specs and watermarks are read only for the returned page.
     pub async fn list_topics(&self, page: &Page) -> Result<Paged<TopicSummary>, StorageError> {

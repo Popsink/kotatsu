@@ -710,6 +710,59 @@ mod tests {
         assert_eq!(from1.iter().map(|r| r.offset).collect::<Vec<_>>(), [1, 2]);
     }
 
+    /// #92: a compacted topic with ≥ 3 dotted components is routed under its own
+    /// **full name**, and the pin is what says so. Derived, Kotatsu would list
+    /// `prefixes/org.env.conn/segments/`, find nothing, and render the topic as
+    /// empty — no messages, no watermark, no error.
+    #[tokio::test]
+    async fn compacted_topic_reads_from_its_pinned_prefix() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        // The broker pinned this topic to its own name (compacted routing).
+        store
+            .put(
+                &src.keys().topic_routing(SEG_TOPIC),
+                PutPayload::from(format!(r#"{{"prefix":"{SEG_TOPIC}"}}"#).into_bytes()),
+            )
+            .await
+            .unwrap();
+
+        // Its segments therefore live under `prefixes/{topic}/segments/`, not
+        // under the connector prefix the name derives to.
+        let region: Vec<u8> = [BATCH, BATCH2, BATCH3].concat();
+        let bytes = super::super::segment::build_test_segment(
+            3, // v3, as production emits
+            7,
+            &[(SEG_TOPIC, 0, 0, 3, &region, 555)],
+        );
+        store
+            .put(
+                &src.keys().segment(SEG_TOPIC, 0),
+                PutPayload::from(bytes.to_vec()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            Keys::prefix_of(SEG_TOPIC),
+            SEG_TOPIC,
+            "the derivation this test exists to disprove"
+        );
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!((wm.low, wm.high), (0, 3), "watermark, not an empty topic");
+        let records = src
+            .fetch(SEG_TOPIC, 0, OffsetSpec::Earliest, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "records read through the pinned prefix"
+        );
+    }
+
     /// #82: a hybrid topic — legacy `records/` below the seam `C`, segments above.
     /// `fetch` stitches the two regions continuously across `C`.
     #[tokio::test]
