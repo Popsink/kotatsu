@@ -64,7 +64,8 @@ printf 'cfg-a:{"connector":"db2","state":"RUNNING"}\ncfg-b:{"connector":"db2","s
 printf '{"n":1}\n{"n":2}\n{"n":3}\n' | \
   docker run -i --rm --network kotatsu_default apache/kafka:latest \
   /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server tansu:9092 --topic truncated
-mkdir -p /tmp/dr && printf '{"partitions":[{"topic":"truncated","partition":0,"offset":2}],"version":1}\n' >/tmp/dr/delete-records.json
+mkdir -p /tmp/dr && chmod 755 /tmp/dr   # the kafka image runs as non-root and must read the mount
+printf '{"partitions":[{"topic":"truncated","partition":0,"offset":2}],"version":1}\n' >/tmp/dr/delete-records.json
 docker run --rm --network kotatsu_default -v /tmp/dr:/dr apache/kafka:latest \
   /opt/kafka/bin/kafka-delete-records.sh --bootstrap-server tansu:9092 --offset-json-file /dr/delete-records.json
 

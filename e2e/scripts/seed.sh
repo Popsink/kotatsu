@@ -85,6 +85,11 @@ DR_DIR="$(mktemp -d)"
 trap 'rm -rf "$DR_DIR"' EXIT
 printf '{"partitions":[{"topic":"truncated","partition":0,"offset":2}],"version":1}\n' \
   >"$DR_DIR/delete-records.json"
+# `mktemp -d` is mode 700 and the kafka image runs as a non-root user, so without
+# this the tool reads the mount as AccessDenied. (Docker Desktop's file sharing
+# hides it — this only fails on a native Linux daemon, i.e. in CI.)
+chmod 755 "$DR_DIR"
+chmod 644 "$DR_DIR/delete-records.json"
 docker run --rm --network "$NETWORK" -v "$DR_DIR:/dr" "$KAFKA_IMG" \
   /opt/kafka/bin/kafka-delete-records.sh --bootstrap-server "$BOOTSTRAP" \
   --offset-json-file /dr/delete-records.json
