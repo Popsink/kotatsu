@@ -9,7 +9,10 @@ import { test, expect } from '@playwright/test';
  *  - UI: the Nuxt SPA renders each screen and its figures match the API.
  *
  * Preconditions: the docker-compose stack is up AND seeded (e2e/scripts/seed.sh)
- * with topics orders/events/empty-topic/avro-orders and group qa-group.
+ * with topics orders/events/empty-topic/avro-orders/truncated/
+ * acme.prod.db2.dbz_config and group qa-group. The stack must run the Popsink
+ * Tansu fork at the version pinned in docker-compose.yml — upstream writes a
+ * different storage layout, and the last two topics assert against this one (#97).
  */
 
 const CLUSTER = 'demo';
@@ -36,7 +39,16 @@ test.describe('API smoke', () => {
   test('topics are listed with counts', async ({ request }) => {
     const body = await (await request.get(`/api/clusters/${CLUSTER}/topics`)).json();
     const names = body.items.map((t: { name: string }) => t.name);
-    expect(names).toEqual(expect.arrayContaining(['orders', 'events', 'empty-topic', 'avro-orders']));
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'orders',
+        'events',
+        'empty-topic',
+        'avro-orders',
+        'truncated',
+        'acme.prod.db2.dbz_config',
+      ]),
+    );
     const orders = body.items.find((t: { name: string }) => t.name === 'orders');
     expect(orders.messages).toBe(3);
     expect(orders.partitions).toBe(1);
@@ -60,6 +72,48 @@ test.describe('API smoke', () => {
     expect(body.count).toBe(0);
     expect(body.records).toHaveLength(0);
     expect(body.watermark).toMatchObject({ low: 0, high: 0 });
+  });
+
+  /**
+   * #92: a compacted topic is routed under its own full name, not under the
+   * connector prefix its name derives to, and only the `topic-routing/` pin says
+   * so. Deriving the prefix found no segments and rendered the topic as empty —
+   * no messages, no watermark, zero bytes, and no error to notice.
+   */
+  test('compacted topic reads through its pinned routing prefix', async ({ request }) => {
+    const topic = 'acme.prod.db2.dbz_config';
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/${topic}/messages?offset=earliest`,
+    )).json();
+    expect(body.count).toBe(2);
+    expect(body.watermark).toMatchObject({ low: 0, high: 2 });
+    expect(body.records.map((r: { key: { data: string } }) => r.key.data)).toEqual(['cfg-a', 'cfg-b']);
+
+    // Its size is the byte span of its sub-stream inside the shared segment (#93);
+    // listing `.batch` objects — the old source — reports 0 on this layout.
+    const detail = await (await request.get(`/api/clusters/${CLUSTER}/topics/${topic}`)).json();
+    expect(detail.messages).toBe(2);
+    expect(detail.storage_bytes).toBeGreaterThan(0);
+  });
+
+  /**
+   * #95: `DeleteRecords` is logical — the records below the floor are still in the
+   * segment object, and only `watermark.json`'s `truncate` hides them. The log
+   * start must move, the count must drop, and an explicit request below the floor
+   * must not return the deleted records.
+   */
+  test('truncated topic hides the records deleted below the floor', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/truncated/messages?offset=earliest`,
+    )).json();
+    expect(body.watermark).toMatchObject({ low: 2, high: 3 });
+    expect(body.count).toBe(1);
+    expect(body.records.map((r: { offset: number }) => r.offset)).toEqual([2]);
+
+    const below = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/truncated/messages?offset=0`,
+    )).json();
+    expect(below.records.map((r: { offset: number }) => r.offset)).toEqual([2]);
   });
 
   test('avro-orders values decode via the registry', async ({ request }) => {

@@ -10,6 +10,11 @@
 #             in CI with COMPOSE_PROJECT_NAME=kt it is kt_default)
 #   BOOTSTRAP kafka bootstrap server (default: tansu:9092, reachable on NETWORK)
 #   KORA_URL  schema registry URL reachable on NETWORK (default: http://kora:8080)
+#
+# Topics: orders, events, empty-topic, avro-orders, truncated (3 records with the
+# first 2 deleted) and acme.prod.db2.dbz_config (compacted, so the broker routes it
+# under its own name) — the last two exist to exercise the storage contract the
+# #92–#97 sweep found Kotatsu had drifted from.
 set -euo pipefail
 
 NETWORK="${NETWORK:-kotatsu_default}"
@@ -31,13 +36,22 @@ done
 
 echo "→ creating topics (idempotent)…"
 create_topic() {
+  local topic="$1" partitions="$2"
+  shift 2
   kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOTSTRAP" \
-    --create --if-not-exists --topic "$1" --partitions "$2" --replication-factor 1
+    --create --if-not-exists --topic "$topic" --partitions "$partitions" \
+    --replication-factor 1 "$@"
 }
 create_topic orders 1
 create_topic events 3
 create_topic empty-topic 1
 create_topic avro-orders 1
+create_topic truncated 1
+# A compacted topic with ≥ 3 dotted components: the broker pins its routing prefix
+# to its own full name rather than to the connector prefix `acme.prod.db2`, so this
+# is the shape that rendered as an empty topic until #92. Nothing else in the seed
+# exercises the pin — every other topic is its own prefix.
+create_topic acme.prod.db2.dbz_config 1 --config cleanup.policy=compact
 
 echo "→ producing orders (3 keyed JSON records)…"
 printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"id":3,"item":"gizmo"}\n' | \
@@ -54,6 +68,31 @@ printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \
   kafka-avro-console-producer --bootstrap-server "$BOOTSTRAP" --topic avro-orders \
   --property schema.registry.url="$KORA_URL" \
   --property value.schema='{"type":"record","name":"Order","fields":[{"name":"id","type":"int"},{"name":"item","type":"string"}]}'
+
+echo "→ producing acme.prod.db2.dbz_config (2 keyed records, compacted topic)…"
+printf 'cfg-a:{"connector":"db2","state":"RUNNING"}\ncfg-b:{"connector":"db2","state":"PAUSED"}\n' | \
+  kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" \
+  --topic acme.prod.db2.dbz_config --property parse.key=true --property key.separator=:
+
+echo "→ producing truncated (3 records) then deleting below offset 2…"
+printf '{"n":1}\n{"n":2}\n{"n":3}\n' | \
+  kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" --topic truncated
+# `DeleteRecords` is logical: the records stay physically in the shared segment and
+# only `watermark.json`'s `truncate` says they are gone, so a reader working from
+# segments alone still saw them until #95. The offset file has to be a real file
+# for the tool, hence the mount.
+DR_DIR="$(mktemp -d)"
+trap 'rm -rf "$DR_DIR"' EXIT
+printf '{"partitions":[{"topic":"truncated","partition":0,"offset":2}],"version":1}\n' \
+  >"$DR_DIR/delete-records.json"
+# `mktemp -d` is mode 700 and the kafka image runs as a non-root user, so without
+# this the tool reads the mount as AccessDenied. (Docker Desktop's file sharing
+# hides it — this only fails on a native Linux daemon, i.e. in CI.)
+chmod 755 "$DR_DIR"
+chmod 644 "$DR_DIR/delete-records.json"
+docker run --rm --network "$NETWORK" -v "$DR_DIR:/dr" "$KAFKA_IMG" \
+  /opt/kafka/bin/kafka-delete-records.sh --bootstrap-server "$BOOTSTRAP" \
+  --offset-json-file /dr/delete-records.json
 
 echo "→ creating consumer group qa-group (consume orders from beginning)…"
 kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server "$BOOTSTRAP" \

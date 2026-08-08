@@ -19,8 +19,19 @@ thiserror = "2"
 object_store = { version = "0.12", features = ["aws", "gcp"] }
 bytes = "1"
 futures = "0.3"
-# Kafka record-batch codec (sans-io). Pinned: tested against Tansu 0.6.x.
-tansu-sans-io = "0.6"
+# Kafka record-batch codec (sans-io), from the **Popsink fork** — the codebase
+# that writes the batches this reader decodes. crates.io ships upstream
+# `tansu-io`, which has none of the fork's decode-side fixes (#96): format
+# decided at the magic byte rather than by CRC accident (Popsink/tansu#323), no
+# record `Vec` sized from the wire's `record_count` (Popsink/tansu#306, the
+# reachable one — Kotatsu decodes whatever objects are in the bucket), and the
+# per-struct tag buffer counted (Popsink/tansu#324).
+#
+# Pinned to a tag, never floating on `main`: a decoder that changes under us is
+# worse than one that lags visibly. The version to track is the deployed
+# broker's, which is also what the test stack runs — see TANSU_VERSION in
+# docker-compose.yml, bumped together with this tag.
+tansu-sans-io = { git = "https://github.com/Popsink/tansu.git", tag = "v0.7.0-beta.39" }
 # Schema registry (Kora) client + Avro decoding.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 apache-avro = "0.17"

@@ -4,6 +4,99 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The Tansu `v0.7.0-beta.39` storage-contract drift sweep (#92–#97). Kotatsu's last
+alignment with the segment contract was 0.9.0 (footer v3); several changes had
+landed upstream since, each of which made the reader answer a live question wrongly
+and silently. Every fix below was verified against a broker at that version, and
+the two the test stack could not see before are now smoke cases.
+
+### Fixed
+- **A compacted topic no longer renders empty** (#92) — the segment prefix is
+  resolved through the pinned `clusters/{cluster}/topic-routing/{topic}.json`
+  (Popsink/tansu#236) instead of being derived from the topic name. A topic whose
+  `cleanup.policy` contains `compact` is routed under its **full name**, not its
+  connector prefix, so the derivation looked in the wrong place, found no segments,
+  and showed the topic as empty — no messages, no watermark, `storage_bytes` 0, and
+  no error. That hit any compacted topic with three or more dotted components:
+  Connect config topics, Debezium schema-history topics. The pin is immutable, so
+  it is read at most once per topic per process; a topic created before pinning
+  existed falls back to the broker's own derivation (`prefix_of` plus the compacted
+  verdict). Kotatsu never writes the pin.
+- **The low watermark is rederived from the segments** (#94) — `watermark.json` no
+  longer carries `low` (Popsink/tansu#180), so the field was always absent, the
+  code fell through to a listing of a layout that no longer exists, and the log
+  start silently became 0. A partition whose start had moved — retention,
+  compaction, `DeleteRecords` — therefore reported the full `high` as its message
+  count (#71, and the count half of #64). `low` is now the base of the oldest live
+  segment slice, and an empty log starts where it ends (`low == high`,
+  Popsink/tansu#299) rather than at 0. A historic `low` in an old object still
+  parses and is ignored.
+- **Deleted records are no longer shown** (#95) — `watermark.json`'s `truncate`
+  (Popsink/tansu#176) is honoured. `DeleteRecords` is logical, not physical:
+  segments are never rewritten, so the records below the floor are still in the
+  shared segment object and only that field says they are gone. The floor raises
+  `low`, and it is enforced on the read path too — a timestamp seek bypassed `low`
+  entirely and would have served them.
+- **A certified-dead offset gap is no longer counted as messages** (#95) —
+  `watermark.json`'s `served: {end, at_high}` (Popsink/tansu#290) says what the
+  last segment expiry left servable. Offsets in `[end, high)` were destroyed and
+  nothing can ever appear there, so they are excluded from the count and named in
+  the UI instead of appearing as messages that never load. The pair is honoured
+  only while `at_high == high`; a floor moved since by a writer that did not
+  re-certify invalidates it.
+- **On-disk size is reported for segment-backed topics** (#93) — it is attributed
+  from the footers' per-sub-stream byte spans. It came from listing `.batch`
+  objects under `partitions/`, which returns nothing on a current cluster, so every
+  topic reported 0. A topic is charged its own share of a shared segment, never a
+  co-tenant's.
+
+### Removed
+- **The legacy `records/` read path and every hybrid branch** (#93) — the broker
+  writes only prefix-coalesced segments (Popsink/tansu#199 / #226 / #252) and
+  Popsink/tansu#179 removed the hybrid layout entirely; it no longer writes, reads
+  or even probes `records/{offset}.batch`. Keeping the seam was not merely dead
+  code: where abandoned `records/` objects survive in a bucket, Kotatsu presented
+  them as the live start of the log — records no Kafka consumer can read — and
+  `first_base_offset` cost a wasted LIST per partition on every watermark read.
+  Breaking for library consumers: `Keys::{records_prefix, batch, batch_floor,
+  base_offset_from_batch, partition_from_records_path, partitions_prefix}`,
+  `StorageSource::list_base_offsets` and the `frame_*` model helpers are gone.
+
+### Changed
+- **The test stack runs the Popsink fork, pinned** (#97) — `docker-compose.yml`
+  started `ghcr.io/tansu-io/tansu:latest`, the upstream image, whose bucket layout
+  is not the one production reads: no prefix-coalesced-only segments, no footer v3,
+  no routing pin, no truncation floor. Every issue in this sweep describes a real
+  production mismatch and **not one was detectable by that stack** — the smoke
+  passed because it exercised a layout Kotatsu still implemented and the broker no
+  longer writes. It now runs `ghcr.io/popsink/tansu` at a pinned version, with a
+  scheduled `tansu-pin` workflow that fails when the image and decoder pins
+  disagree and reports when both lag the fork's latest tag. The seed and smoke
+  gained the two shapes that were invisible: a compacted topic, and a topic with a
+  truncation floor.
+- **Decode with the Popsink `tansu-sans-io`, not crates.io 0.6** (#96) — the
+  record-batch decoder is now a git dependency on `Popsink/tansu` pinned to
+  `v0.7.0-beta.39`, the version the deployed broker writes with. It was resolving
+  upstream `tansu-io` 0.6.0 from crates.io — a different codebase from the writer,
+  missing every decode-side fix made in the fork since: the record format decided
+  at the magic byte rather than by CRC accident (Popsink/tansu#323), no record
+  `Vec` sized from the wire's `record_count` (Popsink/tansu#306 — the reachable
+  one, since Kotatsu decodes whatever objects are in the bucket), and the
+  per-struct tag buffer counted (Popsink/tansu#324). Pinned to a tag rather than
+  floating on `main`: a decoder that changes under us is worse than one that lags
+  visibly, and the version to track is the broker's — the same one the test stack
+  runs, so `TANSU_VERSION` in `docker-compose.yml` and this tag move together.
+- **Footer v3 is what production writes** (#96) — this supersedes the 0.9.0 note
+  below, which said "nothing in Tansu emits v3 yet". Since Popsink/tansu#188
+  (`0.7.0-beta.25`) v3 is emitted unconditionally on every write path, including
+  both compactions; v1 and v2 are read-only history. The decoding itself was
+  already right — the producer-coordinate stride is 22 bytes at v1/v2 and 23 at
+  v3, checked against `encode_footer` at `v0.7.0-beta.39` — only the comments
+  implied the v3 branch was untested speculation rather than the only branch that
+  runs on current data.
+
 ## [0.9.0] - 2026-07-27
 
 ### Added

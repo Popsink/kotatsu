@@ -48,16 +48,14 @@ pub(super) struct SegView {
 }
 
 impl SegView {
-    pub fn is_empty(&self) -> bool {
-        self.pieces.is_empty()
-    }
-
-    /// Earliest segment-backed offset (the seam `C` for a hybrid topic).
+    /// The log start: the earliest offset any live segment holds. `None` when the
+    /// topition has no segment at all — an empty log.
     pub fn low(&self) -> Option<i64> {
         self.pieces.first().map(|p| p.lo)
     }
 
-    /// Exclusive high watermark of the segment-backed region.
+    /// Exclusive end of the segment region — the log end, unless a segment expiry
+    /// raised the persisted `watermark.high` above it.
     pub fn high(&self) -> Option<i64> {
         self.pieces.iter().map(|p| p.hi).max()
     }
@@ -85,7 +83,7 @@ impl StorageSource {
     /// - `Ok(None)` — a legacy v0 object (no trailer) **or** a segment that
     ///   vanished (compaction deleted it mid-read, `NotFound`): the caller treats
     ///   both as "nothing to read here".
-    async fn segment_footer(
+    pub(super) async fn segment_footer(
         &self,
         prefix: &str,
         seq: u64,
@@ -146,15 +144,20 @@ impl StorageSource {
         }
     }
 
-    /// Builds the segment view for a topition by listing its connector prefix's
-    /// segments and resolving overlaps. Empty when the topic is not segment-backed
-    /// (a pure-legacy topic) — the caller then uses the legacy record path.
+    /// Builds the segment view for a topition by listing its routed prefix's
+    /// segments and resolving overlaps. Empty when the topition has no live
+    /// segment — an empty log.
+    ///
+    /// The prefix comes from the **pin** (#92), not from a derivation over the
+    /// topic name: a compacted topic is routed under its own name, and looking for
+    /// its segments under `org.env.conn` finds none, which renders as an empty
+    /// topic rather than as an error.
     pub(super) async fn build_segment_view(
         &self,
         topic: &str,
         partition: i32,
     ) -> Result<SegView, StorageError> {
-        let prefix = Keys::prefix_of(topic);
+        let prefix = self.routed_prefix_of(topic).await?;
         let list_prefix = self.keys().segment_prefix(&prefix);
 
         let mut placed = Vec::new();
