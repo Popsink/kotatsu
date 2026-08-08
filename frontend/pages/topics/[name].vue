@@ -94,7 +94,15 @@ const showFilters = ref(false)
 
 // Results
 const records = ref<Record[]>([])
-const watermark = ref<{ low: number; high: number } | null>(null)
+// `served_end` is present only when a segment expiry certified that the offsets
+// from it up to `high` were destroyed (Popsink/tansu#290) — a gap no fetch can
+// ever return, so it is not part of the message count.
+const watermark = ref<{ low: number; high: number; served_end?: number } | null>(null)
+const messageCount = computed(() => {
+  const wm = watermark.value
+  if (!wm) return 0
+  return Math.max(0, (wm.served_end ?? wm.high) - wm.low)
+})
 const loading = ref(false)
 const error = ref<string | null>(null)
 const expanded = ref<Set<number>>(new Set())
@@ -339,7 +347,11 @@ function fmtTime(ms: number): string {
 
     <p v-if="watermark" class="muted wm">
       partition {{ partition }} — low {{ watermark.low }}, high {{ watermark.high }}
-      ({{ Math.max(0, watermark.high - watermark.low) }} messages)
+      ({{ messageCount }} messages)
+      <template v-if="watermark.served_end !== undefined">
+        — offsets {{ watermark.served_end }}–{{ watermark.high - 1 }} were removed by
+        retention and cannot be served
+      </template>
     </p>
 
     <p v-if="error" class="err">{{ error }}</p>

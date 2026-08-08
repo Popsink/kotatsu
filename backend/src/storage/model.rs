@@ -13,18 +13,27 @@ use super::StorageError;
 /// footers floored by the object's persisted `high` (#93, #94).
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Watermark {
-    /// Earliest readable offset — the base of the oldest live segment slice. An
+    /// Earliest readable offset — the base of the oldest live segment slice,
+    /// raised to the truncation floor when `DeleteRecords` has set one (#95). An
     /// empty log starts where it ends, so `low == high` there rather than 0
     /// (Popsink/tansu#299): a 0 would advertise records no fetch can return.
     pub low: i64,
     /// Next offset to be written (log end).
     pub high: i64,
+    /// End of what is actually servable, when the last segment expiry certified it
+    /// (`served.end`, Popsink/tansu#290) and that certification still describes the
+    /// current `high`. `[served_end, high)` is then a gap the expiry destroyed: no
+    /// fetch will ever return an offset in it, so it is excluded from
+    /// [`Self::count`]. `None` — the normal case — means the whole
+    /// `[low, high)` range is servable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_end: Option<i64>,
 }
 
 impl Watermark {
-    /// Approximate message count.
+    /// Approximate message count, excluding a certified-dead gap.
     pub fn count(&self) -> i64 {
-        (self.high - self.low).max(0)
+        (self.served_end.unwrap_or(self.high) - self.low).max(0)
     }
 }
 

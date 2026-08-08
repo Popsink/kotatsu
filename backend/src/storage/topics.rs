@@ -181,7 +181,11 @@ impl StorageSource {
     ) -> Result<Watermark, StorageError> {
         match self.watermark(topic, partition).await {
             Ok(wm) => Ok(wm),
-            Err(StorageError::NotFound(_)) => Ok(Watermark { low: 0, high: 0 }),
+            Err(StorageError::NotFound(_)) => Ok(Watermark {
+                low: 0,
+                high: 0,
+                served_end: None,
+            }),
             Err(err) => Err(err),
         }
     }

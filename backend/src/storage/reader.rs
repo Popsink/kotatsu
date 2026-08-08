@@ -34,23 +34,62 @@ use super::{
 /// every segment written since and can only be stale, so it is ignored rather
 /// than preferred over the footers (#94). Being absent from the struct, it also
 /// cannot make an old object fail to parse.
-#[derive(Deserialize)]
+///
+/// `truncate` and `served` are absent until something writes them (the broker
+/// skips serializing them so a floor-less watermark keeps its byte layout), so
+/// their absence is the normal case and never an error.
+#[derive(Default, Deserialize)]
 struct WatermarkRaw {
+    #[serde(default)]
     high: Option<i64>,
+    /// The truncation floor left by `DeleteRecords` (Popsink/tansu#176). Truncation
+    /// is **logical, not physical**: segments are never rewritten, so the records
+    /// below this offset are still sitting in the shared segment object and only
+    /// this field says they are gone.
+    #[serde(default)]
+    truncate: Option<i64>,
+    /// What the last segment expiry left servable (Popsink/tansu#290).
+    #[serde(default)]
+    served: Option<ServedEnd>,
+}
+
+/// The `{end, at_high}` pair certifying what a segment expiry left servable:
+/// `end` is the tail of the segments that survived it, `at_high` the `high`
+/// written by the same CAS.
+///
+/// The pair is only meaningful while `at_high == high`. A floor moved since by a
+/// writer that did not re-certify — an older binary's expiry, which round-trips
+/// the pair untouched — invalidates it, and then the only safe reading is the
+/// pre-#290 one: the gap is unknown, so nothing is excluded.
+#[derive(Clone, Copy, Deserialize)]
+struct ServedEnd {
+    end: i64,
+    at_high: i64,
+}
+
+impl ServedEnd {
+    /// Whether this certification still describes `high`.
+    fn certifies(&self, high: i64) -> bool {
+        self.at_high == high
+    }
 }
 
 impl StorageSource {
     /// Reads a partition's low/high watermark.
     ///
-    /// The segment footers are the authority:
-    /// - `low` — the base offset of the oldest live segment slice. An empty log
-    ///   starts where it ends (`low == high`, Popsink/tansu#299): reporting 0
-    ///   there advertises records no fetch can return.
+    /// The segment footers are the authority for where records are, and
+    /// `watermark.json` for what of them is still readable:
+    /// - `low` — the base offset of the oldest live segment slice, raised to the
+    ///   truncation floor. An empty log starts where it ends (`low == high`,
+    ///   Popsink/tansu#299): reporting 0 there advertises records no fetch can
+    ///   return.
     /// - `high` — the tail of the segment region, floored by the persisted
     ///   `watermark.json` high and by what this process has already seen. The
     ///   floor matters because the persisted value can sit *above* the segment
     ///   tail: a segment expiry raises it while deleting the segments that held
     ///   those offsets. The high is monotonic, so a cached floor never needs a TTL.
+    /// - `served_end` — where the servable range actually stops when an expiry
+    ///   certified a gap below `high`.
     ///
     /// `watermark.json` is lazily persisted — never written on the produce hot
     /// path, since that would make it a per-write hot object — so it can be absent
@@ -77,11 +116,35 @@ impl StorageSource {
             .flatten()
             .max()
             .unwrap_or(0);
-        // No live segment ⇒ an empty log, which starts at its end.
-        let low = view.low().unwrap_or(high);
+        // No live segment ⇒ an empty log, which starts at its end. The truncation
+        // floor applies to both arms: the records below it are physically present
+        // in the shared segments, and only the floor says they are deleted.
+        let low = view
+            .low()
+            .unwrap_or(high)
+            .max(raw.truncate.unwrap_or(i64::MIN));
 
         self.set_cached_high(topic, partition, high);
-        Watermark { low, high }
+        Watermark {
+            low,
+            high,
+            // Honour the pair only while it still certifies this `high`, and only
+            // when it actually describes a gap.
+            served_end: raw
+                .served
+                .filter(|served| served.certifies(high) && served.end < high)
+                .map(|served| served.end),
+        }
+    }
+
+    /// The truncation floor for a topition: the offset `DeleteRecords` logically
+    /// truncated below, or 0. Read from the same object as the watermark.
+    async fn truncate_floor(&self, topic: &str, partition: i32) -> Result<i64, StorageError> {
+        Ok(self
+            .watermark_hint(topic, partition)
+            .await?
+            .truncate
+            .unwrap_or(0))
     }
 
     /// Reads the `watermark.json` hint, tolerating its absence: it is only lazily
@@ -96,7 +159,7 @@ impl StorageSource {
             .await
         {
             Ok(raw) => Ok(raw),
-            Err(StorageError::NotFound(_)) => Ok(WatermarkRaw { high: None }),
+            Err(StorageError::NotFound(_)) => Ok(WatermarkRaw::default()),
             Err(e) => Err(e),
         }
     }
@@ -145,7 +208,13 @@ impl StorageSource {
                 OffsetSpec::Latest => (wm.high - limit as i64).max(wm.low),
                 OffsetSpec::At(offset) => offset.clamp(wm.low, wm.high),
                 OffsetSpec::Timestamp(ts) => self.seek_time(topic, partition, ts).await?,
-            };
+            }
+            // Nothing below the truncation floor is served (#95). `wm.low` already
+            // carries it, so every arm above is floored — except a timestamp seek,
+            // which lands wherever the footer timestamps point. Enforced once here
+            // so no future spec can bypass it: truncated records are physically
+            // still in the segment, and an explicit request must not reach them.
+            .max(wm.low);
 
             if start >= wm.high || limit == 0 {
                 return Ok(Vec::new());
@@ -208,6 +277,10 @@ impl StorageSource {
     /// Slightly over-inclusive: the region returned may open with a few records
     /// older than `target_ts`. Answers the log end when no region reaches the
     /// target, so a fetch from here reads nothing.
+    ///
+    /// Never answers below the truncation floor (#95): a region can still
+    /// physically hold records a `DeleteRecords` deleted, and their timestamps are
+    /// as seekable as any other.
     pub async fn seek_time(
         &self,
         topic: &str,
@@ -218,7 +291,7 @@ impl StorageSource {
 
         for piece in &view.pieces {
             if piece.max_timestamp >= target_ts {
-                return Ok(piece.lo);
+                return Ok(piece.lo.max(self.truncate_floor(topic, partition).await?));
             }
         }
 
@@ -595,6 +668,138 @@ mod tests {
             [0, 1],
             "each offset surfaces exactly once, from the merged winner"
         );
+    }
+
+    /// #95: after a `DeleteRecords` to offset N the browser starts at N, `low == N`,
+    /// and an explicit request below N returns nothing — the truncated records are
+    /// still physically in the segment, so only the floor hides them.
+    #[tokio::test]
+    async fn truncation_floor_hides_deleted_records() {
+        use object_store::memory::InMemory;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        // Three records at 0..3, then DeleteRecords to offset 2.
+        let region: Vec<u8> = [BATCH, BATCH2, BATCH3].concat();
+        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 3, &region, 555)]).await;
+        put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":3,"truncate":2}"#).await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!(
+            (wm.low, wm.high, wm.count()),
+            (2, 3, 1),
+            "log starts at the floor; one record left"
+        );
+
+        for spec in [OffsetSpec::Earliest, OffsetSpec::At(0), OffsetSpec::At(1)] {
+            let records = src.fetch(SEG_TOPIC, 0, spec, 100).await.unwrap();
+            assert_eq!(
+                records.iter().map(|r| r.offset).collect::<Vec<_>>(),
+                [2],
+                "{spec:?} must not reach below the floor"
+            );
+        }
+
+        // A timestamp seek lands on the region, whose base is below the floor.
+        assert_eq!(
+            src.seek_time(SEG_TOPIC, 0, 1).await.unwrap(),
+            2,
+            "time-seek is floored too"
+        );
+        let by_time = src
+            .fetch(SEG_TOPIC, 0, OffsetSpec::Timestamp(1), 100)
+            .await
+            .unwrap();
+        assert_eq!(by_time.iter().map(|r| r.offset).collect::<Vec<_>>(), [2]);
+    }
+
+    /// #95: a floor at or above the log end leaves nothing readable, and the count
+    /// is 0 rather than negative or a full log.
+    #[tokio::test]
+    async fn fully_truncated_partition_reads_empty() {
+        use object_store::memory::InMemory;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        let region: Vec<u8> = [BATCH, BATCH2].concat();
+        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, &region, 1)]).await;
+        put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":2,"truncate":2}"#).await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!((wm.low, wm.high, wm.count()), (2, 2, 0));
+        assert!(src
+            .fetch(SEG_TOPIC, 0, OffsetSpec::Earliest, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// #95: a certified `[served.end, high)` gap holds offsets a segment expiry
+    /// destroyed — no fetch will ever return one — so the count excludes it instead
+    /// of reporting them as messages.
+    #[tokio::test]
+    async fn certified_dead_gap_is_excluded_from_the_count() {
+        use object_store::memory::InMemory;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        // Segments below survive at 0..2; the expiry destroyed 2..10 and raised the
+        // floor to 10, certifying so under the same CAS.
+        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, BATCH, 1)]).await;
+        put_watermark(
+            &store,
+            &src,
+            SEG_TOPIC,
+            0,
+            r#"{"high":10,"served":{"end":2,"at_high":10}}"#,
+        )
+        .await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!((wm.low, wm.high), (0, 10));
+        assert_eq!(wm.served_end, Some(2));
+        assert_eq!(wm.count(), 2, "8 dead offsets are not messages");
+    }
+
+    /// #95: the pair is only valid while it certifies the current `high` — a floor
+    /// moved by a writer that did not re-certify invalidates it, and the reader
+    /// falls back to pre-#290 behaviour.
+    #[tokio::test]
+    async fn uncertified_served_pair_is_ignored() {
+        use object_store::memory::InMemory;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, BATCH, 1)]).await;
+        // `at_high` (10) no longer matches `high` (20): a peer moved the floor.
+        put_watermark(
+            &store,
+            &src,
+            SEG_TOPIC,
+            0,
+            r#"{"high":20,"served":{"end":2,"at_high":10}}"#,
+        )
+        .await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!(wm.served_end, None, "stale certification ignored");
+        assert_eq!((wm.low, wm.high, wm.count()), (0, 20, 20));
+    }
+
+    /// #95: a watermark object with neither field behaves exactly as before — the
+    /// normal case, since the broker omits both until something writes them.
+    #[tokio::test]
+    async fn watermark_without_the_new_fields_is_unchanged() {
+        use object_store::memory::InMemory;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 3, BATCH, 1)]).await;
+        put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":null}"#).await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!((wm.low, wm.high, wm.count()), (0, 3, 3));
+        assert_eq!(wm.served_end, None);
     }
 
     /// Time-seek lands on the first region whose newest record reaches the target,
