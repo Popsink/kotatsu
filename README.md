@@ -1,6 +1,6 @@
 # kotatsu
 
-Read-only, on-demand browser over [Tansu](https://github.com/tansu-io/tansu)'s
+Read-only, on-demand browser over [Tansu](https://github.com/Popsink/tansu)'s
 **native S3 storage**. Topics, events, consumer groups and simple stats are read
 directly from the object store Tansu writes to — **no Kafka broker, no Kafka
 client, no background polling**. Every read is triggered by a user action.
@@ -9,21 +9,31 @@ Built with **Rust (Axum)** + **Nuxt 3**.
 
 ## Architecture
 
-Tansu persists everything to S3 under a known layout (reverse-engineered from
-`tansu-storage::dynostore`):
+Tansu persists everything to S3 under a known layout (`tansu-storage::dynostore`,
+documented in `Popsink/tansu:docs/virtual-topics-format.md`):
 
 ```
-clusters/{cluster}/meta.json                                        topic/producer/txn metadata
-clusters/{cluster}/topics/{topic}/partitions/{p:010}/watermark.json low/high offsets
-clusters/{cluster}/topics/{topic}/partitions/{p:010}/records/{base_offset:020}.batch
+clusters/{cluster}/meta.json                                        producer/txn metadata
+clusters/{cluster}/topic-metadata/{topic}.json                      per-topic spec + configs
+clusters/{cluster}/topic-routing/{topic}.json                       the prefix a topic's records are routed under
+clusters/{cluster}/topics/{topic}/partitions/{p:010}/watermark.json high, truncation floor, served end
+clusters/{cluster}/prefixes/{prefix}/segments/{seq:020}.seg         the records themselves
 clusters/{cluster}/groups/consumers/{group}.json                    consumer group detail
 clusters/{cluster}/groups/consumers/{group}/offsets/{topic}/partitions/{p:010}.json
 ```
 
-Kotatsu reads these objects via the `object_store` crate and decodes the
-`.batch` files (raw Kafka record batches) with `tansu-sans-io`. Avro values are
-resolved against [Kora](https://github.com/Popsink/kora) (Confluent-compatible
-schema registry). See the GitHub issues for the full design.
+Records live in **shared per-prefix segment objects**, each multiplexing many
+`(topic, partition)` sub-streams: a footer at the tail of the segment says where
+each sub-stream's bytes and offsets are, so reading one topition is a ranged GET of
+exactly its own byte span. Which prefix a topic is routed under is **pinned at
+creation** and not derivable from its name — a compacted topic is routed under its
+own full name. The per-partition `records/{offset}.batch` layout this replaced is
+gone from the broker and from Kotatsu (#93).
+
+Kotatsu reads these objects via the `object_store` crate and decodes the record
+batches with `tansu-sans-io`, pinned to the same fork revision the broker writes
+with. Avro values are resolved against [Kora](https://github.com/Popsink/kora)
+(Confluent-compatible schema registry). See the GitHub issues for the full design.
 
 ## Project layout
 
@@ -71,7 +81,11 @@ a MinIO S3 on http://localhost:9000 (console at :9001, `minioadmin`/`minioadmin`
 with a `tansu` bucket created automatically.
 
 It also starts a **Tansu broker** (`localhost:9092`, cluster `demo`) writing to
-that bucket, so you can generate real events:
+that bucket, so you can generate real events. That broker is the **Popsink fork**
+(`ghcr.io/popsink/tansu`) at a pinned version, because upstream writes a different
+storage layout from the one Kotatsu reads in production; the pin lives in
+`docker-compose.yml` and must match the `tansu-sans-io` tag in
+`backend/Cargo.toml`, which CI checks (#97).
 
 ```bash
 # create a topic + produce a few messages with any Kafka client

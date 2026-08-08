@@ -1,0 +1,98 @@
+name: tansu pin
+
+# Kotatsu reads a storage layout the broker defines, so its two pins — the
+# broker image the test stack runs and the `tansu-sans-io` decoder the backend
+# links — are only meaningful while they name the same version, and only useful
+# while that version is the one production runs. Nothing signalled when the fork
+# moved, which is how the #92–#97 drift sweep came to be found by reading commit
+# logs (#96, #97).
+#
+# Two checks, deliberately different in severity:
+#   1. the two pins agree with each other        — a failure, on every PR
+#   2. they are the fork's latest tag            — a notice, on a schedule
+#
+# (1) is a repo invariant we control, so it blocks. (2) is someone else's release
+# cadence: lagging is a normal state to be in knowingly, so it reports rather
+# than fails, and a bump stays a reviewed PR.
+
+on:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - backend/Cargo.toml
+      - .github/workflows/tansu-pin.yml
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 07:00 UTC — a week is the right granularity for a version bump.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pins-agree:
+    name: image and decoder pin the same version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the two pins
+        run: |
+          set -euo pipefail
+
+          # ghcr.io/popsink/tansu:${TANSU_VERSION:-0.7.0-beta.39} → 0.7.0-beta.39
+          image=$(sed -n 's|.*ghcr\.io/popsink/tansu:\${TANSU_VERSION:-\([^}]*\)}.*|\1|p' docker-compose.yml)
+          # tag = "v0.7.0-beta.39" → 0.7.0-beta.39
+          decoder=$(sed -n 's|.*Popsink/tansu\.git", tag = "v\([^"]*\)".*|\1|p' backend/Cargo.toml)
+
+          echo "broker image pin: ${image:-<none>}"
+          echo "decoder tag pin:  ${decoder:-<none>}"
+
+          if [ -z "$image" ] || [ -z "$decoder" ]; then
+            echo "::error::could not read one of the pins — has its line been reformatted?"
+            exit 1
+          fi
+
+          if [ "$image" != "$decoder" ]; then
+            echo "::error::the test stack runs $image but the decoder is built from $decoder;" \
+                 "they must name the same broker version"
+            exit 1
+          fi
+
+          echo "pinned=$image" >>"$GITHUB_ENV"
+
+      - name: Report drift from the fork's latest tag
+        run: |
+          set -euo pipefail
+
+          # The fork publishes versions as `v*` tags and has no GitHub releases
+          # (its release job is gated on the upstream maintainer), so the tag list
+          # is the only source. `.[0]` is the most recent as GitHub orders them.
+          latest=$(gh api repos/Popsink/tansu/tags --jq '.[0].name' | sed 's/^v//')
+          echo "fork's latest tag: $latest"
+
+          if [ "$latest" = "$pinned" ]; then
+            echo "### Pinned to the fork's latest, \`$pinned\` :white_check_mark:" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### Broker pin is behind"
+            echo
+            echo "| | version |"
+            echo "|---|---|"
+            echo "| pinned here | \`$pinned\` |"
+            echo "| Popsink/tansu latest | \`$latest\` |"
+            echo
+            echo "To bump, edit both pins together and read the fork's changes in between"
+            echo "for storage-contract drift:"
+            echo
+            echo '- `docker-compose.yml` — the `tansu` service image default'
+            echo '- `backend/Cargo.toml` — the `tansu-sans-io` git `tag`'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "::notice::broker pin $pinned is behind Popsink/tansu $latest"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

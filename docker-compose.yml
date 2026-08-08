@@ -31,13 +31,41 @@ services:
 
   # Kafka-compatible broker persisting to the MinIO bucket. Produce events to
   # localhost:9092 and they land under clusters/demo/ in the bucket.
+  #
+  # This is the **Popsink fork** (`ghcr.io/popsink/tansu`), not upstream
+  # `tansu-io/tansu`, and it is pinned (#97). Upstream has none of the storage
+  # contract Kotatsu reads — prefix-coalesced segments as the only layout, footer
+  # v3, the pinned routing prefix, the truncation floor, the dropped
+  # `watermark.low` — so a stack running it produces a bucket whose layout is not
+  # the one production reads, and every drift this sweep fixed was invisible to
+  # it. `:latest` was the second half of the problem: a floating tag moves the
+  # contract under test with no commit here, so a green run proved nothing about
+  # a specific broker version and a red one could not be attributed.
+  #
+  # The version lives here, once: this default is the pin, and `TANSU_VERSION`
+  # overrides it for a one-off local run against another build (`.env` is
+  # gitignored, so it can never become the committed source of truth). It must
+  # track the tag `backend/Cargo.toml` pins the decoder to — the broker's version
+  # is the one thing the writer and the decoder have to agree on. Drift from the
+  # fork's latest tag is reported by `.github/workflows/tansu-pin.yml`, so a bump
+  # arrives as a PR to review rather than as a surprise in a commit log.
   tansu:
-    image: ghcr.io/tansu-io/tansu:latest
+    image: ghcr.io/popsink/tansu:${TANSU_VERSION:-0.7.0-beta.39}
+    # Waits for the bucket, not just for the container that makes it: the fork
+    # runs a metadata migration on startup, whose PUT against a missing bucket is
+    # a `NoSuchBucket` panic rather than a retry. Plain `- createbucket` only
+    # ordered the *starts*, so the broker raced `mc mb` and lost.
     depends_on:
-      - minio
-      - createbucket
+      minio:
+        condition: service_started
+      createbucket:
+        condition: service_completed_successfully
     environment:
-      RUST_LOG: warn,tansu_broker=info,tansu_storage=info
+      # `tansu_storage=info` is a per-object-operation span firehose in the fork
+      # (thousands of lines before the first produce), which buries anything worth
+      # reading. `warn` keeps what a test stack needs — the deprecated
+      # storage-URL-key warning included.
+      RUST_LOG: warn,tansu_broker=info,tansu_storage=warn
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_ENDPOINT: http://minio:9000
