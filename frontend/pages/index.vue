@@ -1,10 +1,20 @@
 <script setup lang="ts">
-const { source, cluster, configured, connected } = await useCluster()
+const { source, cluster, configured } = await useCluster()
 
 const { data: summary } = await useFetch<any>(
   () => cluster.value ? `/api/clusters/${cluster.value}` : '',
   { watch: [cluster] },
 )
+
+// Connectivity is the one answer that costs an S3 round-trip, so it is asked
+// for here — the only screen that shows it — and nowhere else (#109). Lazy, so
+// the page renders before the store replies, and repeatable on demand.
+const { data: status, pending: probing, refresh: recheck } = useLazyFetch<{
+  configured: boolean
+  connected: boolean
+  error?: string
+}>('/api/source/status')
+const connected = computed(() => status.value?.connected === true)
 </script>
 
 <template>
@@ -20,9 +30,16 @@ const { data: summary } = await useFetch<any>(
             <div><dt>bucket</dt><dd>{{ source?.bucket }}</dd></div>
             <div><dt>endpoint</dt><dd>{{ source?.endpoint || 'AWS default' }}</dd></div>
             <div><dt>region</dt><dd>{{ source?.region }}</dd></div>
-            <div><dt>status</dt><dd :class="connected ? 'ok' : 'err'">{{ connected ? 'connected' : 'disconnected' }}</dd></div>
+            <div>
+              <dt>status</dt>
+              <dd v-if="probing" class="muted">checking…</dd>
+              <dd v-else :class="connected ? 'ok' : 'err'">{{ connected ? 'connected' : 'disconnected' }}</dd>
+            </div>
           </dl>
-          <p v-if="!connected && source?.status?.error" class="err small">{{ source?.status?.error }}</p>
+          <p v-if="!probing && !connected && status?.error" class="err small">{{ status.error }}</p>
+          <button type="button" class="recheck" :disabled="probing" @click="recheck()">
+            <Spinner v-if="probing" size="12px" /> Re-check
+          </button>
         </template>
         <p v-else class="muted">No S3 source configured.</p>
       </div>
@@ -56,6 +73,9 @@ dl { margin: 0; }
 dl div { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #0e2a40; }
 dt { color: var(--muted); font-size: 0.85rem; }
 dd { margin: 0; font-family: ui-monospace, monospace; }
+.recheck { margin-top: 0.75rem; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
+.recheck:disabled { opacity: 0.5; cursor: default; }
+.recheck:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 .links { display: flex; gap: 1rem; margin: 0.9rem 0 0; }
 .link { color: var(--accent); text-decoration: none; }
 .link:hover { text-decoration: underline; }
