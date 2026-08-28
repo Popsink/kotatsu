@@ -90,7 +90,6 @@ const records = ref<Record[]>([])
 // ever return, so it is not part of the message count.
 interface PartitionSummary {
   partition: number
-  watermark: { low: number; high: number; served_end?: number }
   scanned: number
   exhausted: boolean
 }

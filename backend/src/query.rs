@@ -222,6 +222,20 @@ pub fn parse_partition(raw: &str) -> Result<PartitionSelector, QueryError> {
     }
 }
 
+/// Whether a scan that filled its budget nonetheless covered the whole partition.
+///
+/// Which edge proves it depends on the direction of the read. `latest` returns the
+/// *last* records, so it touches the log end on its very first one — checking that
+/// end would call every `latest` read complete, however little of the partition it
+/// actually looked at. Reading backwards, only reaching the log start proves
+/// coverage; reading forward, only reaching the served end does.
+fn covers_partition(spec: OffsetSpec, first: i64, last: i64, low: i64, served_end: i64) -> bool {
+    match spec {
+        OffsetSpec::Latest => first <= low,
+        _ => last + 1 >= served_end,
+    }
+}
+
 /// What one partition contributed to a read.
 struct PartitionScan {
     partition: i32,
@@ -247,11 +261,15 @@ async fn scan_partition(
     let records = source.fetch(topic, partition, spec, budget).await?;
     // Fetched fewer than asked ⇒ we reached the end. Reading *exactly* the budget
     // is no longer rare once it is split across partitions (#102), so also check
-    // the log end: a partition that served its last offset is exhausted even if it
-    // filled the budget doing so, and reporting "scan capped" there is a lie.
+    // whether the records we got happen to span to the partition's edge.
     let served_end = watermark.served_end.unwrap_or(watermark.high);
-    let reached_end =
-        records.len() < budget || records.last().is_some_and(|r| r.offset + 1 >= served_end);
+    let reached_end = records.len() < budget
+        || match (records.first(), records.last()) {
+            (Some(f), Some(l)) => {
+                covers_partition(spec, f.offset, l.offset, watermark.low, served_end)
+            }
+            _ => true,
+        };
 
     let mut rendered = Vec::new();
     let mut scanned = 0usize;
@@ -316,6 +334,12 @@ fn merge_key(record: &Value) -> (i64, i64, i64) {
 /// shape — or `all`, which fans out over every partition concurrently and merges
 /// newest-first (#102). The scan budget is topic-wide in both cases: a 12-partition
 /// search reads no more than a single-partition one, never twelve times as much.
+///
+/// That budget is what makes `all` approximate, and deliberately so. Each partition
+/// is read up to its share, so with a `limit` small next to the partition count the
+/// answer is "the newest few of every partition", not provably "the newest `limit`
+/// of the topic" — proving that would mean reading `limit` from every partition,
+/// which is the N× cost the budget exists to prevent. `order_best_effort` marks it.
 pub async fn messages(
     source: &StorageSource,
     registry: Option<&SchemaRegistry>,
@@ -422,6 +446,28 @@ pub async fn messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `latest` read starts at the log end, so the end proves nothing about how
+    /// much of the partition it saw. Getting this backwards makes every capped
+    /// `latest` scan claim it was complete.
+    #[test]
+    fn a_latest_scan_is_only_covered_once_it_reaches_the_log_start() {
+        // Read the last record of a 6-record partition: 5 more remain below.
+        assert!(!covers_partition(OffsetSpec::Latest, 5, 5, 0, 6));
+        // Read all six.
+        assert!(covers_partition(OffsetSpec::Latest, 0, 5, 0, 6));
+        // A truncated partition starts at its floor, not at 0.
+        assert!(covers_partition(OffsetSpec::Latest, 2, 5, 2, 6));
+    }
+
+    #[test]
+    fn a_forward_scan_is_covered_once_it_reaches_the_served_end() {
+        assert!(covers_partition(OffsetSpec::Earliest, 0, 5, 0, 6));
+        assert!(!covers_partition(OffsetSpec::Earliest, 0, 3, 0, 6));
+        // `served_end` below `high` is retention having destroyed the tail (#95):
+        // reaching it is as far as any read can go.
+        assert!(covers_partition(OffsetSpec::Earliest, 0, 3, 0, 4));
+    }
 
     #[test]
     fn partition_spec_accepts_all_and_numbers() {
