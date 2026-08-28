@@ -80,7 +80,8 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | # | Step | Endpoint / Action | Expected | Ref case |
 |---|------|-------------------|----------|----------|
 | 1 | Service health | `GET /api/health` | `{"service":"kotatsu","status":"ok"}` | — |
-| 2 | Source connected | `GET /api/source` | `configured: true`, `status.connected: true` | SRC-001 |
+| 2 | Source configured | `GET /api/source` | `configured: true`, `cluster: demo`, no `status` key | SRC-001 |
+| 2b | Source reachable | `GET /api/source/status` | `connected: true` | SRC-001 |
 | 3 | Cluster discovered | `GET /api/clusters` | `clusters` contains `demo` | SRC-001 |
 | 4 | Topics listed | `GET /api/clusters/demo/topics` | `orders`, `events`, `empty-topic`, `avro-orders`, `truncated`, `acme.prod.db2.dbz_config` present | TOP-001 |
 | 5 | Topic detail | `GET /api/clusters/demo/topics/events` | 3 partitions; `messages: 6` | TOP-002 |
