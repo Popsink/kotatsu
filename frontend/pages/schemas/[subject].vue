@@ -16,7 +16,7 @@ interface SubjectDetail {
 const route = useRoute()
 const subject = route.params.subject as string
 
-const { data, pending, error } = await useFetch<SubjectDetail>(
+const { data, pending, error, refresh } = await useFetch<SubjectDetail>(
   `/api/schemas/${encodeURIComponent(subject)}`,
 )
 
@@ -51,7 +51,7 @@ const pretty = computed(() => {
     <h2>Subject <code>{{ subject }}</code></h2>
 
     <div v-if="pending" class="center"><Spinner size="28px" /></div>
-    <p v-else-if="error" class="err">{{ (error as any)?.data?.error || error.message }}</p>
+    <ErrorState v-else-if="error" :error="error" :retrying="pending" @retry="refresh" />
 
     <template v-else-if="data">
       <dl class="meta">
@@ -81,7 +81,6 @@ const pretty = computed(() => {
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
-.err { color: var(--err); }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; max-width: 640px; }
 .meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }

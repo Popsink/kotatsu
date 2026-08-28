@@ -1,7 +1,5 @@
 <script setup lang="ts">
-const { data: source } = await useFetch<any>('/api/source')
-const cluster = computed(() => source.value?.cluster)
-const connected = computed(() => source.value?.status?.connected)
+const { source, cluster, configured, connected } = await useCluster()
 
 const { data: summary } = await useFetch<any>(
   () => cluster.value ? `/api/clusters/${cluster.value}` : '',
@@ -17,14 +15,14 @@ const { data: summary } = await useFetch<any>(
     <div class="cards">
       <div class="card">
         <h3>Source</h3>
-        <template v-if="source?.configured">
+        <template v-if="configured">
           <dl>
-            <div><dt>bucket</dt><dd>{{ source.bucket }}</dd></div>
-            <div><dt>endpoint</dt><dd>{{ source.endpoint || 'AWS default' }}</dd></div>
-            <div><dt>region</dt><dd>{{ source.region }}</dd></div>
+            <div><dt>bucket</dt><dd>{{ source?.bucket }}</dd></div>
+            <div><dt>endpoint</dt><dd>{{ source?.endpoint || 'AWS default' }}</dd></div>
+            <div><dt>region</dt><dd>{{ source?.region }}</dd></div>
             <div><dt>status</dt><dd :class="connected ? 'ok' : 'err'">{{ connected ? 'connected' : 'disconnected' }}</dd></div>
           </dl>
-          <p v-if="!connected && source.status?.error" class="err small">{{ source.status.error }}</p>
+          <p v-if="!connected && source?.status?.error" class="err small">{{ source?.status?.error }}</p>
         </template>
         <p v-else class="muted">No S3 source configured.</p>
       </div>
