@@ -25,7 +25,6 @@ defineEmits<{ 'update:modelValue': [string]; prev: []; next: [] }>()
     <input
       :value="modelValue"
       class="search"
-      type="search"
       :placeholder="placeholder"
       :aria-label="label"
       @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"

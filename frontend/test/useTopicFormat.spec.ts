@@ -27,11 +27,6 @@ describe('useTopicFormat', () => {
     expect([fmt.keyFormat.value, fmt.valueFormat.value]).toEqual(['auto', 'auto'])
   })
 
-  it('is scoped to the topic', async () => {
-    const fmt = await mount('acme.prod.db2.dbz_config')
-    expect(fmt.storageKey).toBe('kotatsu:fmt:acme.prod.db2.dbz_config')
-  })
-
   it('remembers the choice across visits', async () => {
     const first = await mount()
     first.valueFormat.value = 'avro'

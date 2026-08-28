@@ -23,9 +23,9 @@ function build({ q, limit, offset }: { q: string; limit: number; offset: number 
   return `/api/things?search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`
 }
 
-async function makeList(options = {}) {
+async function makeList() {
   const scope = effectScope()
-  const list = (await scope.run(() => usePagedList<{ items: unknown[]; total: number }>(build, options)))!
+  const list = (await scope.run(() => usePagedList<{ items: unknown[]; total: number }>(build)))!
   return { scope, list }
 }
 
@@ -39,7 +39,6 @@ describe('usePagedList', () => {
   it('starts on the first page with an empty query', async () => {
     const { list } = await makeList()
     expect(list.q.value).toBe('')
-    expect(list.offset.value).toBe(0)
     expect(list.pager.value).toMatchObject({ from: 1, to: 50, total: 120, canPrev: false, canNext: true })
     expect(fetchState.url!.value).toBe('/api/things?search=&limit=50&offset=0')
   })
@@ -66,37 +65,31 @@ describe('usePagedList', () => {
     expect(fetchState.url!.value).toBe('/api/things?search=ord&limit=50&offset=0')
   })
 
-  it('honours a custom debounce', async () => {
-    const { list } = await makeList({ debounce: 0 })
-    list.search.value = 'ord'
-    vi.advanceTimersByTime(0)
-    expect(list.q.value).toBe('ord')
-  })
-
   it('returns to the first page when the search changes', async () => {
     const { list } = await makeList()
-    list.offset.value = 100
+    list.next()
+    list.next()
+    expect(list.pager.value.from).toBe(101)
     list.search.value = 'ord'
     vi.advanceTimersByTime(300)
-    expect(list.offset.value).toBe(0)
+    expect(list.pager.value.from).toBe(1)
   })
 
   it('clamps prev at the first page', async () => {
     const { list } = await makeList()
     list.prev()
-    expect(list.offset.value).toBe(0)
-    list.offset.value = 30 // a page boundary the pager itself never produces
+    expect(list.pager.value).toMatchObject({ from: 1, canPrev: false })
+    list.next()
     list.prev()
-    expect(list.offset.value).toBe(0)
+    list.prev()
+    expect(list.pager.value).toMatchObject({ from: 1, canPrev: false })
   })
 
   it('refuses next past the last page', async () => {
     const { list } = await makeList()
     list.next()
     list.next()
-    expect(list.offset.value).toBe(100)
     list.next()
-    expect(list.offset.value).toBe(100)
     expect(list.pager.value).toMatchObject({ from: 101, to: 120, canNext: false, canPrev: true })
   })
 
@@ -115,12 +108,12 @@ describe('usePagedList', () => {
 
   it('reset() clears the search, the page and any pending debounce', async () => {
     const { list } = await makeList()
+    list.next()
     list.search.value = 'ord'
-    list.offset.value = 50
     list.reset()
     expect(list.search.value).toBe('')
     expect(list.q.value).toBe('')
-    expect(list.offset.value).toBe(0)
+    expect(list.pager.value.from).toBe(1)
     vi.advanceTimersByTime(300)
     expect(list.q.value).toBe('') // the cancelled timer never landed
   })

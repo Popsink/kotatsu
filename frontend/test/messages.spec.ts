@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMessagesQuery, offsetParam, type MessageQuery } from '~/utils/messages'
+import { buildMessagesQuery, type MessageQuery } from '~/utils/messages'
 
 const base: MessageQuery = {
   partition: 0,
@@ -9,28 +9,23 @@ const base: MessageQuery = {
   valueFormat: 'auto',
 }
 
-describe('offsetParam', () => {
-  it('passes the keyword modes through', () => {
-    expect(offsetParam('earliest')).toBe('earliest')
-    expect(offsetParam('latest', '99')).toBe('latest')
-  })
-
-  it('sends a bare offset, defaulting to 0', () => {
-    expect(offsetParam('specific', '17')).toBe('17')
-    expect(offsetParam('specific', '')).toBe('0')
-  })
-
-  it('prefixes a timestamp', () => {
-    expect(offsetParam('timestamp', '1700000000000')).toBe('timestamp:1700000000000')
-    expect(offsetParam('timestamp')).toBe('timestamp:0')
-  })
-})
-
 describe('buildMessagesQuery', () => {
   it('always sends the partition, offset, limit and both formats', () => {
     expect(buildMessagesQuery(base).toString()).toBe(
       'partition=0&offset=latest&limit=50&value_format=auto&key_format=auto',
     )
+  })
+
+  it('sends the offset mode the user picked', () => {
+    expect(buildMessagesQuery({ ...base, offsetMode: 'earliest' }).get('offset')).toBe('earliest')
+    expect(buildMessagesQuery({ ...base, offsetMode: 'specific', offsetValue: '17' }).get('offset')).toBe('17')
+    expect(buildMessagesQuery({ ...base, offsetMode: 'timestamp', offsetValue: '1700000000000' }).get('offset'))
+      .toBe('timestamp:1700000000000')
+  })
+
+  it('defaults a blank offset or timestamp to 0 rather than sending nothing', () => {
+    expect(buildMessagesQuery({ ...base, offsetMode: 'specific', offsetValue: '' }).get('offset')).toBe('0')
+    expect(buildMessagesQuery({ ...base, offsetMode: 'timestamp' }).get('offset')).toBe('timestamp:0')
   })
 
   it('omits empty filters so the backend does not run a match-all scan', () => {

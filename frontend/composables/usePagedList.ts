@@ -5,12 +5,8 @@ export interface PagedResponse {
   total?: number
 }
 
-export interface PagedListOptions {
-  /** Rows per page (default 50). */
-  limit?: number
-  /** Search debounce in ms (default 300). */
-  debounce?: number
-}
+const PAGE_SIZE = 50
+const DEBOUNCE_MS = 300
 
 /**
  * Search + pagination for a list endpoint: a debounced search box, an
@@ -23,15 +19,12 @@ export interface PagedListOptions {
  */
 export async function usePagedList<T extends PagedResponse>(
   buildUrl: (params: { q: string; limit: number; offset: number }) => string,
-  options: PagedListOptions = {},
 ) {
-  const debounce = options.debounce ?? 300
-
   /** What the user is typing. */
   const search = ref('')
   /** What is actually queried — `search` after the debounce. */
   const q = ref('')
-  const limit = ref(options.limit ?? 50)
+  const limit = ref(PAGE_SIZE)
   const offset = ref(0)
 
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -43,11 +36,11 @@ export async function usePagedList<T extends PagedResponse>(
       timer = setTimeout(() => {
         offset.value = 0 // a new search starts on the first page
         q.value = v
-      }, debounce)
+      }, DEBOUNCE_MS)
     },
     { flush: 'sync' },
   )
-  if (getCurrentScope()) onScopeDispose(() => clearTimeout(timer))
+  onScopeDispose(() => clearTimeout(timer))
 
   const url = computed(() => buildUrl({ q: q.value, limit: limit.value, offset: offset.value }))
   const asyncData = useFetch<T>(url, { watch: [url] })
@@ -72,5 +65,5 @@ export async function usePagedList<T extends PagedResponse>(
     offset.value = 0
   }
 
-  return { search, q, limit, offset, data, pending, error, refresh, total, pager, prev, next, reset }
+  return { search, q, data, pending, error, refresh, pager, prev, next, reset }
 }

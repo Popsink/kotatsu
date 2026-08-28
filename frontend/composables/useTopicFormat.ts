@@ -37,5 +37,5 @@ export function useTopicFormat(topic: string) {
   onMounted(load)
   watch([keyFormat, valueFormat], save)
 
-  return { keyFormat, valueFormat, storageKey, load, save }
+  return { keyFormat, valueFormat }
 }

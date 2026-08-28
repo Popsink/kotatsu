@@ -15,14 +15,12 @@ export interface PageRange {
  * last partial page, an offset past the end) are unit-testable.
  */
 export function pageRange(offset: number, limit: number, total: number): PageRange {
-  const size = Math.max(1, limit)
-  const count = Math.max(0, total)
-  const start = Math.max(0, offset)
   return {
-    from: count === 0 ? 0 : Math.min(start + 1, count),
-    to: Math.min(start + size, count),
-    total: count,
-    canPrev: start > 0,
-    canNext: start + size < count,
+    // Clamped: a list that shrinks under a high offset would read "101–40 of 40".
+    from: total === 0 ? 0 : Math.min(offset + 1, total),
+    to: Math.min(offset + limit, total),
+    total,
+    canPrev: offset > 0,
+    canNext: offset + limit < total,
   }
 }

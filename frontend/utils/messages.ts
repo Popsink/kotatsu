@@ -21,7 +21,7 @@ export interface MessageQuery {
 }
 
 /** The `offset=` parameter: a keyword, a bare offset, or `timestamp:<ms>`. */
-export function offsetParam(mode: OffsetMode, value?: string): string {
+function offsetParam(mode: OffsetMode, value?: string): string {
   if (mode === 'specific') return value || '0'
   if (mode === 'timestamp') return `timestamp:${value || '0'}`
   return mode

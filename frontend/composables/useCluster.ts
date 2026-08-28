@@ -21,12 +21,9 @@ export async function useCluster() {
   const asyncData = useFetch<SourceInfo>('/api/source', { key: KEY })
   await asyncData
 
-  const { data: source, error, refresh, pending } = asyncData
+  const { data: source } = asyncData
   return {
     source,
-    error,
-    pending,
-    refresh,
     cluster: computed(() => source.value?.cluster),
     configured: computed(() => source.value?.configured === true),
     connected: computed(() => source.value?.status?.connected === true),

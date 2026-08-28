@@ -27,9 +27,4 @@ describe('pageRange', () => {
   it('clamps an offset past the end instead of showing 151–120', () => {
     expect(pageRange(150, 50, 120)).toMatchObject({ from: 120, to: 120, canNext: false })
   })
-
-  it('survives a nonsense limit or a negative total', () => {
-    expect(pageRange(0, 0, 10).to).toBe(1)
-    expect(pageRange(0, 50, -3)).toMatchObject({ from: 0, to: 0, total: 0 })
-  })
 })

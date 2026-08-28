@@ -36,6 +36,11 @@ defineEmits<{ retry: [] }>()
 </template>
 
 <style scoped>
+/* `.center` and `.list` are this component's own elements. Everything below
+   them targets slotted rows, which are compiled in the *parent's* scope and so
+   carry the page's scope id, not this one's — hence :deep() on each. Dropping
+   it silently unstyles every row. Rows may also use classes the page defines
+   itself (`.muted`, `.ok`, `.warn`); those resolve in the page. */
 .center { display: flex; justify-content: center; padding: 2rem; }
 .list { width: 100%; max-width: 560px; border-collapse: collapse; margin-top: 0.5rem; }
 .list :deep(th) { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.5rem; }
@@ -45,7 +50,6 @@ defineEmits<{ retry: [] }>()
 .list :deep(.link) { color: var(--accent); text-decoration: none; }
 .list :deep(.row):hover .link, .list :deep(.link):hover { text-decoration: underline; }
 .list :deep(.mono) { font-family: ui-monospace, monospace; }
-.list :deep(.muted) { color: var(--muted); }
 .list :deep(.chev) { color: var(--muted); text-align: right; }
 .list :deep(.tag) { margin-left: 0.5rem; font-size: 0.7rem; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0.05rem 0.3rem; }
 </style>
