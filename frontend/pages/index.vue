@@ -10,7 +10,6 @@ const { data: summary } = await useFetch<any>(
 // for here — the only screen that shows it — and nowhere else (#109). Lazy, so
 // the page renders before the store replies, and repeatable on demand.
 const { data: status, pending: probing, error: probeFailed, refresh: recheck } = useLazyFetch<{
-  configured: boolean
   connected: boolean
   error?: string
 }>('/api/source/status')
