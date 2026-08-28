@@ -9,12 +9,18 @@ const { data: summary } = await useFetch<any>(
 // Connectivity is the one answer that costs an S3 round-trip, so it is asked
 // for here — the only screen that shows it — and nowhere else (#109). Lazy, so
 // the page renders before the store replies, and repeatable on demand.
-const { data: status, pending: probing, refresh: recheck } = useLazyFetch<{
+const { data: status, pending: probing, error: probeFailed, refresh: recheck } = useLazyFetch<{
   configured: boolean
   connected: boolean
   error?: string
 }>('/api/source/status')
 const connected = computed(() => status.value?.connected === true)
+// "the store answered no" and "we could not ask" are different answers, and
+// rendering the second as the first is the mistake #66 was filed for.
+const unknown = computed(() => !probing.value && probeFailed.value != null)
+const reason = computed(() =>
+  probeFailed.value ? errorMessage(probeFailed.value) : status.value?.error,
+)
 </script>
 
 <template>
@@ -33,10 +39,11 @@ const connected = computed(() => status.value?.connected === true)
             <div>
               <dt>status</dt>
               <dd v-if="probing" class="muted">checking…</dd>
+              <dd v-else-if="unknown" class="warn">unknown</dd>
               <dd v-else :class="connected ? 'ok' : 'err'">{{ connected ? 'connected' : 'disconnected' }}</dd>
             </div>
           </dl>
-          <p v-if="!probing && !connected && status?.error" class="err small">{{ status.error }}</p>
+          <p v-if="!probing && !connected && reason" class="err small">{{ reason }}</p>
           <button type="button" class="recheck" :disabled="probing" @click="recheck()">
             <Spinner v-if="probing" size="12px" /> Re-check
           </button>
@@ -64,6 +71,7 @@ const connected = computed(() => status.value?.connected === true)
 .muted { color: var(--muted); }
 .small { font-size: 0.8rem; }
 .ok { color: var(--ok); }
+.warn { color: var(--warn); }
 .err { color: var(--err); }
 .cards { display: flex; gap: 1.25rem; flex-wrap: wrap; margin-top: 1.5rem; }
 .card { flex: 1; min-width: 260px; max-width: 360px; padding: 1rem 1.25rem; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
