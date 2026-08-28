@@ -1,8 +1,13 @@
 <script setup lang="ts">
+/**
+ * The search box's text. Bound with `v-model` on the input rather than
+ * `:value` + `@input`, so Vue's own handling applies — notably suppressing
+ * updates mid-IME-composition, which a hand-rolled `@input` fires on.
+ */
+const model = defineModel<string>({ required: true })
+
 withDefaults(
   defineProps<{
-    /** The search box's text (`v-model`). */
-    modelValue: string
     placeholder?: string
     /** Accessible name for the search box, when the placeholder isn't enough. */
     label?: string
@@ -15,20 +20,14 @@ withDefaults(
   }>(),
   { placeholder: 'Search…', label: 'Search', pending: false },
 )
-defineEmits<{ 'update:modelValue': [string]; prev: []; next: [] }>()
+defineEmits<{ prev: []; next: [] }>()
 </script>
 
 <template>
   <!-- Search + range + pager for every list page. The `pager` object returned by
        `usePagedList` binds straight onto from/to/total/canPrev/canNext. -->
   <div class="toolbar">
-    <input
-      :value="modelValue"
-      class="search"
-      :placeholder="placeholder"
-      :aria-label="label"
-      @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-    />
+    <input v-model="model" class="search" :placeholder="placeholder" :aria-label="label" />
     <Spinner v-if="pending" />
     <span class="spacer" />
     <span class="range muted">{{ from }}–{{ to }} of {{ total }}</span>

@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { mountSuspended } from '@nuxt/test-utils/runtime'
 import DataToolbar from '~/components/DataToolbar.vue'
 
+const PREV = '[aria-label="Previous page"]'
+const NEXT = '[aria-label="Next page"]'
+
 const props = {
   modelValue: '',
   from: 1,
@@ -25,19 +28,18 @@ describe('DataToolbar', () => {
 
   it('disables the pager at each end', async () => {
     const w = await mountSuspended(DataToolbar, { props })
-    const [prev, next] = w.findAll('button')
-    expect(prev.attributes('disabled')).toBeDefined()
-    expect(next.attributes('disabled')).toBeUndefined()
+    expect(w.get(PREV).attributes('disabled')).toBeDefined()
+    expect(w.get(NEXT).attributes('disabled')).toBeUndefined()
 
     await w.setProps({ canPrev: true, canNext: false })
-    expect(w.findAll('button')[0].attributes('disabled')).toBeUndefined()
-    expect(w.findAll('button')[1].attributes('disabled')).toBeDefined()
+    expect(w.get(PREV).attributes('disabled')).toBeUndefined()
+    expect(w.get(NEXT).attributes('disabled')).toBeDefined()
   })
 
   it('emits prev and next when the pager is used', async () => {
     const w = await mountSuspended(DataToolbar, { props: { ...props, canPrev: true } })
-    await w.findAll('button')[0].trigger('click')
-    await w.findAll('button')[1].trigger('click')
+    await w.get(PREV).trigger('click')
+    await w.get(NEXT).trigger('click')
     expect(w.emitted('prev')).toHaveLength(1)
     expect(w.emitted('next')).toHaveLength(1)
   })
