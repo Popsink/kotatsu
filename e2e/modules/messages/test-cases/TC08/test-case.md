@@ -72,9 +72,11 @@ base offset onward.
 
 ```bash
 # capture the 2nd record timestamp
-TS=$(curl -s "http://localhost:8080/api/clusters/demo/topics/orders/messages?offset=earliest" \
+# `partition=0` keeps the records in storage order: with the default `partition=all`
+# they come back newest-first, so "the 2nd record" would mean the other end (#102).
+TS=$(curl -s "http://localhost:8080/api/clusters/demo/topics/orders/messages?partition=0&offset=earliest" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['records'][1]['timestamp'])")
-curl -s "http://localhost:8080/api/clusters/demo/topics/orders/messages?offset=timestamp:$TS"
+curl -s "http://localhost:8080/api/clusters/demo/topics/orders/messages?partition=0&offset=timestamp:$TS"
 ```
 
 ## Post-conditions
