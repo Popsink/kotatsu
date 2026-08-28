@@ -11,7 +11,7 @@
 #   BOOTSTRAP kafka bootstrap server (default: tansu:9092, reachable on NETWORK)
 #   KORA_URL  schema registry URL reachable on NETWORK (default: http://kora:8080)
 #
-# Topics: orders, events, empty-topic, avro-orders, truncated (3 records with the
+# Topics: orders, events, spread, empty-topic, avro-orders, truncated (3 records with the
 # first 2 deleted) and acme.prod.db2.dbz_config (compacted, so the broker routes it
 # under its own name) — the last two exist to exercise the storage contract the
 # #92–#97 sweep found Kotatsu had drifted from.
@@ -52,6 +52,11 @@ create_topic truncated 1
 # is the shape that rendered as an empty topic until #92. Nothing else in the seed
 # exercises the pin — every other topic is its own prefix.
 create_topic acme.prod.db2.dbz_config 1 --config cleanup.policy=compact
+# Keyed records over 3 partitions: the only topic in the seed whose records are
+# actually spread, which is what a cross-partition search needs (#102). `events`
+# has 3 partitions but keyless records, so the sticky partitioner puts them all
+# in one.
+create_topic spread 3
 
 echo "→ producing orders (3 keyed JSON records)…"
 printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"id":3,"item":"gizmo"}\n' | \
@@ -61,6 +66,11 @@ printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"
 echo "→ producing events (6 keyless JSON records)…"
 printf '{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}\n{"n":5}\n{"n":6}\n' | \
   kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" --topic events
+
+echo "→ producing spread (12 keyed records over 3 partitions)…"
+printf 'k-1:{"n":1}\nk-2:{"n":2}\nk-3:{"n":3}\nk-4:{"n":4}\nk-5:{"n":5}\nk-6:{"n":6}\nk-7:{"n":7}\nk-8:{"n":8}\nk-9:{"n":9}\nk-10:{"n":10}\nk-11:{"n":11}\nk-12:{"n":12}\n' | \
+  kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" \
+  --topic spread --property parse.key=true --property key.separator=:
 
 echo "→ producing avro-orders (2 Confluent-framed Avro records)…"
 printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \

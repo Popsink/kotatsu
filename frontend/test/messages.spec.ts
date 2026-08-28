@@ -61,6 +61,13 @@ describe('buildMessagesQuery', () => {
     })
   })
 
+  it('asks for every partition by default, and for one when narrowed', () => {
+    // 'all' is a spec, not a number — it must survive as the literal string (#102).
+    expect(buildMessagesQuery({ ...base, partition: 'all' }).get('partition')).toBe('all')
+    expect(buildMessagesQuery({ ...base, partition: 0 }).get('partition')).toBe('0')
+    expect(buildMessagesQuery({ ...base, partition: 7 }).get('partition')).toBe('7')
+  })
+
   it('escapes filter values rather than breaking the query string', () => {
     const q = buildMessagesQuery({ ...base, valueContains: 'a&b=c d' })
     expect(q.toString()).toContain('value_contains=a%26b%3Dc+d')

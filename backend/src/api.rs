@@ -250,8 +250,9 @@ pub async fn topic_groups(
 
 #[derive(Deserialize)]
 pub struct MessagesQuery {
-    #[serde(default)]
-    partition: i32,
+    /// `all` (default) or a concrete partition number.
+    #[serde(default = "default_partition")]
+    partition: String,
     #[serde(default = "default_offset")]
     offset: String,
     #[serde(default = "default_limit")]
@@ -270,6 +271,9 @@ pub struct MessagesQuery {
     max_scan: usize,
 }
 
+fn default_partition() -> String {
+    "all".to_string()
+}
 fn default_offset() -> String {
     "latest".to_string()
 }

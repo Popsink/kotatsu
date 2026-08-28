@@ -262,10 +262,13 @@ impl Source {
         })
     }
 
-    /// Fetch (and decode/filter) messages from a topic partition.
+    /// Fetch (and decode/filter) messages from a topic.
+    ///
+    /// `partition` is `None` for every partition merged newest-first (#102), or a
+    /// partition number to read one in storage order.
     #[pyo3(signature = (
         topic,
-        partition=0,
+        partition=None,
         offset="latest".to_string(),
         limit=50,
         value_format=None,
@@ -282,7 +285,7 @@ impl Source {
         &self,
         py: Python<'py>,
         topic: String,
-        partition: i32,
+        partition: Option<i32>,
         offset: String,
         limit: usize,
         value_format: Option<String>,
@@ -297,7 +300,7 @@ impl Source {
         let source = self.source.clone();
         let registry = self.registry.clone();
         let params = MessageParams {
-            partition,
+            partition: partition.map_or_else(|| "all".to_string(), |p| p.to_string()),
             offset,
             limit,
             key_format,
