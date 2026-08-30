@@ -53,11 +53,12 @@ pub struct StorageSource {
     topic_catalog: Arc<Mutex<Option<catalog::Catalog<TopicSummary>>>>,
     /// Cached consumer-group catalog, same scheme as [`Self::topic_catalog`].
     group_catalog: Arc<Mutex<Option<catalog::Catalog<GroupSummary>>>>,
-    /// Memoized routing prefixes (`topic-routing/{topic}.json`, #92), keyed by
-    /// topic name. The pin is decided at topic creation and immutable for the
-    /// topic's lifetime, so — like a segment footer — a resolved value never goes
-    /// stale and needs no TTL. Shared across clones via the `Arc`.
-    routing_prefixes: Arc<Mutex<HashMap<String, String>>>,
+    /// Memoized topic routes (`topic-routing/{topic}.json`, #92) — the routed
+    /// prefix and the sub-stream identity (#118) — keyed by topic name. The pin
+    /// is decided at topic creation and immutable for the topic's lifetime, so —
+    /// like a segment footer — a resolved value never goes stale and needs no
+    /// TTL. Shared across clones via the `Arc`.
+    topic_routes: Arc<Mutex<HashMap<String, routing::TopicRoute>>>,
 }
 
 impl StorageSource {
@@ -116,7 +117,7 @@ impl StorageSource {
             segment_footers: Arc::new(Mutex::new(HashMap::new())),
             topic_catalog: Arc::new(Mutex::new(None)),
             group_catalog: Arc::new(Mutex::new(None)),
-            routing_prefixes: Arc::new(Mutex::new(HashMap::new())),
+            topic_routes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -134,7 +135,7 @@ impl StorageSource {
             segment_footers: Arc::new(Mutex::new(HashMap::new())),
             topic_catalog: Arc::new(Mutex::new(None)),
             group_catalog: Arc::new(Mutex::new(None)),
-            routing_prefixes: Arc::new(Mutex::new(HashMap::new())),
+            topic_routes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

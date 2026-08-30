@@ -36,6 +36,9 @@ tansu-sans-io = { git = "https://github.com/Popsink/tansu.git", tag = "v0.7.0-be
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 apache-avro = "0.17"
 regex = "1"
+# Sub-stream identity in segment footers (v4, #118) and the routing pin that
+# carries it. Wire form is the raw 16 bytes, never the hyphenated string.
+uuid = { version = "1", features = ["serde"] }
 
 # Used only by the #[ignore]-gated integration tests under tests/.
 [dev-dependencies]

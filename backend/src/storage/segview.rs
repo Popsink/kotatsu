@@ -2,10 +2,11 @@
 //!
 //! Records for a segment-backed topic live in shared, immutable per-prefix
 //! segment objects (`prefixes/{prefix}/segments/{seq:020}.seg`), each
-//! multiplexing many `(topic, partition)` sub-streams. To read one topition we
-//! list the prefix's segments, read each footer (a single over-reading ranged
-//! GET, cached — footers are immutable), and collect the entries for our
-//! topition.
+//! multiplexing many sub-streams. To read one topition we list the prefix's
+//! segments, read each footer (a single over-reading ranged GET, cached —
+//! footers are immutable), and collect the entries for our topition. Which
+//! entries those are is decided by the topic's routed identity, not its name
+//! alone: a v4 segment keys an id-keyed sub-stream by uuid (#118).
 //!
 //! Overlaps are resolved by the wire contract's tie-break — on the rare overlap
 //! left by a compaction or a writer failover, the **higher `writer_epoch`
@@ -148,16 +149,19 @@ impl StorageSource {
     /// segments and resolving overlaps. Empty when the topition has no live
     /// segment — an empty log.
     ///
-    /// The prefix comes from the **pin** (#92), not from a derivation over the
-    /// topic name: a compacted topic is routed under its own name, and looking for
-    /// its segments under `org.env.conn` finds none, which renders as an empty
-    /// topic rather than as an error.
+    /// Both the prefix and the sub-stream key come from the **pin** (#92, #118),
+    /// not from a derivation over the topic name: a compacted topic is routed
+    /// under its own name, and an id-keyed topic's slices are filed under a uuid.
+    /// Getting either wrong finds no entry, which renders as an empty topic
+    /// rather than as an error.
     pub(super) async fn build_segment_view(
         &self,
         topic: &str,
         partition: i32,
     ) -> Result<SegView, StorageError> {
-        let prefix = self.routed_prefix_of(topic).await?;
+        let route = self.route_of(topic).await?;
+        let prefix = route.prefix.clone();
+        let substream = route.substream(topic);
         let list_prefix = self.keys().segment_prefix(&prefix);
 
         let mut placed = Vec::new();
@@ -170,7 +174,7 @@ impl StorageSource {
             let Some(footer) = self.segment_footer(&prefix, seq).await? else {
                 continue;
             };
-            if let Some(entry) = footer.get(topic, partition) {
+            if let Some(entry) = footer.get(substream, partition) {
                 placed.push(Placed {
                     seq,
                     epoch: footer.writer_epoch,
