@@ -236,7 +236,7 @@ pub fn parse_partition(raw: &str) -> Result<PartitionSelector, QueryError> {
 /// the next page resumes, and which end of the merge survives truncation — so it
 /// is named once rather than re-derived from the spec at each site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
+enum Direction {
     /// Towards older offsets: `latest`.
     Backward,
     /// Towards newer offsets: `earliest`, `timestamp:<ms>`, `<n>`.
