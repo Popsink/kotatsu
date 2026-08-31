@@ -40,7 +40,7 @@ discoverable via the schemas API.
 | 2 | Produce 2 Avro records | `kafka-avro-console-producer` with `schema.registry.url=http://kora:8080` | Producer exits without a metadata timeout |
 | 3 | List schema subjects | `GET /api/schemas` | `items` contains `avro-orders-value`; `registry: "http://kora:8080"` |
 | 4 | Get subject detail | `GET /api/schemas/avro-orders-value` | `schemaType: "AVRO"`, `version: 1`, schema text is the `Order` record |
-| 5 | Read messages (auto decode) | `GET .../topics/avro-orders/messages?offset=earliest` | `count: 2`; each value `kind: "avro"`, `schemaId: 1`, `data: {id, item}` |
+| 5 | Read messages (auto decode) | `GET .../topics/avro-orders/messages?partition=0&offset=earliest` | `count: 2`; each value `kind: "avro"`, `schemaId: 1`, `data: {id, item}` |
 | 6 | Verify field values | inspect records | offset 0 → `{id:1, item:"widget"}`; offset 1 → `{id:2, item:"gadget"}` |
 | 7 | UI decode | open `avro-orders` in the event browser | Values render as structured objects; **Schemas** view lists `avro-orders-value` |
 
@@ -91,7 +91,7 @@ printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \
 # 3) verify
 curl -s http://localhost:8080/api/schemas
 curl -s http://localhost:8080/api/schemas/avro-orders-value
-curl -s "http://localhost:8080/api/clusters/demo/topics/avro-orders/messages?offset=earliest"
+curl -s "http://localhost:8080/api/clusters/demo/topics/avro-orders/messages?partition=0&offset=earliest"
 ```
 
 ## Post-conditions

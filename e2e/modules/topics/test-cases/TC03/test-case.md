@@ -23,7 +23,7 @@ and that an empty partition returns an empty result (not an error).
 
 - **User Story**: As a user, I want to browse a single partition of a topic so that I can inspect its records independently.
 - **Requirement ID**: TOP-REQ-003 (Per-partition read)
-- **Business Rule**: `?partition=n` returns only partition `n`; each returned record carries `partition: n`; the `watermark` is that partition's low/high.
+- **Business Rule**: `?partition=n` returns only partition `n`; each returned record carries `partition: n`; the `watermark` is that partition's low/high. Omitting `partition` reads **all** of them (#102) — see MSG-011.
 
 ## Preconditions
 
@@ -38,7 +38,7 @@ and that an empty partition returns an empty result (not an error).
 | 1 | Read partition 0 | `GET .../topics/events/messages?partition=0&offset=earliest` | `partition: 0`, `count: 6`, `watermark: {low:0, high:6}`, all records `partition: 0` |
 | 2 | Read partition 1 | `GET .../topics/events/messages?partition=1&offset=earliest` | `partition: 1`, `count: 0`, `records: []`, `watermark: {low:0, high:0}` |
 | 3 | Read partition 2 | `GET .../topics/events/messages?partition=2&offset=earliest` | `partition: 2`, `count: 0`, `records: []` |
-| 4 | Default partition | `GET .../topics/events/messages?offset=earliest` (no `partition`) | Defaults to partition 0 |
+| 4 | Default partition | `GET .../topics/events/messages?offset=earliest` (no `partition`) | Defaults to **all** partitions since #102: a `partitions[]` summary with one entry per partition, no top-level `watermark`. Narrowing is what steps 1-3 exercise |
 | 5 | UI partition selector | open `events` in UI, switch partitions | Records shown match the API per partition |
 
 ## Expected Results

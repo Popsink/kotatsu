@@ -262,11 +262,17 @@ impl Source {
         })
     }
 
-    /// Fetch (and decode/filter) messages from a topic partition.
+    /// Fetch (and decode/filter) messages from a topic.
+    ///
+    /// `partition` is `None` for every partition merged (#102), or a partition
+    /// number to read one in storage order. `offset` sets where the read starts
+    /// and which way it travels; the response's per-partition `resume` values,
+    /// handed back as `cursor`, return the next page (#104).
     #[pyo3(signature = (
         topic,
-        partition=0,
+        partition=None,
         offset="latest".to_string(),
+        cursor=None,
         limit=50,
         value_format=None,
         key_format=None,
@@ -282,8 +288,9 @@ impl Source {
         &self,
         py: Python<'py>,
         topic: String,
-        partition: i32,
+        partition: Option<i32>,
         offset: String,
+        cursor: Option<String>,
         limit: usize,
         value_format: Option<String>,
         key_format: Option<String>,
@@ -297,8 +304,9 @@ impl Source {
         let source = self.source.clone();
         let registry = self.registry.clone();
         let params = MessageParams {
-            partition,
+            partition: partition.map_or_else(|| "all".to_string(), |p| p.to_string()),
             offset,
+            cursor,
             limit,
             key_format,
             value_format,
