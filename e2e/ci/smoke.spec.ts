@@ -55,6 +55,7 @@ test.describe('API smoke', () => {
         'headers',
         'empty-topic',
         'avro-orders',
+        'avro-nested',
         'truncated',
         'acme.prod.db2.dbz_config',
       ]),
@@ -472,16 +473,26 @@ test.describe('UI smoke', () => {
     await page.locator('table.msgs tbody tr.row').first().click();
 
     const value = page.locator('[data-field="value"]');
-    // Collapsed past the default depth, and saying what is behind the fold.
-    await expect(value.getByRole('button', { name: /\{…\} \d+ keys/ }).first()).toBeVisible();
+    // Depth 0 and 1 are open, so the folds are at depth 2: `after.tags` holds three
+    // items and `after.meta` two keys, and each says so rather than just showing a
+    // caret. Named exactly, so the assertion cannot pass on some other node.
+    await expect(value.getByRole('button', { name: '[…] 3 items' })).toBeVisible();
+    await expect(value.getByRole('button', { name: '{…} 2 keys' })).toBeVisible();
 
     // The server found the record; the tree finds the field.
-    await value.getByRole('searchbox').fill('4711');
-    await expect(value.getByText(/match/)).toBeVisible();
-    await expect(value.getByText('4711').first()).toBeVisible();
+    await value.getByRole('searchbox').fill('ops');
+    await expect(value.getByText('1 match')).toBeVisible();
+    // `after.meta.by` is at depth 3, behind the fold above — the search opened it.
+    await expect(value.getByText('"ops"')).toBeVisible();
   });
 
-  test('headers render one row each, so a newline is not a second header', async ({ page }) => {
+  /**
+   * The seed cannot carry a header value with a newline or a non-UTF-8 byte — the
+   * only producer that reaches this broker is line-oriented and text-only. Those
+   * two cases live in `HeadersTable.spec.ts`; this proves the table renders at all,
+   * against a real broker, where there used to be a joined `<pre>`.
+   */
+  test('headers render as a table, one row each', async ({ page }) => {
     await page.goto('/topics/headers');
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
     await page.getByRole('button', { name: 'Search' }).click();
@@ -489,22 +500,38 @@ test.describe('UI smoke', () => {
 
     const headers = page.locator('table.hdrs');
     await expect(headers).toBeVisible();
-    // Two headers, one of whose values holds a newline — joined into a single
-    // <pre> that was indistinguishable from three headers.
     await expect(headers.locator('tbody tr')).toHaveCount(2);
     await expect(headers.getByText('trace')).toBeVisible();
-    await expect(headers.getByText('second line')).toBeVisible();
+    await expect(headers.getByText('abc123')).toBeVisible();
   });
 
-  test('a binary header value shows its hex badge, not mojibake', async ({ page }) => {
+  /**
+   * The acceptance criterion says *Avro*, and `avro-orders` is two flat fields.
+   * `avro_to_json` flattens a union and nests a record, so what the tree folds is
+   * not only hand-written JSON.
+   */
+  test('a nested Avro record folds like any other payload', async ({ page }) => {
+    await page.goto('/topics/avro-nested');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    const value = page.locator('[data-field="value"]');
+    await expect(value.getByText(/avro #\d+/)).toBeVisible();
+    // `customer.address` is a nested Avro record at depth 2, so it is folded.
+    await expect(value.getByRole('button', { name: '{…} 2 keys' })).toBeVisible();
+
+    // And a value inside it is reachable by search, through the fold.
+    await value.getByRole('searchbox').fill('paris');
+    await expect(value.getByText('"paris"')).toBeVisible();
+  });
+
+  test('a record without headers gets no headers table', async ({ page }) => {
     await page.goto('/topics/headers');
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
     await page.getByRole('button', { name: 'Search' }).click();
     await page.locator('table.msgs tbody tr.row').nth(1).click();
-
-    const headers = page.locator('table.hdrs');
-    await expect(headers.getByText('hex')).toBeVisible();
-    await expect(headers.getByText('fffe')).toBeVisible();
+    await expect(page.locator('table.hdrs')).toHaveCount(0);
   });
 
   test('raw JSON is a toggle, and it survives a reload', async ({ page }) => {

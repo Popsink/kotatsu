@@ -90,7 +90,7 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 2 | Source configured | `GET /api/source` | `configured: true`, `cluster: demo`, no `status` key | SRC-001 |
 | 2b | Source reachable | `GET /api/source/status` | `connected: true` | SRC-001 |
 | 3 | Cluster discovered | `GET /api/clusters` | `clusters` contains `demo` | SRC-001 |
-| 4 | Topics listed | `GET /api/clusters/demo/topics` | `orders`, `events`, `spread`, `nested`, `headers`, `empty-topic`, `avro-orders`, `truncated`, `acme.prod.db2.dbz_config` present | TOP-001 |
+| 4 | Topics listed | `GET /api/clusters/demo/topics` | `orders`, `events`, `spread`, `nested`, `headers`, `empty-topic`, `avro-orders`, `avro-nested`, `truncated`, `acme.prod.db2.dbz_config` present | TOP-001 |
 | 5 | Topic detail | `GET /api/clusters/demo/topics/events` | 3 partitions; `messages: 6` | TOP-002 |
 | 6 | Read messages | `GET .../topics/orders/messages?partition=0&offset=earliest` | `count: 3`, watermark `{0,3}` | MSG-001 |
 | 6b | Search all partitions | `GET .../topics/spread/messages?partition=all&offset=earliest` | records from every populated partition, oldest first, `order: timestamp_asc` | MSG-011 |
@@ -103,11 +103,13 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 11 | Compacted topic routing | `GET .../topics/acme.prod.db2.dbz_config/messages?partition=0&offset=earliest` | `count: 2`, watermark `{0,2}`, keys `cfg-a`/`cfg-b`; detail `storage_bytes > 0` | #92 |
 | 12 | Truncation floor | `GET .../topics/truncated/messages?partition=0&offset=earliest` and `?partition=0&offset=0` | watermark `{2,3}`, `count: 1`, only offset 2 — the deleted records are not served | #95 |
 | 13 | Payload tree | open a `nested` record in the event browser | the value opens as a tree collapsed past depth 2, and `find in payload` = `4711` opens down to the match | MSG-013 |
-| 14 | Headers table | open the first `headers` record | **two** rows, not three: the header whose value holds a newline is one row. The second record's binary header shows a `hex` badge | MSG-013 |
+| 14 | Headers table | open the first `headers` record | **two** rows, `trace`/`abc123` and `span`/`d4e5f6` — one per header, not a joined block | MSG-013 |
+| 15 | Headers absent | open the second `headers` record | no headers table at all | MSG-013 |
+| 16 | Nested Avro folds | open the `avro-nested` record | a `{…} 2 keys` fold at depth 2, and `find in payload` = `paris` opens through it | MSG-013 |
 
 ## Pass/Fail
 
-- **Pass**: all 14 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
+- **Pass**: all 16 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
 - **Fail**: any step deviates → open the corresponding per-module ISTQB case to isolate.
 
 ## Tear down

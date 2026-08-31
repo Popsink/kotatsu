@@ -32,23 +32,26 @@ row of a table, and that an oversized payload does not lock the tab.
   - A decode error (`FieldValue.error`) is rendered independently of whatever decoded. The tree must never swallow it.
   - Above 256 KB of JSON the field renders collapsed-only with an **Expand anyway** escape. The guard is a default, not a refusal.
   - Raw / pretty sits with the two serializer controls in the search form, not in each row — it is a per-topic rendering choice, not a per-record one — and is remembered with them in `localStorage` under `kotatsu:fmt:{topic}` (#32).
+  - The first match, in document order, is scrolled into view. Opening the way to a match is not enough on a payload taller than the viewport; later matches do not scroll, or the view would jump between them.
   - Every header is one table row, with the same decode badge treatment as key/value.
 
 ## Preconditions
 
 1. **System State**: Stack up (`docker compose up -d`), source connected, seed applied.
-2. **Data**: `nested` — 2 records with a CDC-shaped envelope (`op` / `source` / `before` / `after`). `headers` — 3 records: one with two headers (one value multiline), one with a binary header, one with none.
+2. **Data**: `nested` — 2 records with a CDC-shaped envelope (`op` / `source` / `before` / `after`). `avro-nested` — 1 Avro record three levels deep. `headers` — 2 records: one with two headers, one with none.
 
 ## Test Steps
 
 | Step | Action | Input Data | Expected Result |
 |------|--------|------------|-----------------|
-| 1 | Open a nested payload | `/topics/nested`, From `earliest`, Search, click the first row | `value` renders as a tree, not a `<pre>` |
-| 2 | Check the fold | same row | `after` and `before` are closed and read `{…} n keys`; `tags` reads `[…] n items` |
+| 1 | Open a nested payload | `/topics/nested`, From `earliest`, Search, click the first row | `value` renders as a tree, not a `<pre>`, and the badge reads `json` |
+| 2 | Check the fold | same row | depth 0 and 1 are open, so `op` / `source` / `before` / `after` are all visible. The folds are at depth 2: `after.tags` reads `[…] 3 items`, `after.meta` reads `{…} 2 keys` |
+| 2b | The same for Avro | `/topics/avro-nested`, Search, open the row | badge `avro #n`; `customer.address` is folded at depth 2. `avro_to_json` flattens a union and nests a record, so the tree must fold what that produces, not only hand-written JSON |
 | 3 | Check the colours | same row | strings, numbers, booleans and `null` are visually distinct, using the palette already in `layouts/default.vue` — no new colours |
 | 4 | Open a node | click a `{…}` summary | it expands; clicking the caret closes it again |
 | 4b | A search outranks a manual collapse | close `after`, then search a value inside it | it reopens. A counted match with nowhere to be seen would make the count a lie |
-| 5 | Search inside | type `4711` in `find in payload` | the match count appears, the nodes on the way to `$.after.id` open, and the match is highlighted |
+| 5 | Search inside | type `ops` in `find in payload` | the match count appears, the fold on the way to `$.after.meta.by` opens, the match is highlighted, **and the view scrolls to it** |
+| 5b | Only the first match scrolls | search a value that occurs several times | the view lands on the first in document order and does not jump between them |
 | 6 | Search by key | type `tags` | the key matches, not only values |
 | 7 | No match | type `zzz` | `0 matches`, and nothing is force-opened |
 | 8 | Copy path | hover a leaf, click **path** | the clipboard holds a JSONPath naming that leaf; a key containing a dot comes back bracketed |
@@ -60,9 +63,9 @@ row of a table, and that an oversized payload does not lock the tab.
 | 14 | Raw persists | reload the page | **raw JSON** is still ticked, before any search |
 | 15 | Large payload | a record over 256 KB | collapsed only, with the size stated and an **Expand anyway** button; the tab stays responsive |
 | 16 | Expand anyway | click it | the tree renders and the search box returns |
-| 17 | Headers table | `/topics/headers`, open the first record | **two** rows — the header whose value holds a newline is one row, not two |
-| 18 | Binary header | open the second record | a `hex` badge and the hex digits, not mojibake |
-| 19 | No headers | open the third record | no headers table at all |
+| 17 | Headers table | `/topics/headers`, open the first record | a real table, **two** rows, keys `trace` and `span` |
+| 18 | Line break / binary value | covered by `HeadersTable.spec.ts` — unreachable from the seed, see Risk Assessment | a value holding `\n` is one row; a binary value shows a `hex` badge, not mojibake |
+| 19 | No headers | open the second record | no headers table at all |
 
 ## Expected Results
 
@@ -79,7 +82,7 @@ row of a table, and that an oversized payload does not lock the tab.
 ```json
 {
   "nested": { "records": 2, "shape": "op / source / before / after with a nested meta" },
-  "headers": { "records": 3, "with_headers": 2, "multiline_value": 1, "binary_value": 1 },
+  "headers": { "records": 2, "with_headers": 1, "header_count": 2, "line_break_in_value": 1 },
   "guard_threshold_bytes": 262144
 }
 ```
@@ -95,7 +98,8 @@ row of a table, and that an oversized payload does not lock the tab.
 
 ## Risk Assessment
 
-- `e2e/scripts/seed.sh` creates `nested` and `headers`. `headers` is produced with **kcat**, not `kafka-console-producer.sh`, which cannot set record headers at all — without it steps 17-19 have nothing to test against.
+- `e2e/scripts/seed.sh` creates `nested` and `headers`, the latter with `--property parse.headers=true` (Kafka 3.1+). kcat is the obvious tool and cannot be used: librdkafka's `ApiVersionRequest` is not answered by the Tansu fork, so it never reaches the broker.
+- That producer reads one record per line and is text-only, which puts **both** of the interesting header values out of reach: `readLine` eats a carriage return as readily as a newline (it fails outright with *No headers delimiter found*), and a non-UTF-8 byte cannot be typed into it at all. Both cases are therefore covered where they can be: `frontend/test/components/HeadersTable.spec.ts`. What the seed proves is that the table renders against a real broker, where a joined `<pre>` used to be.
 - Automated equivalent: `JsonTree` is unit-tested in `frontend/test/components/JsonTree.spec.ts`, the pure helpers in `frontend/test/field.spec.ts`, and the four browser cases in `e2e/ci/smoke.spec.ts`.
 
 ## Notes

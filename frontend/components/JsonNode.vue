@@ -43,6 +43,17 @@ const open = computed(() =>
 )
 const matched = computed(() => props.hits.matches.has(props.path))
 
+// Only the first match scrolls, and only after the nodes on the way to it have
+// opened — hence `nextTick`. `nearest` so a match already in view does not jump.
+const line = ref<HTMLElement | null>(null)
+watch(
+  () => props.hits,
+  () => {
+    if (props.hits.first !== props.path) return
+    nextTick(() => line.value?.scrollIntoView({ block: 'nearest' }))
+  },
+)
+
 function scalarClass(v: unknown): string {
   if (v === null) return 'nul'
   if (typeof v === 'number' || typeof v === 'bigint') return 'num'
@@ -70,7 +81,7 @@ async function copy(what: 'path' | 'subtree') {
 
 <template>
   <div class="node" :class="{ matched }">
-    <div class="line">
+    <div ref="line" class="line">
       <button
         v-if="isContainer && entries.length"
         type="button"

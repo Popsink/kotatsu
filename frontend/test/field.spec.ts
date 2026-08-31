@@ -154,6 +154,14 @@ describe('searchPayload', () => {
     expect([...ancestors].sort()).toEqual(['$', '$.after', '$.after.tags'])
   })
 
+  // Opening the way to a match is not enough on a payload taller than the
+  // viewport, so the tree needs to know which one to scroll to.
+  it('names the first match in document order', () => {
+    expect(searchPayload({ a: 'x1', b: { c: 'x2' } }, 'x').first).toBe('$.a')
+    expect(searchPayload({ b: { c: 'x2' }, a: 'x1' }, 'x').first).toBe('$.b.c')
+    expect(searchPayload({ a: 1 }, 'zzz').first).toBeUndefined()
+  })
+
   it('collects several matches in one walk', () => {
     const { matches } = searchPayload({ a: 'x1', b: { c: 'x2' } }, 'x')
     expect([...matches].sort()).toEqual(['$.a', '$.b.c'])

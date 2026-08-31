@@ -12,10 +12,10 @@
 #   KORA_URL  schema registry URL reachable on NETWORK (default: http://kora:8080)
 #
 # Topics: orders, events, spread, nested, headers, empty-topic, avro-orders,
-# truncated (3 records with the first 2 deleted) and acme.prod.db2.dbz_config
-# (compacted, so the broker routes it under its own name) — the last two exist
-# to exercise the storage contract the #92–#97 sweep found Kotatsu had drifted
-# from.
+# avro-nested, truncated (3 records with the first 2 deleted) and
+# acme.prod.db2.dbz_config (compacted, so the broker routes it under its own
+# name) — the last two exist to exercise the storage contract the #92–#97 sweep
+# found Kotatsu had drifted from.
 set -euo pipefail
 
 NETWORK="${NETWORK:-kotatsu_default}"
@@ -23,9 +23,6 @@ BOOTSTRAP="${BOOTSTRAP:-tansu:9092}"
 KORA_URL="${KORA_URL:-http://kora:8080}"
 KAFKA_IMG="apache/kafka:latest"
 AVRO_IMG="confluentinc/cp-schema-registry:7.6.0"
-# `kafka-console-producer.sh` cannot set record headers at all, so the one topic
-# that needs them is produced with kcat (#103).
-KCAT_IMG="edenhill/kcat:1.7.1"
 
 kafka() { docker run --rm --network "$NETWORK" "$KAFKA_IMG" "$@"; }
 kafka_stdin() { docker run -i --rm --network "$NETWORK" "$KAFKA_IMG" "$@"; }
@@ -62,9 +59,11 @@ create_topic acme.prod.db2.dbz_config 1 --config cleanup.policy=compact
 # in one.
 create_topic spread 3
 # A payload deep enough that a flat `<pre>` is unreadable — the shape #103 exists
-# for. `headers` is the only topic in the seed carrying record headers.
+# for. `headers` is the only topic in the seed carrying record headers, and
+# `avro-nested` the only Avro payload with depth — `avro-orders` is two flat fields.
 create_topic nested 1
 create_topic headers 1
+create_topic avro-nested 1
 
 echo "→ producing orders (3 keyed JSON records)…"
 printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"id":3,"item":"gizmo"}\n' | \
@@ -86,17 +85,21 @@ printf '%s\n%s\n' \
   '{"op":"c","source":{"db":"acme","table":"orders","ts_ms":1750000000001},"before":null,"after":{"id":4712,"item":"gizmo","qty":1,"tags":[],"meta":{"by":"api","note":"first"}}}' | \
   kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" --topic nested
 
-echo "→ producing headers (3 records, one header value multiline, one binary)…"
-kcat() { docker run -i --rm --network "$NETWORK" "$KCAT_IMG" -b "$BOOTSTRAP" -t headers -P "$@"; }
-# A newline inside one header value: joined into a single <pre> this was
-# indistinguishable from two headers, which is the defect #103 names.
-printf '{"n":1}\n' | kcat -H 'trace=abc123' -H 'note=first line
-second line'
-# An invalid UTF-8 byte: the backend renders it `hex`, and the table must show the
-# badge rather than mojibake.
-printf '{"n":2}\n' | kcat -H "$(printf 'bin=\xff\xfe')"
+echo "→ producing headers (1 record with 2 headers, 1 with none)…"
+# `parse.headers` (Kafka 3.1+) reads `k:v,k:v<TAB>value`. kcat would be the obvious
+# tool and cannot be used: librdkafka's ApiVersionRequest is not answered by the
+# Tansu fork, so it never reaches the broker at all.
+#
+# No header value here holds a line break or a non-UTF-8 byte, and none can: this
+# producer reads a record per line, so `readLine` eats CR as readily as LF, and it
+# is text-only besides. Those two cases are what `HeadersTable` is unit-tested on;
+# what the seed is for is proving the table renders against a real broker.
+printf 'trace:abc123,span:d4e5f6\t{"n":1}\n' | \
+  kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" \
+  --topic headers --property parse.headers=true
 # No headers at all — the table must not appear for this one.
-printf '{"n":3}\n' | kcat
+printf '{"n":2}\n' | \
+  kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" --topic headers
 
 echo "→ producing avro-orders (2 Confluent-framed Avro records)…"
 printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \
@@ -104,6 +107,17 @@ printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \
   kafka-avro-console-producer --bootstrap-server "$BOOTSTRAP" --topic avro-orders \
   --property schema.registry.url="$KORA_URL" \
   --property value.schema='{"type":"record","name":"Order","fields":[{"name":"id","type":"int"},{"name":"item","type":"string"}]}'
+
+echo "→ producing avro-nested (1 Avro record with a nested record and an array)…"
+# `avro_to_json` flattens a union to its value and a nested record to an object;
+# the tree has to fold what comes out of that, not only hand-written JSON (#103).
+# Three levels deep on purpose: the tree folds below depth 2, so `address` must sit
+# at depth 2 for there to be anything folded to look at.
+printf '%s\n' '{"id":4711,"customer":{"name":"acme","address":{"city":"paris","zip":"75001"}},"tags":["a","b"],"note":{"string":"rush"}}' | \
+  docker run -i --rm --network "$NETWORK" "$AVRO_IMG" \
+  kafka-avro-console-producer --bootstrap-server "$BOOTSTRAP" --topic avro-nested \
+  --property schema.registry.url="$KORA_URL" \
+  --property value.schema='{"type":"record","name":"Nested","fields":[{"name":"id","type":"int"},{"name":"customer","type":{"type":"record","name":"Customer","fields":[{"name":"name","type":"string"},{"name":"address","type":{"type":"record","name":"Address","fields":[{"name":"city","type":"string"},{"name":"zip","type":"string"}]}}]}},{"name":"tags","type":{"type":"array","items":"string"}},{"name":"note","type":["null","string"]}]}'
 
 echo "→ producing acme.prod.db2.dbz_config (2 keyed records, compacted topic)…"
 printf 'cfg-a:{"connector":"db2","state":"RUNNING"}\ncfg-b:{"connector":"db2","state":"PAUSED"}\n' | \

@@ -36,9 +36,12 @@ describe('JsonNode', () => {
   it('copies a child path built from its own', async () => {
     const writeText = clipboard()
     const w = await mount({ 'user.id': 1 }, { path: '$' })
+    // The recursive child resolves through Nuxt's global registry, not as this
+    // imported SFC, so it is reached by position: the root's tools come first.
+    const paths = w.findAll('button').filter((b) => b.text() === 'path')
+    expect(paths).toHaveLength(2)
     // Bracketed, because `$.user.id` would name a different node.
-    const child = w.findAllComponents(JsonNode).at(1)!
-    await child.findAll('button').find((b) => b.text() === 'path')!.trigger('click')
+    await paths[1]!.trigger('click')
     expect(writeText).toHaveBeenCalledWith('$["user.id"]')
   })
 
@@ -78,6 +81,21 @@ describe('JsonNode', () => {
     clipboard()
     expect((await mount({})).text()).toContain('{}')
     expect((await mount([])).text()).toContain('[]')
+  })
+
+  it('scrolls the first match into view, and only the first', async () => {
+    clipboard()
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const w = await mount({ a: 'x1', b: 'x2' })
+
+    await w.setProps({
+      hits: { matches: new Set(['$.a', '$.b']), ancestors: new Set(['$']), first: '$.a' },
+    })
+    await nextTick()
+    // One call, from the node whose path is `first` — not one per match.
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
   })
 
   // A pin that outlived the search would leave a counted match with nowhere to be

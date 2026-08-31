@@ -83,6 +83,15 @@ export interface PayloadHits {
   matches: Set<string>
   /** Paths that must be open for a match to be on screen. */
   ancestors: Set<string>
+  /**
+   * The first match in document order — the one to scroll to.
+   *
+   * Opening the way to a match is not enough on a payload taller than the
+   * viewport: it would be on screen only in the sense that a browser's Find is,
+   * before you press Enter. `matches` is a `Set` filled by a walk in document
+   * order, so its first entry is already the right one.
+   */
+  first?: string
 }
 
 const NO_HITS: PayloadHits = { matches: new Set(), ancestors: new Set() }
@@ -124,5 +133,6 @@ export function searchPayload(data: unknown, needle: string): PayloadHits {
   }
 
   walk(data, '$', [])
+  hits.first = hits.matches.values().next().value
   return hits
 }
