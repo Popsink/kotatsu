@@ -16,8 +16,8 @@
 ## Test Objective
 
 Verify that when the configured bucket contains no data for the configured
-cluster, `GET /api/source` still returns HTTP 200 with `configured: true` but
-`status.connected: false` and a human-readable error explaining the cluster was
+cluster, `GET /api/source/status` still returns HTTP 200 with `configured: true` but
+`connected: false` and a human-readable error explaining the cluster was
 not found.
 
 ## Requirements Traceability
@@ -37,9 +37,9 @@ not found.
 | Step | Action | Input Data | Expected Result |
 |------|--------|------------|-----------------|
 | 1 | Ensure the bucket has no `demo` cluster data | `docker compose down -v` then `up -d`, do NOT produce anything | Bucket empty |
-| 2 | Query source | `GET /api/source` | HTTP 200 |
-| 3 | Inspect status | response body | `configured: true`, `status.connected: false` |
-| 4 | Inspect error | response body | `status.error` = `"cluster 'demo' not found in the bucket"` (or equivalent descriptive text) |
+| 2 | Query source status | `GET /api/source/status` | HTTP 200 |
+| 3 | Inspect status | response body | `configured: true`, `connected: false` |
+| 4 | Inspect error | response body | `error` = `"cluster 'demo' not found in the bucket"` (or equivalent descriptive text) |
 | 5 | Query clusters | `GET /api/clusters` | `clusters: []` |
 
 ## Expected Results

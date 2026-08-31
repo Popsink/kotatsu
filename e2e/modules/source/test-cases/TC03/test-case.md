@@ -38,7 +38,8 @@ the app stays responsive — no crash, no 5xx on the health endpoint.
 | 1 | Set an invalid bucket for the app | `KOTATSU_S3_BUCKET=does-not-exist` in compose env | Config change staged |
 | 2 | Recreate the app service | `docker compose up -d app` | App restarts |
 | 3 | Check health | `GET /api/health` | HTTP 200, `{"service":"kotatsu","status":"ok"}` |
-| 4 | Query source | `GET /api/source` | HTTP 200, `bucket: "does-not-exist"`, `status.connected: false`, `status.error` present |
+| 4 | Query source | `GET /api/source` | HTTP 200, `bucket: "does-not-exist"` |
+| 4b | Probe the store | `GET /api/source/status` | HTTP 200, `connected: false`, `error` present |
 | 5 | Query clusters | `GET /api/clusters` | Empty list or graceful error (no 5xx) |
 | 6 | Restore config | reset `KOTATSU_S3_BUCKET=tansu`, `docker compose up -d app` | App reconnects; SRC-001 passes again |
 
@@ -47,7 +48,7 @@ the app stays responsive — no crash, no 5xx on the health endpoint.
 ### Primary Verification Points
 
 1. `/api/health` remains `ok` throughout.
-2. `/api/source` reports the misconfigured bucket and `connected: false` with an error.
+2. `/api/source` reports the misconfigured bucket; `/api/source/status` reports `connected: false` with an error.
 3. No endpoint returns a 5xx / stack trace to the client.
 
 ### Secondary Verification Points

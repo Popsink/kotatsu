@@ -24,11 +24,18 @@ test.describe('API smoke', () => {
     expect(await res.json()).toMatchObject({ service: 'kotatsu', status: 'ok' });
   });
 
-  test('source is connected', async ({ request }) => {
+  test('source reports its configuration without probing the store', async ({ request }) => {
     const body = await (await request.get('/api/source')).json();
     expect(body.configured).toBe(true);
-    expect(body.status.connected).toBe(true);
     expect(body.cluster).toBe(CLUSTER);
+    // The live probe moved to /api/source/status (#109): this answer is pure
+    // config, so every page can ask for it without touching S3.
+    expect(body).not.toHaveProperty('status');
+  });
+
+  test('source status probes the store and reports it reachable', async ({ request }) => {
+    const body = await (await request.get('/api/source/status')).json();
+    expect(body).toMatchObject({ configured: true, connected: true });
   });
 
   test('cluster demo is discovered', async ({ request }) => {
@@ -43,6 +50,7 @@ test.describe('API smoke', () => {
       expect.arrayContaining([
         'orders',
         'events',
+        'spread',
         'empty-topic',
         'avro-orders',
         'truncated',
@@ -56,7 +64,7 @@ test.describe('API smoke', () => {
 
   test('orders messages read back faithfully', async ({ request }) => {
     const body = await (await request.get(
-      `/api/clusters/${CLUSTER}/topics/orders/messages?offset=earliest`,
+      `/api/clusters/${CLUSTER}/topics/orders/messages?partition=0&offset=earliest`,
     )).json();
     expect(body.count).toBe(3);
     expect(body.watermark).toMatchObject({ low: 0, high: 3 });
@@ -67,7 +75,7 @@ test.describe('API smoke', () => {
 
   test('empty-topic returns no records', async ({ request }) => {
     const body = await (await request.get(
-      `/api/clusters/${CLUSTER}/topics/empty-topic/messages`,
+      `/api/clusters/${CLUSTER}/topics/empty-topic/messages?partition=0`,
     )).json();
     expect(body.count).toBe(0);
     expect(body.records).toHaveLength(0);
@@ -83,7 +91,7 @@ test.describe('API smoke', () => {
   test('compacted topic reads through its pinned routing prefix', async ({ request }) => {
     const topic = 'acme.prod.db2.dbz_config';
     const body = await (await request.get(
-      `/api/clusters/${CLUSTER}/topics/${topic}/messages?offset=earliest`,
+      `/api/clusters/${CLUSTER}/topics/${topic}/messages?partition=0&offset=earliest`,
     )).json();
     expect(body.count).toBe(2);
     expect(body.watermark).toMatchObject({ low: 0, high: 2 });
@@ -104,21 +112,21 @@ test.describe('API smoke', () => {
    */
   test('truncated topic hides the records deleted below the floor', async ({ request }) => {
     const body = await (await request.get(
-      `/api/clusters/${CLUSTER}/topics/truncated/messages?offset=earliest`,
+      `/api/clusters/${CLUSTER}/topics/truncated/messages?partition=0&offset=earliest`,
     )).json();
     expect(body.watermark).toMatchObject({ low: 2, high: 3 });
     expect(body.count).toBe(1);
     expect(body.records.map((r: { offset: number }) => r.offset)).toEqual([2]);
 
     const below = await (await request.get(
-      `/api/clusters/${CLUSTER}/topics/truncated/messages?offset=0`,
+      `/api/clusters/${CLUSTER}/topics/truncated/messages?partition=0&offset=0`,
     )).json();
     expect(below.records.map((r: { offset: number }) => r.offset)).toEqual([2]);
   });
 
   test('avro-orders values decode via the registry', async ({ request }) => {
     const body = await (await request.get(
-      `/api/clusters/${CLUSTER}/topics/avro-orders/messages?offset=earliest`,
+      `/api/clusters/${CLUSTER}/topics/avro-orders/messages?partition=0&offset=earliest`,
     )).json();
     expect(body.count).toBe(2);
     expect(body.records[0].value.kind).toBe('avro');
@@ -140,6 +148,77 @@ test.describe('API smoke', () => {
     expect(body.total_lag).toBe(0);
   });
 
+  /** `spread` is the seed's only topic whose records really span partitions (#102). */
+  test('partition=all merges records from every partition, newest first', async ({ request }) => {
+    const detail = await (await request.get(`/api/clusters/${CLUSTER}/topics/spread`)).json();
+    const populated = detail.partitions
+      .filter((p: { messages: number }) => p.messages > 0)
+      .map((p: { partition: number }) => p.partition);
+    expect(populated.length).toBeGreaterThan(1); // the seed must really spread
+
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=earliest&limit=100`,
+    )).json();
+
+    const seen = [...new Set(body.records.map((r: { partition: number }) => r.partition))].sort();
+    expect(seen).toEqual([...populated].sort());
+    expect(body.count).toBe(detail.messages);
+
+    const timestamps = body.records.map((r: { timestamp: number }) => r.timestamp);
+    expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => b - a));
+    expect(body.order).toBe('timestamp_desc');
+    expect(body.order_best_effort).toBe(true);
+
+    expect(body.partitions).toHaveLength(detail.partitions.length);
+    expect(body.partitions.every((p: { exhausted: boolean }) => p.exhausted)).toBe(true);
+  });
+
+  test('a filter finds its record whichever partition holds it', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=earliest&key_contains=k-12`,
+    )).json();
+    expect(body.count).toBe(1);
+    expect(body.records[0].key.data).toBe('k-12');
+  });
+
+  /**
+   * The constraint that keeps #102 honest: the scan budget belongs to the topic,
+   * so a three-partition search must not read three times a one-partition one.
+   */
+  test('partition=all spends one topic-wide scan budget, not one per partition', async ({ request }) => {
+    const MAX_SCAN = 6;
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=earliest` +
+      `&value_contains=zzz-no-match&max_scan=${MAX_SCAN}`,
+    )).json();
+
+    expect(body.filtered).toBe(true);
+    const partitions = body.partitions.length;
+    // Handing each partition the full budget would have read MAX_SCAN * partitions
+    // records — the failure mode #102 calls out. The split allows at most one
+    // record of overshoot per partition, so every partition is still reachable.
+    expect(body.scanned).toBeLessThanOrEqual(MAX_SCAN + partitions);
+    expect(body.scanned).toBeLessThan(MAX_SCAN * partitions);
+    // Capped, not exhausted: the topic holds more records than the budget allows.
+    expect(body.exhausted).toBe(false);
+  });
+
+  test('partition=all rejects a concrete offset, naming the constraint', async ({ request }) => {
+    const res = await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=42`,
+    );
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toContain('single partition');
+  });
+
+  test('an unparseable partition is a 400, not a 500', async ({ request }) => {
+    const res = await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=nope`,
+    );
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toContain("'all'");
+  });
+
   test('invalid offset returns 400', async ({ request }) => {
     const res = await request.get(
       `/api/clusters/${CLUSTER}/topics/orders/messages?offset=abc`,
@@ -157,8 +236,32 @@ test.describe('UI smoke', () => {
   test('overview shows source connected and cluster stats', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
-    await expect(page.getByText('connected')).toBeVisible();
+    await expect(page.getByText('connected', { exact: true })).toBeVisible();
     await expect(page.getByText('demo')).toBeVisible();
+  });
+
+  /**
+   * #109: /api/source used to be fetched per page and to probe S3 on every
+   * call, so a four-page session cost four object-store round-trips to render
+   * a dot only Overview shows. Config is now cached for the session and the
+   * probe is asked for only where it is displayed.
+   */
+  test('source config is fetched once, and only Overview probes the store', async ({ page }) => {
+    const calls: string[] = [];
+    page.on('request', (r) => {
+      const path = new URL(r.url()).pathname;
+      if (path === '/api/source' || path === '/api/source/status') calls.push(path);
+    });
+
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+    for (const nav of ['Topics', 'Consumer groups', 'Schemas']) {
+      await page.getByRole('link', { name: nav, exact: true }).click();
+      await expect(page.getByRole('heading', { name: nav })).toBeVisible();
+    }
+
+    expect(calls.filter((p) => p === '/api/source')).toHaveLength(1);
+    expect(calls.filter((p) => p === '/api/source/status')).toHaveLength(1);
   });
 
   test('topics page lists the seeded topics', async ({ page }) => {
@@ -171,11 +274,31 @@ test.describe('UI smoke', () => {
   test('orders topic renders its messages', async ({ page }) => {
     await page.goto('/topics/orders');
     await expect(page.getByRole('heading', { name: 'Messages' })).toBeVisible();
+    // Narrowing to one partition keeps the single-partition view (#102).
+    await page.getByRole('combobox', { name: 'Partition' }).selectOption('0');
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
     await page.getByRole('button', { name: 'Search' }).click();
     await expect(page.getByText('partition 0 — low 0, high 3 (3 messages)')).toBeVisible();
     await expect(page.getByText('key-1')).toBeVisible();
     await expect(page.getByText('{"id":1,"item":"widget"}')).toBeVisible();
+  });
+
+  test('the event browser searches every partition by default', async ({ page }) => {
+    await page.goto('/topics/spread');
+    await expect(page.getByRole('combobox', { name: 'Partition' })).toHaveValue('all');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+
+    // Provenance: the column only appears when a result set can span partitions.
+    // Scoped to the results table — the topic's own partition table and the scan
+    // summary carry that header too, and the first of them is already on the page
+    // before the search lands, so an unscoped locator asserts the wrong table.
+    const results = page.locator('table.msgs');
+    await expect(results.getByRole('columnheader', { name: 'partition' })).toBeVisible();
+    // Populated, not merely present: the cell after the caret, on the first row.
+    await expect(results.locator('tbody tr.row').first().locator('td').nth(1)).toHaveText(/^[0-2]$/);
+    await expect(page.getByText('3 partitions, newest first')).toBeVisible();
+    await expect(page.getByText('k-12')).toBeVisible();
   });
 
   test('avro-orders decodes in the event browser', async ({ page }) => {

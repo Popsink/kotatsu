@@ -51,7 +51,7 @@ async def main():
 
     page = await src.messages(
         "orders",
-        partition=0,
+        partition=None,             # None = every partition, merged newest-first
         offset="earliest",
         limit=50,
         value_format="auto",        # auto | avro | json | raw
@@ -60,6 +60,9 @@ async def main():
         max_scan=5000,
     )
     print(page["count"], page["scanned"], page["records"])
+    # With partition=None the payload carries a per-partition summary instead of
+    # a single watermark, and `order_best_effort` marks the merge as best effort.
+    print(page["partitions"], page["order"])
 
 asyncio.run(main())
 ```

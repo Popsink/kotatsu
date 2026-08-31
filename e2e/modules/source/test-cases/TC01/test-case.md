@@ -16,14 +16,14 @@
 ## Test Objective
 
 Verify that, when Kotatsu is pointed at a valid S3 bucket that contains at least
-one Tansu cluster, `GET /api/source` reports the configured bucket/cluster/endpoint
-and `status.connected: true`, and the cluster is discoverable.
+one Tansu cluster, `GET /api/source` reports the configured bucket/cluster/endpoint,
+`GET /api/source/status` reports `connected: true`, and the cluster is discoverable.
 
 ## Requirements Traceability
 
 - **User Story**: As a user, I want to confirm Kotatsu is correctly connected to its S3 source so that I trust the data it displays.
 - **Requirement ID**: SRC-REQ-001 (Source connectivity)
-- **Business Rule**: `status.connected` is `true` only when the configured bucket is reachable and the configured cluster prefix exists.
+- **Business Rule**: `/api/source/status` reports `connected: true` only when the configured bucket is reachable and the configured cluster prefix exists. `/api/source` itself performs no object-store call (#109).
 
 ## Preconditions
 
@@ -38,16 +38,16 @@ and `status.connected: true`, and the cluster is discoverable.
 | Step | Action | Input Data | Expected Result |
 |------|--------|------------|-----------------|
 | 1 | Ensure at least one topic exists | run MSG-001 steps 1-2 | Topic `orders` created and populated |
-| 2 | Query source | `GET /api/source` | HTTP 200 |
+| 2 | Query source | `GET /api/source` | HTTP 200, no `status` key |
 | 3 | Inspect configuration fields | response body | `bucket: "tansu"`, `cluster: "demo"`, `endpoint: "http://minio:9000"`, `region: "us-east-1"`, `configured: true` |
-| 4 | Inspect connection status | response body | `status.connected: true`, no `error` field |
+| 4 | Inspect connection status | `GET /api/source/status` | `connected: true`, no `error` field |
 | 5 | Confirm cluster discovery | `GET /api/clusters` | `clusters` contains `"demo"` |
 
 ## Expected Results
 
 ### Primary Verification Points
 
-1. `GET /api/source` returns `configured: true` and `status.connected: true`.
+1. `GET /api/source` returns `configured: true`; `GET /api/source/status` returns `connected: true`.
 2. The configuration echoes the compose environment exactly.
 3. `GET /api/clusters` lists `demo`.
 

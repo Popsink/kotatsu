@@ -5,8 +5,11 @@ export const FORMATS: Format[] = ['auto', 'avro', 'json', 'raw']
 
 export type OffsetMode = 'earliest' | 'latest' | 'specific' | 'timestamp'
 
+/** `'all'` merges every partition of the topic newest-first (#102). */
+export type PartitionSpec = number | 'all'
+
 export interface MessageQuery {
-  partition: number
+  partition: PartitionSpec
   offsetMode: OffsetMode
   /** The offset or unix-ms timestamp, for the two modes that take one. */
   offsetValue?: string

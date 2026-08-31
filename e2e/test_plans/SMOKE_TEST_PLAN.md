@@ -7,7 +7,7 @@ down, cluster not discovered, topic/message read broken, schema registry down,
 groups broken) without the depth of the per-module ISTQB cases. Run it after
 every build of the image or change to the read path.
 
-All data is **fictitious** (`orders`, `events`, `avro-orders`, `truncated`,
+All data is **fictitious** (`orders`, `events`, `spread`, `avro-orders`, `truncated`,
 `acme.prod.db2.dbz_config`, `qa-group`).
 
 ## Scope
@@ -35,6 +35,9 @@ NET=kafka() { docker run --rm --network kotatsu_default apache/kafka:latest "$@"
 # topics
 kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 --create --topic orders      --partitions 1 --replication-factor 1
 kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 --create --topic events      --partitions 3 --replication-factor 1
+# Keyed records, so they actually land in different partitions — `events` is
+# keyless and the sticky partitioner puts all six in one (#102).
+kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 --create --topic spread      --partitions 3 --replication-factor 1
 kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 --create --topic empty-topic --partitions 1 --replication-factor 1
 kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 --create --topic avro-orders --partitions 1 --replication-factor 1
 kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server tansu:9092 --create --topic truncated   --partitions 1 --replication-factor 1
@@ -49,6 +52,10 @@ printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"
 printf '{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}\n{"n":5}\n{"n":6}\n' | \
   docker run -i --rm --network kotatsu_default apache/kafka:latest \
   /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server tansu:9092 --topic events
+
+printf 'k-1:{"n":1}\nk-2:{"n":2}\nk-3:{"n":3}\nk-4:{"n":4}\nk-5:{"n":5}\nk-6:{"n":6}\nk-7:{"n":7}\nk-8:{"n":8}\nk-9:{"n":9}\nk-10:{"n":10}\nk-11:{"n":11}\nk-12:{"n":12}\n' | \
+  docker run -i --rm --network kotatsu_default apache/kafka:latest \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server tansu:9092 --topic spread --property parse.key=true --property key.separator=:
 
 printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \
   docker run -i --rm --network kotatsu_default confluentinc/cp-schema-registry:7.6.0 \
@@ -80,17 +87,20 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | # | Step | Endpoint / Action | Expected | Ref case |
 |---|------|-------------------|----------|----------|
 | 1 | Service health | `GET /api/health` | `{"service":"kotatsu","status":"ok"}` | — |
-| 2 | Source connected | `GET /api/source` | `configured: true`, `status.connected: true` | SRC-001 |
+| 2 | Source configured | `GET /api/source` | `configured: true`, `cluster: demo`, no `status` key | SRC-001 |
+| 2b | Source reachable | `GET /api/source/status` | `connected: true` | SRC-001 |
 | 3 | Cluster discovered | `GET /api/clusters` | `clusters` contains `demo` | SRC-001 |
-| 4 | Topics listed | `GET /api/clusters/demo/topics` | `orders`, `events`, `empty-topic`, `avro-orders`, `truncated`, `acme.prod.db2.dbz_config` present | TOP-001 |
+| 4 | Topics listed | `GET /api/clusters/demo/topics` | `orders`, `events`, `spread`, `empty-topic`, `avro-orders`, `truncated`, `acme.prod.db2.dbz_config` present | TOP-001 |
 | 5 | Topic detail | `GET /api/clusters/demo/topics/events` | 3 partitions; `messages: 6` | TOP-002 |
-| 6 | Read messages | `GET .../topics/orders/messages?offset=earliest` | `count: 3`, watermark `{0,3}` | MSG-001 |
-| 7 | Empty topic | `GET .../topics/empty-topic/messages` | `count: 0`, `exhausted: true` | MSG-005 |
-| 8 | Avro decode | `GET .../topics/avro-orders/messages?offset=earliest` | values `kind: "avro"`, decoded `{id,item}` | SCH-001 |
+| 6 | Read messages | `GET .../topics/orders/messages?partition=0&offset=earliest` | `count: 3`, watermark `{0,3}` | MSG-001 |
+| 6b | Search all partitions | `GET .../topics/spread/messages?partition=all&offset=earliest` | records from every populated partition, newest first, `order: timestamp_desc` | MSG-011 |
+| 6c | Topic-wide scan budget | same with `&max_scan=6` | `scanned` ≤ budget + partition count, not budget × partitions | MSG-011 |
+| 7 | Empty topic | `GET .../topics/empty-topic/messages?partition=0` | `count: 0`, `exhausted: true` | MSG-005 |
+| 8 | Avro decode | `GET .../topics/avro-orders/messages?partition=0&offset=earliest` | values `kind: "avro"`, decoded `{id,item}` | SCH-001 |
 | 9 | Schemas listed | `GET /api/schemas` | contains `avro-orders-value` | SCH-001 |
 | 10 | Groups + lag | `GET /api/clusters/demo/groups/qa-group` | `committed_offset: 3`, `lag: 0`, `total_lag: 0` | GRP-002 |
-| 11 | Compacted topic routing | `GET .../topics/acme.prod.db2.dbz_config/messages?offset=earliest` | `count: 2`, watermark `{0,2}`, keys `cfg-a`/`cfg-b`; detail `storage_bytes > 0` | #92 |
-| 12 | Truncation floor | `GET .../topics/truncated/messages?offset=earliest` and `?offset=0` | watermark `{2,3}`, `count: 1`, only offset 2 — the deleted records are not served | #95 |
+| 11 | Compacted topic routing | `GET .../topics/acme.prod.db2.dbz_config/messages?partition=0&offset=earliest` | `count: 2`, watermark `{0,2}`, keys `cfg-a`/`cfg-b`; detail `storage_bytes > 0` | #92 |
+| 12 | Truncation floor | `GET .../topics/truncated/messages?partition=0&offset=earliest` and `?partition=0&offset=0` | watermark `{2,3}`, `count: 1`, only offset 2 — the deleted records are not served | #95 |
 
 ## Pass/Fail
 

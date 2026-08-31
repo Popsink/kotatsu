@@ -77,7 +77,8 @@ printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\n' | \
 | Endpoint                                             | Purpose                     |
 | ---------------------------------------------------- | --------------------------- |
 | `GET /api/health`                                    | service health             |
-| `GET /api/source`                                    | S3 source + connection      |
+| `GET /api/source`                                    | S3 source config (no I/O)   |
+| `GET /api/source/status`                             | live connectivity probe     |
 | `GET /api/clusters`                                  | discovered clusters         |
 | `GET /api/clusters/{cluster}`                        | cluster stats               |
 | `GET /api/clusters/{cluster}/topic-tree`             | hierarchical topic tree     |

@@ -25,8 +25,16 @@ export function health() {
   return http.get(`${BASE}/api/health`, { tags: { op: 'health', name: 'GET /api/health' } });
 }
 
+// Pure config since #109 — no object-store call, so this measures the HTTP path
+// only. `sourceStatus` is the one that costs an S3 round-trip.
 export function source() {
   return http.get(`${BASE}/api/source`, { tags: { op: 'source', name: 'GET /api/source' } });
+}
+
+export function sourceStatus() {
+  return http.get(`${BASE}/api/source/status`, {
+    tags: { op: 'source_status', name: 'GET /api/source/status' },
+  });
 }
 
 export function clusters() {
@@ -57,6 +65,8 @@ export function topicDetail(topic, cluster = CLUSTER) {
   });
 }
 
+// No `partition` means every partition since #102, so this op now measures the
+// fan-out — the default a user hits. Pass `partition: 0` to measure one instead.
 export function messages(topic, cluster = CLUSTER, params = { offset: 'earliest', limit: 20 }) {
   return http.get(`${BASE}/api/clusters/${cluster}/topics/${topic}/messages${qs(params)}`, {
     tags: { op: 'messages', name: 'GET /api/clusters/{cluster}/topics/{topic}/messages' },
