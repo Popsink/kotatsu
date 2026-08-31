@@ -39,7 +39,7 @@ renders a null key without breaking.
 | 2 | Produce 6 keyless records | `printf '{"n":1}\n...{"n":6}\n' \| kafka-console-producer.sh --topic events` (no `parse.key`) | Producer exits OK |
 | 3 | Read partition 0 | `?partition=0&offset=earliest` | `count: 6` |
 | 4 | Verify keys | inspect each record | `key: null` for every record |
-| 5 | Verify values | inspect each record | `value.kind: "utf8"`, data equals `{"n":k}` |
+| 5 | Verify values | inspect each record | `value.kind: "json"`, `data` is the parsed `{"n":k}` — `auto` recognises a JSON object (#103) |
 | 6 | UI render | open `events` in the event browser | Records show an empty/`null` key indicator, values visible, no error |
 
 ## Expected Results
@@ -61,7 +61,7 @@ renders a null key without breaking.
   "topic": "events",
   "partition": 0,
   "records": [{ "n": 1 }, { "n": 2 }, { "n": 3 }, { "n": 4 }, { "n": 5 }, { "n": 6 }],
-  "expected": { "count": 6, "key": null, "value": { "kind": "utf8" } }
+  "expected": { "count": 6, "key": null, "value": { "kind": "json" } }
 }
 ```
 

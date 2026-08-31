@@ -215,8 +215,30 @@ pub async fn decode_field(
             "error": "not Confluent-framed (no 0x00 magic byte)" }),
         FieldFormat::Avro => avro_field(registry, bytes).await,
         FieldFormat::Auto if framed => avro_field(registry, bytes).await,
-        FieldFormat::Auto => raw_field(bytes),
+        FieldFormat::Auto => auto_field(bytes),
     }
+}
+
+/// `auto` on unframed bytes: JSON when the payload really is JSON, else the bytes.
+///
+/// `auto` used to hand back a plain JSON record as one `utf8` string, so the
+/// commonest topic shape there is arrived with no structure at all — the event
+/// browser had nothing to open, and a reader had to know to switch the format
+/// dropdown to `json` by hand (#103).
+///
+/// Only an object or an array counts. A bare `42` or `"text"` is valid JSON too,
+/// but relabelling every plain-text record in the cluster `json` would buy the
+/// reader nothing: there is no structure to open. The cheap first-character test
+/// also keeps a parse attempt off every log line that is only ever text.
+fn auto_field(bytes: &Bytes) -> Value {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        if text.trim_start().starts_with(['{', '[']) {
+            if let Ok(data) = serde_json::from_str::<Value>(text) {
+                return json!({ "kind": "json", "data": data });
+            }
+        }
+    }
+    raw_field(bytes)
 }
 
 /// Decodes a Confluent-framed (`0x00` + 4-byte id) Avro payload via the registry.
@@ -416,6 +438,33 @@ mod tests {
         assert_eq!(FieldFormat::parse(Some("raw")), FieldFormat::Raw);
         assert_eq!(FieldFormat::parse(Some("nonsense")), FieldFormat::Auto);
         assert_eq!(FieldFormat::parse(None), FieldFormat::Auto);
+    }
+
+    #[test]
+    fn auto_reads_a_json_object_as_json() {
+        let v = auto_field(&Bytes::from_static(br#"{"id":4711,"tags":["a"]}"#));
+        assert_eq!(v["kind"], "json");
+        assert_eq!(v["data"]["id"], 4711);
+
+        let arr = auto_field(&Bytes::from_static(br#"[1,2]"#));
+        assert_eq!(arr["kind"], "json");
+    }
+
+    /// Relabelling every plain-text record `json` would buy the reader nothing —
+    /// there is no structure to open — and would rename half a cluster's fields.
+    #[test]
+    fn auto_leaves_a_scalar_or_a_non_json_payload_alone() {
+        for raw in [&b"key-1"[..], b"42", b"\"quoted\"", b"true", b"null"] {
+            let v = auto_field(&Bytes::copy_from_slice(raw));
+            assert_eq!(v["kind"], "utf8", "{}", String::from_utf8_lossy(raw));
+        }
+        // Looks like JSON, is not: the bytes come back as bytes, with no error —
+        // `auto` made no promise to parse it.
+        let broken = auto_field(&Bytes::from_static(b"{not json"));
+        assert_eq!(broken["kind"], "utf8");
+        assert!(broken.get("error").is_none());
+        // Binary stays hex.
+        assert_eq!(auto_field(&Bytes::from_static(b"\xff\xfe"))["kind"], "hex");
     }
 
     #[test]

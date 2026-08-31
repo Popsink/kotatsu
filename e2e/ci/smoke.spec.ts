@@ -72,7 +72,10 @@ test.describe('API smoke', () => {
     expect(body.watermark).toMatchObject({ low: 0, high: 3 });
     expect(body.records.map((r: { offset: number }) => r.offset)).toEqual([0, 1, 2]);
     expect(body.records[0].key.data).toBe('key-1');
-    expect(body.records[0].value.data).toContain('widget');
+    // `auto` recognises a JSON object, so the browser has a structure to open
+    // instead of one long string (#103). A bare key is text, and stays text.
+    expect(body.records[0].value).toMatchObject({ kind: 'json', data: { id: 1, item: 'widget' } });
+    expect(body.records[0].key.kind).toBe('utf8');
   });
 
   test('empty-topic returns no records', async ({ request }) => {
