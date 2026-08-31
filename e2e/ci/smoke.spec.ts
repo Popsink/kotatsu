@@ -509,14 +509,14 @@ test.describe('UI smoke', () => {
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
     await page.getByRole('button', { name: 'Search' }).click();
     await page.locator('table.msgs tbody tr.row').first().click();
+    // The tree is what an expanded record shows by default.
+    await expect(page.locator('[data-field="value"] pre')).toHaveCount(0);
 
     await page.getByLabel('raw JSON').check();
     await expect(page.locator('[data-field="value"] pre')).toBeVisible();
 
+    // Remembered with the two format choices, under the same per-topic key (#32).
     await page.reload();
-    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
-    await page.getByRole('button', { name: 'Search' }).click();
-    await page.locator('table.msgs tbody tr.row').first().click();
     await expect(page.getByLabel('raw JSON')).toBeChecked();
   });
 

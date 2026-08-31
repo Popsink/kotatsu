@@ -26,11 +26,12 @@ row of a table, and that an oversized payload does not lock the tab.
 - **Business Rules**:
   - The tree engages only on a structured payload. A `hex` or `utf8` field is one scalar and keeps the flat rendering — a tree around it is a worse `<pre>`.
   - Objects and arrays are collapsed past depth 2, and a closed node states what is behind the fold: `{…} 12 keys` / `[…] 340 items`.
-  - Search inside the payload matches by **key or scalar value**, case-insensitively, and opens every node on the way to a match. It composes with the server-side `value_contains`: the server finds the record, the tree finds the field.
+  - Search inside the payload matches by **key or scalar value**, case-insensitively, and opens every node on the way to a match. A node the reader had collapsed by hand reopens — the new needle is the more specific intent. It composes with the server-side `value_contains`: the server finds the record, the tree finds the field.
+  - A container that matched by its own **key** is highlighted but not opened: the match is the node, and its contents did not match.
   - Copy path yields a JSONPath that parses back — bracket notation whenever dot notation would name a different node (`$["user.id"]`, not `$.user.id`).
   - A decode error (`FieldValue.error`) is rendered independently of whatever decoded. The tree must never swallow it.
   - Above 256 KB of JSON the field renders collapsed-only with an **Expand anyway** escape. The guard is a default, not a refusal.
-  - Raw / pretty is remembered per topic in `localStorage` under `kotatsu:fmt:{topic}`, alongside the key/value serializer choice (#32).
+  - Raw / pretty sits with the two serializer controls in the search form, not in each row — it is a per-topic rendering choice, not a per-record one — and is remembered with them in `localStorage` under `kotatsu:fmt:{topic}` (#32).
   - Every header is one table row, with the same decode badge treatment as key/value.
 
 ## Preconditions
@@ -45,7 +46,8 @@ row of a table, and that an oversized payload does not lock the tab.
 | 1 | Open a nested payload | `/topics/nested`, From `earliest`, Search, click the first row | `value` renders as a tree, not a `<pre>` |
 | 2 | Check the fold | same row | `after` and `before` are closed and read `{…} n keys`; `tags` reads `[…] n items` |
 | 3 | Check the colours | same row | strings, numbers, booleans and `null` are visually distinct, using the palette already in `layouts/default.vue` — no new colours |
-| 4 | Open a node | click a `{…}` summary | it expands; clicking the caret again closes it and it **stays** closed while searching |
+| 4 | Open a node | click a `{…}` summary | it expands; clicking the caret closes it again |
+| 4b | A search outranks a manual collapse | close `after`, then search a value inside it | it reopens. A counted match with nowhere to be seen would make the count a lie |
 | 5 | Search inside | type `4711` in `find in payload` | the match count appears, the nodes on the way to `$.after.id` open, and the match is highlighted |
 | 6 | Search by key | type `tags` | the key matches, not only values |
 | 7 | No match | type `zzz` | `0 matches`, and nothing is force-opened |
@@ -54,8 +56,8 @@ row of a table, and that an oversized payload does not lock the tab.
 | 10 | Clipboard refused | deny clipboard permission, retry | `copy failed` is shown rather than silence (#65) |
 | 11 | Scalar field | `/topics/orders`, open a row | the `key` field is flat text, no tree, no `{…}` |
 | 12 | Decode error | a record whose value fails to decode | the `⚠` line is visible **and** whatever decoded is still shown |
-| 13 | Raw toggle | tick **raw JSON** | both fields become pretty-printed JSON; the search box disappears, where it would do nothing |
-| 14 | Raw persists | reload, search, reopen a row | **raw JSON** is still ticked |
+| 13 | Raw toggle | tick **raw JSON** in the search form | both fields become pretty-printed JSON; the search box disappears, where it would do nothing |
+| 14 | Raw persists | reload the page | **raw JSON** is still ticked, before any search |
 | 15 | Large payload | a record over 256 KB | collapsed only, with the size stated and an **Expand anyway** button; the tab stays responsive |
 | 16 | Expand anyway | click it | the tree renders and the search box returns |
 | 17 | Headers table | `/topics/headers`, open the first record | **two** rows — the header whose value holds a newline is one row, not two |
@@ -99,5 +101,5 @@ row of a table, and that an oversized payload does not lock the tab.
 ## Notes
 
 - Step 12 is the one worth being strict about. Wrapping the tree render in a `try/catch` is the natural way to make it robust, and it silently swallows the decode error — the single thing the reader most needs to see.
-- Step 4's "stays closed while searching" is deliberate: a node the reader closed on purpose must not be reopened by a later search.
+- Step 4b is the one that is easy to get backwards. Honouring a manual collapse over a later search feels respectful and is wrong: the match count would report matches the reader cannot reach.
 - Search-in-payload and `value_contains` are different tools and both are needed: the server cannot tell you *which field* matched, and the browser cannot search records it has not fetched.

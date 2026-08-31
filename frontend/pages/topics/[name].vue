@@ -422,6 +422,11 @@ async function copyMsg(r: Record) {
           <option value="raw">raw</option>
         </select>
       </label>
+      <!-- A rendering choice, like the two formats above, and remembered with
+           them — not a per-record one, so it lives once and not in every row. -->
+      <label class="rawtoggle">
+        <input type="checkbox" v-model="rawJson" /> raw JSON
+      </label>
       <button type="button" class="ghost" @click="showFilters = !showFilters">
         {{ showFilters ? 'Filters ▴' : 'Filters ▾' }}
       </button>
@@ -538,12 +543,9 @@ async function copyMsg(r: Record) {
                 </table>
               </div>
 
-              <div class="rowtools">
-                <label class="rawtoggle"><input type="checkbox" v-model="rawJson" /> raw JSON</label>
-                <button type="button" class="ghost copy" :class="{ copyfail: copyFailed === rowKey(r) }" @click="copyMsg(r)">
-                  {{ copied === rowKey(r) ? 'Copied ✓' : copyFailed === rowKey(r) ? 'Copy failed' : 'Copy JSON' }}
-                </button>
-              </div>
+              <button type="button" class="ghost copy" :class="{ copyfail: copyFailed === rowKey(r) }" @click="copyMsg(r)">
+                {{ copied === rowKey(r) ? 'Copied ✓' : copyFailed === rowKey(r) ? 'Copy failed' : 'Copy JSON' }}
+              </button>
             </td>
           </tr>
         </template>
@@ -609,6 +611,7 @@ h2 code { color: var(--accent); }
 .caret { color: var(--muted); width: 1.2rem; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
 .detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
+.rawtoggle { flex-direction: row; align-items: center; gap: 0.3rem; }
 .hdrwrap { margin: 0.5rem 0; }
 .hdrwrap .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .hdrs { border-collapse: collapse; margin-top: 0.2rem; }
@@ -616,8 +619,6 @@ h2 code { color: var(--accent); }
 .hdrs td { vertical-align: top; padding: 0.2rem 0.75rem 0.2rem 0; border-bottom: 1px solid var(--border); font-size: 0.78rem; }
 .hdrs .tag { font-style: normal; color: var(--accent); font-size: 0.65rem; border: 1px solid var(--border); border-radius: 3px; padding: 0 0.25rem; margin-right: 0.3rem; }
 .hval { display: inline; margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.rowtools { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
-.rawtoggle { display: flex; align-items: center; gap: 0.3rem; font-size: 0.72rem; color: var(--muted); }
 .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; }
 .schemalink:hover { text-decoration: underline; }
 </style>

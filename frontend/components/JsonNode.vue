@@ -33,9 +33,11 @@ const summary = computed(() => {
 })
 
 // `null` means "the reader has not decided": the node follows the depth rule and
-// the search. One click pins it, and a later search no longer moves it — a node
-// the reader closed on purpose must stay closed.
+// the search. A click pins it either way — but only until the search changes. A
+// new needle is a newer, more specific intent than an earlier collapse, and a
+// pin that outlived it would leave a counted match with nowhere to be seen.
 const pinned = ref<boolean | null>(null)
+watch(() => props.hits, () => (pinned.value = null))
 const open = computed(() =>
   pinned.value ?? (props.hits.ancestors.has(props.path) || props.depth < props.openTo),
 )
