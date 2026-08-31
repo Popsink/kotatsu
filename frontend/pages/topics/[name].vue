@@ -435,7 +435,7 @@ async function copyMsg(r: Record) {
     </form>
 
     <p v-if="searched && filtered" class="muted wm">
-      {{ records.length }} match{{ records.length === 1 ? '' : 'es' }} in {{ scanned }} scanned<template v-if="!exhausted"> (scan capped — narrow the range or raise max_scan)</template>
+      {{ records.length }} match{{ records.length === 1 ? '' : 'es' }} in {{ scanned }} scanned<template v-if="!exhausted"> — more to scan, Load more continues it</template>
     </p>
 
     <p v-if="watermark" class="muted wm">
@@ -457,13 +457,13 @@ async function copyMsg(r: Record) {
            partition table above; repeating them here would be noise. -->
       <table class="parts">
         <thead>
-          <tr><th>partition</th><th>scanned</th><th></th></tr>
+          <tr><th>partition</th><th>scanned</th><th>left</th></tr>
         </thead>
         <tbody>
           <tr v-for="s in partitionSummary" :key="s.partition">
             <td class="mono">{{ s.partition }}</td>
             <td class="mono">{{ s.scanned }}</td>
-            <td class="muted">{{ s.exhausted ? '' : 'scan capped' }}</td>
+            <td class="muted">{{ s.exhausted ? 'done' : 'more' }}</td>
           </tr>
         </tbody>
       </table>

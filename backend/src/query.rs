@@ -260,20 +260,6 @@ impl Direction {
     }
 }
 
-/// Whether a scan that filled its budget nonetheless covered the whole partition.
-///
-/// Which edge proves it depends on the direction of the read. `latest` returns the
-/// *last* records, so it touches the log end on its very first one — checking that
-/// end would call every `latest` read complete, however little of the partition it
-/// actually looked at. Reading backwards, only reaching the log start proves
-/// coverage; reading forward, only reaching the served end does.
-fn covers_partition(dir: Direction, first: i64, last: i64, low: i64, served_end: i64) -> bool {
-    match dir {
-        Direction::Backward => first <= low,
-        Direction::Forward => last + 1 >= served_end,
-    }
-}
-
 /// Parses a resume cursor: `0:412,3:998` — one offset per partition.
 ///
 /// A fan-out cannot be resumed by one `offset`: partition 0 and partition 3 stop
@@ -286,7 +272,8 @@ pub fn parse_cursor(raw: &str) -> Result<Vec<(i32, i64)>, QueryError> {
             "invalid cursor: {pair} (expected comma-separated `partition:offset` pairs)"
         ))
     };
-    raw.split(',')
+    let points: Vec<(i32, i64)> = raw
+        .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|pair| {
@@ -296,7 +283,18 @@ pub fn parse_cursor(raw: &str) -> Result<Vec<(i32, i64)>, QueryError> {
                 o.trim().parse().map_err(|_| bad(pair))?,
             ))
         })
-        .collect()
+        .collect::<Result<_, QueryError>>()?;
+
+    // Two starting points for one partition would scan it twice and return its
+    // records twice.
+    for (i, (part, _)) in points.iter().enumerate() {
+        if points[..i].iter().any(|(seen, _)| seen == part) {
+            return Err(QueryError::BadRequest(format!(
+                "invalid cursor: partition {part} named twice"
+            )));
+        }
+    }
+    Ok(points)
 }
 
 /// What one partition contributed to a read.
@@ -305,8 +303,6 @@ struct PartitionScan {
     watermark: Watermark,
     rendered: Vec<Value>,
     scanned: usize,
-    /// Whether the scan covered the partition to its edge in the read direction.
-    covered: bool,
     /// The furthest offset the scan actually looked at, in the read direction —
     /// the frontier a partition that matched nothing resumes from (#104).
     frontier: Option<i64>,
@@ -341,18 +337,6 @@ async fn scan_partition(
     if let Some(ceiling) = win.ceiling {
         records.retain(|r| r.offset <= ceiling);
     }
-    // Fetched fewer than asked ⇒ we reached the end. Reading *exactly* the budget
-    // is no longer rare once it is split across partitions (#102), so also check
-    // whether the records we got happen to span to the partition's edge.
-    let served_end = watermark.served_end.unwrap_or(watermark.high);
-    let reached_end = records.len() < budget
-        || match (records.first(), records.last()) {
-            (Some(f), Some(l)) => {
-                covers_partition(dir, f.offset, l.offset, watermark.low, served_end)
-            }
-            _ => true,
-        };
-
     // Scan in the direction of travel. `fetch` always hands back ascending offsets,
     // so a backward read walks them in reverse — otherwise the `limit` break below
     // would keep the *oldest* matches of a window the caller asked the newest of,
@@ -395,8 +379,6 @@ async fn scan_partition(
         partition,
         watermark,
         scanned,
-        // A short `scanned` means the `limit` break fired, so records went unlooked-at.
-        covered: reached_end && scanned == records.len(),
         frontier,
         rendered,
     })
@@ -450,11 +432,17 @@ fn merge_page(records: &mut Vec<Value>, dir: Direction, limit: usize) {
 
 /// Where each partition resumes, keyed by partition, given the page just built.
 ///
-/// The frontier is *past the last record this page returned*, not past everything
-/// the scan touched: a record that was scanned, matched and then dropped by the
-/// merge's truncation has not been shown to anyone, and must come back next page.
-/// Only a partition that returned nothing resumes at its scan frontier — which is
-/// the case #104 asks for, an unproductive filtered region not walked twice.
+/// Three cases, and the middle one is the whole difficulty:
+///
+/// - the partition put records on the page — resume *past* the last of them;
+/// - it matched records but every one lost the merge to another partition's —
+///   resume *at* the first of them, because none of them reached anyone;
+/// - it matched nothing — resume past what it scanned, so an unproductive filtered
+///   region is not walked a second time. That is the case #104 names.
+///
+/// Collapsing the middle case into the third is the tempting mistake: on a small
+/// `limit` a whole partition can lose the merge, and marking it done there loses
+/// every record it holds.
 ///
 /// `None` for a partition with nothing left in the read direction.
 ///
@@ -468,17 +456,37 @@ fn resume_points(scans: &[PartitionScan], page: &[Value], dir: Direction) -> Vec
     scans
         .iter()
         .map(|s| {
-            let shown = page
-                .iter()
-                .filter(|r| r.get("partition").and_then(Value::as_i64) == Some(s.partition as i64))
-                .filter_map(|r| r.get("offset").and_then(Value::as_i64));
-            let edge = match dir {
-                Direction::Forward => shown.max(),
-                Direction::Backward => shown.min(),
-            }
-            .or(s.frontier)?;
+            let offsets = |records: &[Value]| -> Vec<i64> {
+                records
+                    .iter()
+                    .filter(|r| {
+                        r.get("partition").and_then(Value::as_i64) == Some(s.partition as i64)
+                    })
+                    .filter_map(|r| r.get("offset").and_then(Value::as_i64))
+                    .collect()
+            };
+            let leading = |v: Vec<i64>| match dir {
+                Direction::Forward => v.into_iter().max(),
+                Direction::Backward => v.into_iter().min(),
+            };
+            let trailing = |v: Vec<i64>| match dir {
+                Direction::Forward => v.into_iter().min(),
+                Direction::Backward => v.into_iter().max(),
+            };
 
-            let next = dir.past(edge);
+            let next = match leading(offsets(page)) {
+                // Shown: resume past the last of them.
+                Some(edge) => dir.past(edge),
+                // Matched, but the whole contribution lost the merge — every record
+                // of this partition was outranked by another's. None of them reached
+                // anyone, so the next page starts *at* the first, not past it.
+                None => match trailing(offsets(&s.rendered)) {
+                    Some(first) => first,
+                    // Matched nothing at all: skip the region rather than re-walk it.
+                    None => dir.past(s.frontier?),
+                },
+            };
+
             let served_end = s.watermark.served_end.unwrap_or(s.watermark.high);
             match dir {
                 Direction::Forward => (next < served_end).then_some(next),
@@ -638,8 +646,8 @@ pub async fn messages(
         // travel, so a `latest` read is newest-first rather than in storage order —
         // otherwise a page that stopped at `limit` would hand back the oldest
         // records of a window the caller asked the newest of.
+        let resume = resume_points(std::slice::from_ref(&scan), &scan.rendered, dir)[0];
         let page = std::mem::take(&mut scan.rendered);
-        let resume = resume_points(std::slice::from_ref(&scan), &page, dir)[0];
         return Ok(json!({
             "partition": n,
             "watermark": scan.watermark,
@@ -665,11 +673,8 @@ pub async fn messages(
             "partition": s.partition,
             "watermark": s.watermark,
             "scanned": s.scanned,
-            // Nothing left to read here, in this direction. `covered` is the
-            // narrower question of whether *this* scan reached the edge; a page
-            // that stopped at `limit` mid-partition is not covered but does resume.
+            // Nothing left to read here, in this direction.
             "exhausted": r.is_none(),
-            "covered": s.covered,
             "resume": r,
         })).collect::<Vec<_>>(),
         "count": records.len(),
@@ -685,28 +690,6 @@ pub async fn messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A `latest` read starts at the log end, so the end proves nothing about how
-    /// much of the partition it saw. Getting this backwards makes every capped
-    /// `latest` scan claim it was complete.
-    #[test]
-    fn a_latest_scan_is_only_covered_once_it_reaches_the_log_start() {
-        // Read the last record of a 6-record partition: 5 more remain below.
-        assert!(!covers_partition(Direction::Backward, 5, 5, 0, 6));
-        // Read all six.
-        assert!(covers_partition(Direction::Backward, 0, 5, 0, 6));
-        // A truncated partition starts at its floor, not at 0.
-        assert!(covers_partition(Direction::Backward, 2, 5, 2, 6));
-    }
-
-    #[test]
-    fn a_forward_scan_is_covered_once_it_reaches_the_served_end() {
-        assert!(covers_partition(Direction::Forward, 0, 5, 0, 6));
-        assert!(!covers_partition(Direction::Forward, 0, 3, 0, 6));
-        // `served_end` below `high` is retention having destroyed the tail (#95):
-        // reaching it is as far as any read can go.
-        assert!(covers_partition(Direction::Forward, 0, 3, 0, 4));
-    }
 
     #[test]
     fn only_latest_reads_backwards() {
@@ -806,7 +789,6 @@ mod tests {
                 .map(|o| json!({ "partition": partition, "offset": o }))
                 .collect(),
             scanned: shown.len(),
-            covered: false,
             frontier,
         }
     }
@@ -820,6 +802,14 @@ mod tests {
         assert_eq!(parse_cursor("2:7").unwrap(), vec![(2, 7)]);
         // An exhausted read hands back nothing, and that must not be an error.
         assert_eq!(parse_cursor("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_cursor_naming_a_partition_twice_is_refused() {
+        // Two starting points for one partition would scan it twice and return its
+        // records twice — a page that repeats itself, not a page.
+        let err = parse_cursor("0:1,2:4,0:9").unwrap_err().to_string();
+        assert!(err.contains("twice"), "{err}");
     }
 
     #[test]
@@ -890,6 +880,24 @@ mod tests {
         assert_eq!(
             resume_points(&scans, &page, Direction::Forward),
             vec![Some(11)]
+        );
+    }
+
+    /// The middle case, and the one that loses records if it is collapsed into the
+    /// third: on a small `limit` a whole partition's contribution can lose the merge
+    /// to another's. Nothing of it was shown, so nothing of it may be skipped.
+    #[test]
+    fn a_partition_whose_whole_contribution_lost_the_merge_starts_again_at_its_first() {
+        let scans = [scan(1, 0, 100, Some(30), &[10, 20, 30])];
+        // The page is all partition 0's: partition 1 matched, and showed nothing.
+        let page = vec![json!({ "partition": 0, "offset": 7 })];
+        assert_eq!(
+            resume_points(&scans, &page, Direction::Forward),
+            vec![Some(10)]
+        );
+        assert_eq!(
+            resume_points(&scans, &page, Direction::Backward),
+            vec![Some(30)]
         );
     }
 
