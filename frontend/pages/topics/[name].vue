@@ -82,7 +82,7 @@ const limit = ref(initial.limit)
 
 // Serializer choice, remembered per topic (#32) — unless the link says otherwise:
 // whoever shared it chose a format deliberately, and it must render what they saw.
-const { keyFormat, valueFormat } = useTopicFormat(topic)
+const { keyFormat, valueFormat, rawJson } = useTopicFormat(topic)
 if (route.query.key_format) keyFormat.value = initial.keyFormat
 if (route.query.value_format) valueFormat.value = initial.valueFormat
 watch([keyFormat, valueFormat], () => {
@@ -508,29 +508,42 @@ async function copyMsg(r: Record) {
           <tr v-if="expanded.has(rowKey(r))" class="detail">
             <td></td>
             <td :colspan="allPartitions ? 5 : 4">
-              <div class="kv">
-                <span class="lbl">key
-                  <em v-if="r.key" class="tag">{{ fieldBadge(r.key) }}</em>
+              <JsonTree :field="r.key" label="key" :raw="rawJson">
+                <template #links>
                   <NuxtLink v-if="r.key?.schemaId != null && keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}`" class="schemalink">↗ schema</NuxtLink>
-                </span>
-                <pre>{{ fieldText(r.key) }}</pre>
-                <span v-if="r.key?.error" class="ferr">⚠ {{ r.key.error }}</span>
-              </div>
-              <div class="kv">
-                <span class="lbl">value
-                  <em v-if="r.value" class="tag">{{ fieldBadge(r.value) }}</em>
+                </template>
+              </JsonTree>
+              <JsonTree :field="r.value" label="value" :raw="rawJson">
+                <template #links>
                   <NuxtLink v-if="r.value?.schemaId != null && valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}`" class="schemalink">↗ schema</NuxtLink>
-                </span>
-                <pre>{{ fieldText(r.value) }}</pre>
-                <span v-if="r.value?.error" class="ferr">⚠ {{ r.value.error }}</span>
-              </div>
-              <div class="kv" v-if="r.headers.length">
+                </template>
+              </JsonTree>
+
+              <!-- One row per header. Joining them into a `<pre>` made a value
+                   containing a newline indistinguishable from two headers, and a
+                   binary value render as mojibake instead of its `hex` badge. -->
+              <div v-if="r.headers.length" class="hdrwrap">
                 <span class="lbl">headers</span>
-                <pre>{{ r.headers.map(h => `${fieldText(h.key)}: ${fieldText(h.value)}`).join('\n') }}</pre>
+                <table class="hdrs">
+                  <thead><tr><th>key</th><th>value</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(h, i) in r.headers" :key="i">
+                      <td class="mono">{{ fieldText(h.key) }}</td>
+                      <td>
+                        <em v-if="h.value" class="tag">{{ fieldBadge(h.value) }}</em>
+                        <pre class="hval">{{ fieldText(h.value) }}</pre>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-              <button type="button" class="ghost copy" :class="{ copyfail: copyFailed === rowKey(r) }" @click="copyMsg(r)">
-                {{ copied === rowKey(r) ? 'Copied ✓' : copyFailed === rowKey(r) ? 'Copy failed' : 'Copy JSON' }}
-              </button>
+
+              <div class="rowtools">
+                <label class="rawtoggle"><input type="checkbox" v-model="rawJson" /> raw JSON</label>
+                <button type="button" class="ghost copy" :class="{ copyfail: copyFailed === rowKey(r) }" @click="copyMsg(r)">
+                  {{ copied === rowKey(r) ? 'Copied ✓' : copyFailed === rowKey(r) ? 'Copy failed' : 'Copy JSON' }}
+                </button>
+              </div>
             </td>
           </tr>
         </template>
@@ -596,11 +609,15 @@ h2 code { color: var(--accent); }
 .caret { color: var(--muted); width: 1.2rem; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
 .detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
-.kv { display: grid; grid-template-columns: 70px 1fr; gap: 0.5rem; margin-bottom: 0.4rem; }
-.kv .lbl { color: var(--muted); font-size: 0.75rem; }
-.kv .tag { font-style: normal; color: var(--accent); font-size: 0.7rem; margin-left: 0.3rem; }
-.kv .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; margin-left: 0.4rem; }
-.kv .schemalink:hover { text-decoration: underline; }
-.kv .ferr { grid-column: 2; color: var(--err); font-size: 0.75rem; }
-.kv pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.82rem; }
+.hdrwrap { margin: 0.5rem 0; }
+.hdrwrap .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.hdrs { border-collapse: collapse; margin-top: 0.2rem; }
+.hdrs th { text-align: left; font-size: 0.68rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.2rem 0.75rem 0.2rem 0; font-weight: normal; }
+.hdrs td { vertical-align: top; padding: 0.2rem 0.75rem 0.2rem 0; border-bottom: 1px solid var(--border); font-size: 0.78rem; }
+.hdrs .tag { font-style: normal; color: var(--accent); font-size: 0.65rem; border: 1px solid var(--border); border-radius: 3px; padding: 0 0.25rem; margin-right: 0.3rem; }
+.hval { display: inline; margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rowtools { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+.rawtoggle { display: flex; align-items: center; gap: 0.3rem; font-size: 0.72rem; color: var(--muted); }
+.schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; }
+.schemalink:hover { text-decoration: underline; }
 </style>

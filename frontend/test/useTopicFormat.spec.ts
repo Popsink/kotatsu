@@ -57,4 +57,25 @@ describe('useTopicFormat', () => {
     const fmt = await mount()
     expect(fmt.valueFormat.value).toBe('auto')
   })
+
+  it('remembers the raw-JSON choice alongside the formats', async () => {
+    const first = await mount()
+    first.rawJson.value = true
+    await nextTick()
+    expect(await mount().then((f) => f.rawJson.value)).toBe(true)
+  })
+
+  // A preference written before `raw` existed has no `raw` field, and must read
+  // back as the tree rather than as `undefined`.
+  it('reads a preference stored before raw existed as the tree', async () => {
+    localStorage.setItem('kotatsu:fmt:orders', JSON.stringify({ key: 'avro', value: 'json' }))
+    const fmt = await mount()
+    expect(fmt.rawJson.value).toBe(false)
+    expect(fmt.keyFormat.value).toBe('avro')
+  })
+
+  it('does not take a non-boolean raw as true', async () => {
+    localStorage.setItem('kotatsu:fmt:orders', JSON.stringify({ raw: 'yes' }))
+    expect((await mount()).rawJson.value).toBe(false)
+  })
 })

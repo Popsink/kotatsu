@@ -51,6 +51,8 @@ test.describe('API smoke', () => {
         'orders',
         'events',
         'spread',
+        'nested',
+        'headers',
         'empty-topic',
         'avro-orders',
         'truncated',
@@ -454,6 +456,68 @@ test.describe('UI smoke', () => {
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
     await page.getByRole('button', { name: 'Search' }).click();
     await expect(page.getByText('{"id":1,"item":"widget"}')).toBeVisible();
+  });
+
+  /**
+   * #103: a decoded payload was a flat `<pre>` of `JSON.stringify`. For a CDC
+   * envelope that is a wall of text; `nested` is the seed's topic with one.
+   */
+  test('a nested payload opens as a tree, and searches inside itself', async ({ page }) => {
+    await page.goto('/topics/nested');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    const value = page.locator('[data-field="value"]');
+    // Collapsed past the default depth, and saying what is behind the fold.
+    await expect(value.getByRole('button', { name: /\{…\} \d+ keys/ }).first()).toBeVisible();
+
+    // The server found the record; the tree finds the field.
+    await value.getByRole('searchbox').fill('4711');
+    await expect(value.getByText(/match/)).toBeVisible();
+    await expect(value.getByText('4711').first()).toBeVisible();
+  });
+
+  test('headers render one row each, so a newline is not a second header', async ({ page }) => {
+    await page.goto('/topics/headers');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    const headers = page.locator('table.hdrs');
+    await expect(headers).toBeVisible();
+    // Two headers, one of whose values holds a newline — joined into a single
+    // <pre> that was indistinguishable from three headers.
+    await expect(headers.locator('tbody tr')).toHaveCount(2);
+    await expect(headers.getByText('trace')).toBeVisible();
+    await expect(headers.getByText('second line')).toBeVisible();
+  });
+
+  test('a binary header value shows its hex badge, not mojibake', async ({ page }) => {
+    await page.goto('/topics/headers');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').nth(1).click();
+
+    const headers = page.locator('table.hdrs');
+    await expect(headers.getByText('hex')).toBeVisible();
+    await expect(headers.getByText('fffe')).toBeVisible();
+  });
+
+  test('raw JSON is a toggle, and it survives a reload', async ({ page }) => {
+    await page.goto('/topics/nested');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    await page.getByLabel('raw JSON').check();
+    await expect(page.locator('[data-field="value"] pre')).toBeVisible();
+
+    await page.reload();
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+    await expect(page.getByLabel('raw JSON')).toBeChecked();
   });
 
   test('schemas page lists the subject', async ({ page }) => {
