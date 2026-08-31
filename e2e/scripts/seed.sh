@@ -11,10 +11,11 @@
 #   BOOTSTRAP kafka bootstrap server (default: tansu:9092, reachable on NETWORK)
 #   KORA_URL  schema registry URL reachable on NETWORK (default: http://kora:8080)
 #
-# Topics: orders, events, spread, empty-topic, avro-orders, truncated (3 records with the
-# first 2 deleted) and acme.prod.db2.dbz_config (compacted, so the broker routes it
-# under its own name) — the last two exist to exercise the storage contract the
-# #92–#97 sweep found Kotatsu had drifted from.
+# Topics: orders, events, spread, nested, headers, empty-topic, avro-orders,
+# truncated (3 records with the first 2 deleted) and acme.prod.db2.dbz_config
+# (compacted, so the broker routes it under its own name) — the last two exist
+# to exercise the storage contract the #92–#97 sweep found Kotatsu had drifted
+# from.
 set -euo pipefail
 
 NETWORK="${NETWORK:-kotatsu_default}"
@@ -22,6 +23,9 @@ BOOTSTRAP="${BOOTSTRAP:-tansu:9092}"
 KORA_URL="${KORA_URL:-http://kora:8080}"
 KAFKA_IMG="apache/kafka:latest"
 AVRO_IMG="confluentinc/cp-schema-registry:7.6.0"
+# `kafka-console-producer.sh` cannot set record headers at all, so the one topic
+# that needs them is produced with kcat (#103).
+KCAT_IMG="edenhill/kcat:1.7.1"
 
 kafka() { docker run --rm --network "$NETWORK" "$KAFKA_IMG" "$@"; }
 kafka_stdin() { docker run -i --rm --network "$NETWORK" "$KAFKA_IMG" "$@"; }
@@ -57,6 +61,10 @@ create_topic acme.prod.db2.dbz_config 1 --config cleanup.policy=compact
 # has 3 partitions but keyless records, so the sticky partitioner puts them all
 # in one.
 create_topic spread 3
+# A payload deep enough that a flat `<pre>` is unreadable — the shape #103 exists
+# for. `headers` is the only topic in the seed carrying record headers.
+create_topic nested 1
+create_topic headers 1
 
 echo "→ producing orders (3 keyed JSON records)…"
 printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"id":3,"item":"gizmo"}\n' | \
@@ -71,6 +79,24 @@ echo "→ producing spread (12 keyed records over 3 partitions)…"
 printf 'k-1:{"n":1}\nk-2:{"n":2}\nk-3:{"n":3}\nk-4:{"n":4}\nk-5:{"n":5}\nk-6:{"n":6}\nk-7:{"n":7}\nk-8:{"n":8}\nk-9:{"n":9}\nk-10:{"n":10}\nk-11:{"n":11}\nk-12:{"n":12}\n' | \
   kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" \
   --topic spread --property parse.key=true --property key.separator=:
+
+echo "→ producing nested (2 records with a CDC-shaped envelope)…"
+printf '%s\n%s\n' \
+  '{"op":"u","source":{"db":"acme","table":"orders","ts_ms":1750000000000},"before":{"id":4711,"item":"widget","qty":1,"tags":["a","b"]},"after":{"id":4711,"item":"widget","qty":3,"tags":["a","b","c"],"meta":{"by":"ops","note":null}}}' \
+  '{"op":"c","source":{"db":"acme","table":"orders","ts_ms":1750000000001},"before":null,"after":{"id":4712,"item":"gizmo","qty":1,"tags":[],"meta":{"by":"api","note":"first"}}}' | \
+  kafka_stdin /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" --topic nested
+
+echo "→ producing headers (3 records, one header value multiline, one binary)…"
+kcat() { docker run -i --rm --network "$NETWORK" "$KCAT_IMG" -b "$BOOTSTRAP" -t headers -P "$@"; }
+# A newline inside one header value: joined into a single <pre> this was
+# indistinguishable from two headers, which is the defect #103 names.
+printf '{"n":1}\n' | kcat -H 'trace=abc123' -H 'note=first line
+second line'
+# An invalid UTF-8 byte: the backend renders it `hex`, and the table must show the
+# badge rather than mojibake.
+printf '{"n":2}\n' | kcat -H "$(printf 'bin=\xff\xfe')"
+# No headers at all — the table must not appear for this one.
+printf '{"n":3}\n' | kcat
 
 echo "→ producing avro-orders (2 Confluent-framed Avro records)…"
 printf '{"id":1,"item":"widget"}\n{"id":2,"item":"gadget"}\n' | \
