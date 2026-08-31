@@ -148,11 +148,7 @@ test.describe('API smoke', () => {
     expect(body.total_lag).toBe(0);
   });
 
-  /**
-   * #102: finding one event in a 12-partition topic used to be twelve manual
-   * searches. `spread` is the seed's only topic whose records actually land in
-   * more than one partition.
-   */
+  /** `spread` is the seed's only topic whose records really span partitions (#102). */
   test('partition=all merges records from every partition, newest first', async ({ request }) => {
     const detail = await (await request.get(`/api/clusters/${CLUSTER}/topics/spread`)).json();
     const populated = detail.partitions
@@ -171,8 +167,6 @@ test.describe('API smoke', () => {
     const timestamps = body.records.map((r: { timestamp: number }) => r.timestamp);
     expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => b - a));
     expect(body.order).toBe('timestamp_desc');
-    // Timestamps are not ordered across partitions; the response must say so
-    // rather than let a caller treat the merge as a total order.
     expect(body.order_best_effort).toBe(true);
 
     expect(body.partitions).toHaveLength(detail.partitions.length);

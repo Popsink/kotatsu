@@ -346,8 +346,6 @@ async function copyMsg(r: Record) {
       <p class="muted wm">
         {{ partitionSummary.length }} partition{{ partitionSummary.length === 1 ? '' : 's' }},
         newest first
-        <!-- Kafka does not order timestamps across partitions, so the merge is the
-             best a reader can do — say so rather than imply a total order. -->
         <span class="hint" title="Timestamps are not ordered across partitions, so the merge across them is best-effort.">(best effort)</span>
       </p>
       <!-- What the query read, per partition. Low/high live in the topic's own

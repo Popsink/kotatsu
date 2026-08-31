@@ -302,7 +302,7 @@ async fn scan_partition(
         partition,
         watermark,
         scanned,
-        // Only exhausted if we both hit the end and looked at everything we read.
+        // A short `scanned` means the `limit` break fired, so records went unlooked-at.
         exhausted: reached_end && scanned == records.len(),
         rendered,
     })
@@ -333,7 +333,7 @@ fn merge_key(record: &Value) -> (i64, i64, i64) {
 /// `params.partition` is either one partition — storage order, today's response
 /// shape — or `all`, which fans out over every partition concurrently and merges
 /// newest-first (#102). The scan budget is topic-wide in both cases: a 12-partition
-/// search reads no more than a single-partition one, never twelve times as much.
+/// search spends one budget, not twelve, give or take a record per partition.
 ///
 /// That budget is what makes `all` approximate, and deliberately so. Each partition
 /// is read up to its share, so with a `limit` small next to the partition count the
@@ -436,8 +436,6 @@ pub async fn messages(
         "filtered": filters.filtering,
         "exhausted": all_exhausted && !truncated,
         "order": "timestamp_desc",
-        // Kafka does not order timestamps across partitions; the merge is the best
-        // a reader can do, and callers must not treat it as a total order.
         "order_best_effort": true,
         "records": records,
     }))
