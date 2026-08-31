@@ -22,10 +22,9 @@ interface GroupDetail {
 const route = useRoute()
 const group = route.params.id as string
 
-const { data: source } = await useFetch<any>('/api/source')
-const cluster = computed(() => source.value?.cluster)
+const { cluster } = await useCluster()
 
-const { data: detail, pending, error } = await useFetch<GroupDetail>(
+const { data: detail, pending, error, refresh } = await useFetch<GroupDetail>(
   () => cluster.value ? `/api/clusters/${cluster.value}/groups/${encodeURIComponent(group)}` : '',
   { watch: [cluster] },
 )
@@ -42,7 +41,7 @@ function memberAssignments(m: MemberView): string {
     <h2>Group <code>{{ group }}</code></h2>
 
     <div v-if="pending" class="center"><Spinner size="28px" /></div>
-    <p v-else-if="error" class="err">{{ (error as any)?.data?.error || error.message }}</p>
+    <ErrorState v-else-if="error" :error="error" :retrying="pending" @retry="refresh" />
 
     <template v-else-if="detail">
       <dl class="meta">
@@ -89,7 +88,6 @@ function memberAssignments(m: MemberView): string {
 .back { color: var(--muted); text-decoration: none; font-size: 0.85rem; }
 h2 code { color: var(--accent); }
 .muted { color: var(--muted); }
-.err { color: var(--err); }
 .warn { color: var(--warn); }
 .link { color: var(--accent); text-decoration: none; }
 .link:hover { text-decoration: underline; }

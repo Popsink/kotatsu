@@ -1,5 +1,8 @@
 <script setup lang="ts">
-type FieldValue = { kind: string; data: any; schemaId?: number; error?: string } | null
+import { fieldBadge, fieldPreview, fieldText, type FieldValue } from '~/utils/field'
+import { fmtTime } from '~/utils/format'
+import { buildMessagesQuery, type OffsetMode } from '~/utils/messages'
+
 interface Header { key: FieldValue; value: FieldValue }
 interface Record {
   offset: number
@@ -14,8 +17,7 @@ const route = useRoute()
 const topic = route.params.name as string
 
 // Cluster comes from the configured source (single source for now).
-const { data: source } = await useFetch<any>('/api/source')
-const cluster = computed(() => source.value?.cluster)
+const { cluster } = await useCluster()
 
 interface PartitionInfo { partition: number; low: number; high: number; messages: number }
 interface ConfigEntry { name: string; value: string | null }
@@ -61,26 +63,13 @@ function groupLag(g: ConsumingGroup) {
 
 // Controls
 const partition = ref(0)
-const offsetMode = ref<'earliest' | 'latest' | 'specific' | 'timestamp'>('latest')
+const offsetMode = ref<OffsetMode>('latest')
 const offsetValue = ref('')
 const limit = ref(50)
 
 // Serializer choice, remembered per topic.
-type Format = 'auto' | 'avro' | 'json' | 'raw'
-const fmtKey = `kotatsu:fmt:${topic}`
-const valueFormat = ref<Format>('auto')
-const keyFormat = ref<Format>('auto')
-onMounted(() => {
-  try {
-    const saved = JSON.parse(localStorage.getItem(fmtKey) || '{}')
-    if (saved.value) valueFormat.value = saved.value
-    if (saved.key) keyFormat.value = saved.key
-  } catch {}
-})
-watch([valueFormat, keyFormat], () => {
-  try {
-    localStorage.setItem(fmtKey, JSON.stringify({ value: valueFormat.value, key: keyFormat.value }))
-  } catch {}
+const { keyFormat, valueFormat } = useTopicFormat(topic)
+watch([keyFormat, valueFormat], () => {
   if (searched.value) search() // re-decode with the new format
 })
 
@@ -111,12 +100,6 @@ const scanned = ref(0)
 const filtered = ref(false)
 const exhausted = ref(true)
 
-function offsetParam(): string {
-  if (offsetMode.value === 'specific') return offsetValue.value || '0'
-  if (offsetMode.value === 'timestamp') return `timestamp:${offsetValue.value || '0'}`
-  return offsetMode.value
-}
-
 // Messages are fetched only on user action — never automatically.
 async function search() {
   if (!cluster.value) return
@@ -124,18 +107,19 @@ async function search() {
   error.value = null
   expanded.value = new Set()
   try {
-    const p = new URLSearchParams({
-      partition: String(partition.value),
-      offset: offsetParam(),
-      limit: String(limit.value),
-      value_format: valueFormat.value,
-      key_format: keyFormat.value,
+    const p = buildMessagesQuery({
+      partition: partition.value,
+      offsetMode: offsetMode.value,
+      offsetValue: offsetValue.value,
+      limit: limit.value,
+      keyFormat: keyFormat.value,
+      valueFormat: valueFormat.value,
+      keyContains: keyContains.value,
+      valueContains: valueContains.value,
+      headerKey: headerKey.value,
+      headerValue: headerValue.value,
+      regex: useRegex.value,
     })
-    if (keyContains.value) p.set('key_contains', keyContains.value)
-    if (valueContains.value) p.set('value_contains', valueContains.value)
-    if (headerKey.value) p.set('header_key', headerKey.value)
-    if (headerValue.value) p.set('header_value', headerValue.value)
-    if (useRegex.value) p.set('regex', 'true')
     const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages?${p}`
     const res = await $fetch<any>(url)
     records.value = res.records
@@ -198,25 +182,6 @@ async function copyMsg(r: Record) {
   }
 }
 
-function fieldText(f: FieldValue): string {
-  if (f === null) return '∅ null'
-  if (f.kind === 'avro' || typeof f.data === 'object') return JSON.stringify(f.data, null, 2)
-  if (f.kind === 'hex') return `0x${f.data}`
-  return String(f.data)
-}
-function preview(f: FieldValue, max = 120): string {
-  if (f === null) return '∅ null'
-  const t = (f.kind === 'avro' || typeof f.data === 'object') ? JSON.stringify(f.data) : fieldText(f)
-  return t.length > max ? t.slice(0, max) + '…' : t
-}
-function badge(f: FieldValue): string {
-  if (f === null) return ''
-  if (f.schemaId != null) return `${f.kind} #${f.schemaId}`
-  return f.kind
-}
-function fmtTime(ms: number): string {
-  return new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
-}
 </script>
 
 <template>
@@ -270,6 +235,9 @@ function fmtTime(ms: number): string {
       <template v-else>
         <span class="muted">Consumer groups:</span>
         <span v-if="groupsError" class="err">couldn't load consumer groups</span>
+        <button v-if="groupsError" type="button" class="ghost" :disabled="loadingGroups" @click="loadGroups">
+          <Spinner v-if="loadingGroups" size="12px" /> Retry
+        </button>
         <span v-else-if="!topicGroups.length" class="muted">none</span>
         <NuxtLink v-for="g in topicGroups" :key="g.group" :to="`/groups/${encodeURIComponent(g.group)}`" class="link">
           {{ g.group }} <span class="muted">(lag {{ groupLag(g) }})</span>
@@ -354,7 +322,7 @@ function fmtTime(ms: number): string {
       </template>
     </p>
 
-    <p v-if="error" class="err">{{ error }}</p>
+    <ErrorState v-if="error" :error="error" :retrying="loading" @retry="search" />
 
     <div v-if="records.length" class="exporttb">
       <button type="button" class="ghost" @click="exportJson">Export JSON</button>
@@ -371,15 +339,15 @@ function fmtTime(ms: number): string {
             <td class="caret">{{ expanded.has(r.offset) ? '▾' : '▸' }}</td>
             <td class="mono">{{ r.offset }}</td>
             <td class="mono muted">{{ fmtTime(r.timestamp) }}</td>
-            <td class="mono">{{ preview(r.key, 40) }}</td>
-            <td class="mono">{{ preview(r.value) }}</td>
+            <td class="mono">{{ fieldPreview(r.key, 40) }}</td>
+            <td class="mono">{{ fieldPreview(r.value) }}</td>
           </tr>
           <tr v-if="expanded.has(r.offset)" class="detail">
             <td></td>
             <td colspan="4">
               <div class="kv">
                 <span class="lbl">key
-                  <em v-if="r.key" class="tag">{{ badge(r.key) }}</em>
+                  <em v-if="r.key" class="tag">{{ fieldBadge(r.key) }}</em>
                   <NuxtLink v-if="r.key?.schemaId != null && keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}`" class="schemalink">↗ schema</NuxtLink>
                 </span>
                 <pre>{{ fieldText(r.key) }}</pre>
@@ -387,7 +355,7 @@ function fmtTime(ms: number): string {
               </div>
               <div class="kv">
                 <span class="lbl">value
-                  <em v-if="r.value" class="tag">{{ badge(r.value) }}</em>
+                  <em v-if="r.value" class="tag">{{ fieldBadge(r.value) }}</em>
                   <NuxtLink v-if="r.value?.schemaId != null && valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}`" class="schemalink">↗ schema</NuxtLink>
                 </span>
                 <pre>{{ fieldText(r.value) }}</pre>
@@ -421,6 +389,8 @@ h2 code { color: var(--accent); }
 .related { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin: 0.5rem 0; font-size: 0.85rem; }
 .related .link { color: var(--accent); text-decoration: none; }
 .related .link:hover { text-decoration: underline; }
+.related .ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.2rem 0.6rem; font-size: 0.78rem; cursor: pointer; }
+.related .ghost:disabled { opacity: 0.5; cursor: default; }
 .config { margin: 1rem 0; max-width: 560px; }
 .config summary { cursor: pointer; font-size: 0.9rem; }
 .cfg { border-collapse: collapse; margin-top: 0.5rem; }

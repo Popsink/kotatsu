@@ -6,9 +6,17 @@
     "dev": "nuxt dev",
     "build": "nuxt build",
     "generate": "nuxt generate",
-    "preview": "nuxt preview"
+    "preview": "nuxt preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "nuxt prepare"
   },
   "devDependencies": {
-    "nuxt": "^3.16.0"
+    "@nuxt/test-utils": "^3.19.0",
+    "@types/node": "^22.15.3",
+    "@vue/test-utils": "^2.4.6",
+    "happy-dom": "^17.4.4",
+    "nuxt": "^3.16.0",
+    "vitest": "^3.1.1"
   }
 }
