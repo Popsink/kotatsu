@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Segment footer v4: sub-streams resolve by topic id, not by name** (#118) —
+  the footer version set widens to `{1, 2, 3, 4}`, a v4 entry carries a 16-byte
+  `topic_id` after `topic`, and a topic is matched against the footer by the
+  identity its routing pin gives it: by `substream_id` when it has one, by name
+  when it does not. The two are separate key spaces and never fall back to one
+  another. Upstream this fixes a real defect (Popsink/kodansu#442): a segment is
+  immutable and reclaimed only once every sub-stream in it is past retention, so
+  a deleted topic's slices cannot be removed, and a topic recreated under the same
+  name found its predecessor's — reporting watermarks of `(10, 13)` where Kafka
+  answers `(0, 3)` and showing a dead incarnation's events as the live topic's.
+  `storage_bytes` is attributed by the same identity, so a retired incarnation's
+  bytes are not charged to the live topic either. Nothing writes v4 until a broker
+  is configured with `segment_format=4` (the default is 3), so buckets in the
+  field are unaffected — but a reader that rejects v4 stops reading the **whole
+  bucket** after that flip, not one topic in it, which is why this ships ahead of
+  it. v1/v2/v3 segments decode exactly as before: the 16 bytes are not on the wire
+  below v4 and are not read. Version 5 is still rejected.
+
+### Changed
+- **Every topic's routing pin is read, including a topic that is its own prefix**
+  (#118) — `routed_prefix_of`'s shortcut for a name with fewer than three dotted
+  components is gone. Both routings agreed on the *prefix*, but whether a topic is
+  id-keyed is not derivable from its name, and answering "name-keyed" without
+  looking would serve an id-keyed topic's reads against a key its records were
+  never written under — which renders as an empty topic, not as an error. The
+  broker removed the same shortcut for the same reason. The cost is one GET per
+  topic per process, memoized permanently alongside the prefix.
+
 ## [0.10.0] - 2026-08-08
 
 The Tansu `v0.7.0-beta.39` storage-contract drift sweep (#92–#97). Kotatsu's last

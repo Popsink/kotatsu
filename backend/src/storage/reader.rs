@@ -319,13 +319,16 @@ impl StorageSource {
     /// One listing of the prefix plus the footers (cached, immutable) — the same
     /// reads the segment view already makes, and no object content. Byte spans are
     /// per sub-stream, so a topic is charged its own share of a shared segment and
-    /// never a sibling's. Partitions with no slice are absent from the map (callers
-    /// default them to `0`).
+    /// never a sibling's — nor, since it is charged by the same identity it is
+    /// read by (#118), a retired incarnation of its own name's. Partitions with no
+    /// slice are absent from the map (callers default them to `0`).
     pub(super) async fn topic_storage_bytes(
         &self,
         topic: &str,
     ) -> Result<std::collections::BTreeMap<i32, i64>, StorageError> {
-        let prefix = self.routed_prefix_of(topic).await?;
+        let route = self.route_of(topic).await?;
+        let prefix = route.prefix.clone();
+        let substream = route.substream(topic);
         let list_prefix = self.keys().segment_prefix(&prefix);
 
         let mut sizes = std::collections::BTreeMap::new();
@@ -338,7 +341,7 @@ impl StorageSource {
             let Some(footer) = self.segment_footer(&prefix, seq).await? else {
                 continue;
             };
-            for entry in footer.entries.iter().filter(|e| e.topic == topic) {
+            for entry in footer.entries.iter().filter(|e| substream.owns(e)) {
                 *sizes.entry(entry.partition).or_insert(0) += entry.byte_len as i64;
             }
         }
@@ -434,7 +437,7 @@ mod tests {
             0,
             2, // v2 footer — read-only history, still in buckets
             7,
-            &[(SEG_TOPIC, 0, 0, 3, &region, 555)],
+            &[(SEG_TOPIC, 0, 0, 3, &region, 555, None)],
         )
         .await;
 
@@ -488,7 +491,7 @@ mod tests {
             0,
             3, // v3, as production emits
             7,
-            &[(SEG_TOPIC, 0, 0, 3, &region, 555)],
+            &[(SEG_TOPIC, 0, 0, 3, &region, 555, None)],
         )
         .await;
         assert_ne!(
@@ -507,6 +510,92 @@ mod tests {
             records.iter().map(|r| r.offset).collect::<Vec<_>>(),
             [0, 1, 2],
             "records read through the pinned prefix"
+        );
+    }
+
+    /// #118, the whole point of segment footer v4: a topic deleted and recreated
+    /// under the same name is a **different** sub-stream. Its predecessor's
+    /// slices cannot be removed — the segment is immutable and reclaimed whole,
+    /// only once every sub-stream in it is past retention — so they sit in the
+    /// same prefix, under the same name and partition, at offsets the live topic
+    /// also uses. Resolved by name the browser cannot tell the two apart, and
+    /// answers a log ending at 13 where Kafka answers 2 — a dead topic's events
+    /// served as this one's, with no error and no empty result to give it away.
+    ///
+    /// The same segment also carries a topic created *before* the flip, which
+    /// must still see all of its own records: "the segment is v4" and "this
+    /// sub-stream is id-keyed" are independent facts, and both kinds share one
+    /// prefix for as long as any pre-flip topic is alive.
+    #[tokio::test]
+    async fn a_recreated_topic_reads_none_of_its_predecessors_records() {
+        use object_store::{memory::InMemory, ObjectStore, PutPayload};
+        use uuid::Uuid;
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+
+        // The live incarnation is id-keyed; the retired one left no pin behind.
+        let id = Uuid::from_u128(0x0192_4242);
+        store
+            .put(
+                &src.keys().topic_routing(SEG_TOPIC),
+                PutPayload::from(
+                    format!(r#"{{"prefix":"org.env.conn","substream_id":"{id}"}}"#).into_bytes(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        // One v4 segment, three sub-streams in it: the dead incarnation of
+        // SEG_TOPIC at 10..13, the live one at 0..2, and a pre-flip co-tenant.
+        let dead: Vec<u8> = [BATCH, BATCH2, BATCH3].concat();
+        let live: Vec<u8> = [BATCH, BATCH2].concat();
+        const PRE_FLIP: &str = "org.env.conn.stock";
+        put_segment_under(
+            &store,
+            &src,
+            "org.env.conn",
+            0,
+            4,
+            7,
+            &[
+                (SEG_TOPIC, 0, 10, 3, &dead, 555, None),
+                (SEG_TOPIC, 0, 0, 2, &live, 777, Some(id)),
+                (PRE_FLIP, 0, 0, 3, &dead, 999, None),
+            ],
+        )
+        .await;
+
+        let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
+        assert_eq!(
+            (wm.low, wm.high),
+            (0, 2),
+            "a fresh log from 0, not resumed at the predecessor's 10"
+        );
+        let records = src
+            .fetch(SEG_TOPIC, 0, OffsetSpec::Earliest, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            records.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            [0, 1],
+            "its own two records, none of the three it inherited the name from"
+        );
+
+        // Storage is attributed by the same identity it is read by, or the live
+        // topic is charged for bytes it cannot read.
+        let sizes = src.topic_storage_bytes(SEG_TOPIC).await.unwrap();
+        assert_eq!(
+            sizes.get(&0),
+            Some(&(live.len() as i64)),
+            "its own region only"
+        );
+
+        // The pre-flip co-tenant, name-keyed inside the very same v4 segment.
+        let pre = src.watermark(PRE_FLIP, 0).await.unwrap();
+        assert_eq!(
+            (pre.low, pre.high),
+            (0, 3),
+            "a topic created before the flip still sees all of its own"
         );
     }
 
@@ -533,7 +622,15 @@ mod tests {
 
         // The live log: one segment holding two records at 10..12.
         let region: Vec<u8> = [BATCH, BATCH2].concat();
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 10, 2, &region, 42)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 10, 2, &region, 42, None)],
+        )
+        .await;
 
         let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
         assert_eq!(
@@ -569,7 +666,15 @@ mod tests {
 
         put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":null}"#).await;
         let region: Vec<u8> = [BATCH, BATCH2, BATCH3].concat();
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 3, &region, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 3, &region, 1, None)],
+        )
+        .await;
 
         assert_eq!(src.watermark(SEG_TOPIC, 0).await.unwrap().high, 3);
 
@@ -591,7 +696,15 @@ mod tests {
 
         put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"low":0,"high":null}"#).await;
         // Only the later segment survives retention.
-        put_segment(&store, &src, 1, 3, 1, &[(SEG_TOPIC, 0, 50, 2, BATCH, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            1,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 50, 2, BATCH, 1, None)],
+        )
+        .await;
 
         let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
         assert_eq!(
@@ -639,10 +752,26 @@ mod tests {
         let store = std::sync::Arc::new(InMemory::new());
         let src = StorageSource::with_store(store.clone(), "c");
 
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, BATCH, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 2, BATCH, 1, None)],
+        )
+        .await;
         assert_eq!(src.watermark(SEG_TOPIC, 0).await.unwrap().high, 2); // caches 2
 
-        put_segment(&store, &src, 1, 3, 1, &[(SEG_TOPIC, 0, 2, 3, BATCH2, 2)]).await;
+        put_segment(
+            &store,
+            &src,
+            1,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 2, 3, BATCH2, 2, None)],
+        )
+        .await;
         assert_eq!(
             src.watermark(SEG_TOPIC, 0).await.unwrap().high,
             5,
@@ -667,11 +796,35 @@ mod tests {
         let src = StorageSource::with_store(store.clone(), "c");
 
         // Two original single-record segments [0,1) and [1,2)…
-        put_segment(&store, &src, 0, 2, 3, &[(SEG_TOPIC, 0, 0, 1, BATCH, 1)]).await;
-        put_segment(&store, &src, 1, 2, 3, &[(SEG_TOPIC, 0, 1, 1, BATCH2, 2)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            2,
+            3,
+            &[(SEG_TOPIC, 0, 0, 1, BATCH, 1, None)],
+        )
+        .await;
+        put_segment(
+            &store,
+            &src,
+            1,
+            2,
+            3,
+            &[(SEG_TOPIC, 0, 1, 1, BATCH2, 2, None)],
+        )
+        .await;
         // …superseded by a merged segment [0,2) at a higher seq (same epoch).
         let merged: Vec<u8> = [BATCH, BATCH2].concat();
-        put_segment(&store, &src, 9, 2, 3, &[(SEG_TOPIC, 0, 0, 2, &merged, 2)]).await;
+        put_segment(
+            &store,
+            &src,
+            9,
+            2,
+            3,
+            &[(SEG_TOPIC, 0, 0, 2, &merged, 2, None)],
+        )
+        .await;
 
         let records = src
             .fetch(SEG_TOPIC, 0, OffsetSpec::Earliest, 100)
@@ -695,7 +848,15 @@ mod tests {
 
         // Three records at 0..3, then DeleteRecords to offset 2.
         let region: Vec<u8> = [BATCH, BATCH2, BATCH3].concat();
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 3, &region, 555)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 3, &region, 555, None)],
+        )
+        .await;
         put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":3,"truncate":2}"#).await;
 
         let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
@@ -736,7 +897,15 @@ mod tests {
         let src = StorageSource::with_store(store.clone(), "c");
 
         let region: Vec<u8> = [BATCH, BATCH2].concat();
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, &region, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 2, &region, 1, None)],
+        )
+        .await;
         put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":2,"truncate":2}"#).await;
 
         let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
@@ -788,7 +957,15 @@ mod tests {
 
         // Segments below survive at 0..2; the expiry destroyed 2..10 and raised the
         // floor to 10, certifying so under the same CAS.
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, BATCH, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 2, BATCH, 1, None)],
+        )
+        .await;
         put_watermark(
             &store,
             &src,
@@ -813,7 +990,15 @@ mod tests {
         let store = std::sync::Arc::new(InMemory::new());
         let src = StorageSource::with_store(store.clone(), "c");
 
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, BATCH, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 2, BATCH, 1, None)],
+        )
+        .await;
         // `at_high` (10) no longer matches `high` (20): a peer moved the floor.
         put_watermark(
             &store,
@@ -837,7 +1022,15 @@ mod tests {
         let store = std::sync::Arc::new(InMemory::new());
         let src = StorageSource::with_store(store.clone(), "c");
 
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 3, BATCH, 1)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 3, BATCH, 1, None)],
+        )
+        .await;
         put_watermark(&store, &src, SEG_TOPIC, 0, r#"{"high":null}"#).await;
 
         let wm = src.watermark(SEG_TOPIC, 0).await.unwrap();
@@ -853,8 +1046,24 @@ mod tests {
         let store = std::sync::Arc::new(InMemory::new());
         let src = StorageSource::with_store(store.clone(), "c");
 
-        put_segment(&store, &src, 0, 3, 1, &[(SEG_TOPIC, 0, 0, 2, BATCH, 100)]).await;
-        put_segment(&store, &src, 1, 3, 1, &[(SEG_TOPIC, 0, 2, 2, BATCH2, 200)]).await;
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 2, BATCH, 100, None)],
+        )
+        .await;
+        put_segment(
+            &store,
+            &src,
+            1,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 2, 2, BATCH2, 200, None)],
+        )
+        .await;
 
         assert_eq!(src.seek_time(SEG_TOPIC, 0, 50).await.unwrap(), 0);
         assert_eq!(src.seek_time(SEG_TOPIC, 0, 150).await.unwrap(), 2);

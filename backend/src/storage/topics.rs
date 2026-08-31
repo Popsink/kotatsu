@@ -518,7 +518,7 @@ mod tests {
             let regions: Vec<super::super::segment::TestRegion> = regions
                 .iter()
                 .map(|(t, p, base, count, bytes, ts)| {
-                    (*t, *p, *base, *count, bytes.as_slice(), *ts)
+                    (*t, *p, *base, *count, bytes.as_slice(), *ts, None)
                 })
                 .collect();
             let bytes = super::super::segment::build_test_segment(3, 1, &regions);
@@ -575,8 +575,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let segment =
-            super::super::segment::build_test_segment(3, 1, &[("orders", 0, 0, 5, &[0u8; 32], 1)]);
+        let segment = super::super::segment::build_test_segment(
+            3,
+            1,
+            &[("orders", 0, 0, 5, &[0u8; 32], 1, None)],
+        );
         store
             .put(
                 &src.keys().segment("orders", 0),

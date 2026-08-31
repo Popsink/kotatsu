@@ -97,7 +97,7 @@ impl Keys {
     /// [`Self::topic_routing`], because the derivation depends on `cleanup.policy`
     /// (a compacted topic routes under its own name) and `AlterConfigs` can flip
     /// that after records have been written. Resolve through the pin
-    /// (`routed_prefix_of`); this remains only the fallback derivation for a topic
+    /// (`route_of`); this remains only the fallback derivation for a topic
     /// created before pinning existed, and the grouping the topic tree navigates
     /// by name ([`super::CONNECTOR_DEPTH`]).
     pub fn prefix_of(topic: &str) -> String {

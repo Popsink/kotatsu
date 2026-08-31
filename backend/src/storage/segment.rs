@@ -10,11 +10,17 @@
 //! ```
 //!
 //! A segment is `[sub-stream region 0][region 1]…[footer][trailer]`. Each region
-//! is that `(topic, partition)` sub-stream's Kafka `RecordBatch` bytes
-//! concatenated — byte-for-byte what a legacy coalesced object (#50) holds. The
-//! **footer** carries, per sub-stream, its absolute offset range, byte range and
-//! newest timestamp; the fixed 18-byte **trailer** locates the footer. All
-//! integers are big-endian.
+//! is that sub-stream's Kafka `RecordBatch` bytes concatenated — byte-for-byte
+//! what a legacy coalesced object (#50) holds. The **footer** carries, per
+//! sub-stream, its absolute offset range, byte range and newest timestamp; the
+//! fixed 18-byte **trailer** locates the footer. All integers are big-endian.
+//!
+//! **Which sub-stream a region belongs to** is `(topic, partition)` by name up to
+//! v3, and `(topic_id, partition)` from v4 for any entry carrying a non-nil id
+//! (#118). See [`SubstreamId`]: the two are separate key spaces, deliberately, so
+//! that a topic recreated under a dead topic's name cannot find its predecessor's
+//! slices — the segment they sit in is immutable and reclaimed whole, so those
+//! slices outlive the topic and would otherwise fold into the new one's offsets.
 //!
 //! This module is pure (no I/O): it decodes a tail buffer the reader fetches.
 //! Offsets come from the footer, never the object name — the segment sequence is
@@ -23,6 +29,7 @@
 
 #[cfg(test)]
 use bytes::Bytes;
+use uuid::Uuid;
 
 use super::StorageError;
 
@@ -57,12 +64,32 @@ const SEGMENT_FORMAT_VERSION_V2: u16 = 2;
 /// The coordinates themselves are discarded; what matters is the **stride**,
 /// which grows from 22 to 23 bytes (see `decode_footer`).
 const SEGMENT_FORMAT_VERSION_V3: u16 = 3;
+/// Inserts a 16-byte `topic_id` in every footer entry, immediately after `topic`
+/// (Popsink/kodansu#467). Written only once a broker is configured with
+/// `segment_format=4`; the default is still 3, so nothing in the field emits it
+/// yet — but the version follows the **writer**, not the entry, so the first
+/// flush after that flip makes every new segment in every prefix v4, including
+/// the ones holding only name-keyed topics.
+///
+/// The id is what a sub-stream is keyed by when it is non-nil; a nil uuid means
+/// the entry stayed name-keyed. Both kinds share one segment for as long as any
+/// topic created before the flip is alive, so "the segment is v4" and "this
+/// sub-stream is id-keyed" are independent facts.
+const SEGMENT_FORMAT_VERSION_V4: u16 = 4;
 
-/// One `(topic, partition)` sub-stream's self-describing footer entry: where its
-/// batches live in the shared object and what offset span they cover.
+/// Width of the `topic_id` field on the wire (v4+).
+const TOPIC_ID_LEN: usize = 16;
+
+/// One sub-stream's self-describing footer entry: where its batches live in the
+/// shared object and what offset span they cover.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubstreamEntry {
     pub topic: String,
+    /// The sub-stream's identity when it is **id-keyed** (v4+ and a non-nil uuid
+    /// on the wire). `None` for a name-keyed sub-stream — every entry below v4,
+    /// and a v4 entry written for a topic created before the flip, which encodes
+    /// the nil uuid. Never mix the two: see [`SubstreamId`].
+    pub topic_id: Option<Uuid>,
     pub partition: i32,
     /// Absolute offset of this sub-stream's first record in the segment.
     pub base_offset: i64,
@@ -95,11 +122,39 @@ pub struct SegmentFooter {
 }
 
 impl SegmentFooter {
-    /// The entry for a `(topic, partition)` sub-stream, if the segment holds one.
-    pub fn get(&self, topic: &str, partition: i32) -> Option<&SubstreamEntry> {
+    /// The entry for a sub-stream, if the segment holds one.
+    pub fn get(&self, id: SubstreamId<'_>, partition: i32) -> Option<&SubstreamEntry> {
         self.entries
             .iter()
-            .find(|e| e.topic == topic && e.partition == partition)
+            .find(|e| e.partition == partition && id.owns(e))
+    }
+}
+
+/// What identifies a sub-stream inside a segment (#118). A topic is one or the
+/// other for its whole life, decided at creation and pinned:
+/// `topic-routing/{topic}.json` carries a `substream_id` for an id-keyed topic
+/// and omits it for a name-keyed one.
+///
+/// The two are **separate key spaces**, and matching must never fall back from
+/// one to the other. "Match the id, else match the name" would let an id-keyed
+/// entry answer to its own name, which is exactly the confusion v4 exists to
+/// end: a recreated topic reading its dead predecessor's slices, at offsets the
+/// live topic also uses, with no error to show for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubstreamId<'a> {
+    /// Id-keyed: only an entry carrying this exact uuid belongs to it.
+    Id(Uuid),
+    /// Name-keyed: only an entry with **no** id and this name belongs to it.
+    Name(&'a str),
+}
+
+impl SubstreamId<'_> {
+    /// Whether `entry` belongs to this sub-stream (partition aside).
+    pub fn owns(&self, entry: &SubstreamEntry) -> bool {
+        match self {
+            Self::Id(id) => entry.topic_id == Some(*id),
+            Self::Name(name) => entry.topic_id.is_none() && entry.topic == *name,
+        }
     }
 }
 
@@ -165,10 +220,7 @@ pub fn decode_segment_footer(tail: &[u8]) -> Result<FooterOutcome, StorageError>
     let footer_len = be_u64(&trailer[0..8]) as usize;
     let entry_count = be_u32(&trailer[8..12]) as usize;
     let version = be_u16(&trailer[12..14]);
-    if version != SEGMENT_FORMAT_VERSION_V1
-        && version != SEGMENT_FORMAT_VERSION_V2
-        && version != SEGMENT_FORMAT_VERSION_V3
-    {
+    if !(SEGMENT_FORMAT_VERSION_V1..=SEGMENT_FORMAT_VERSION_V4).contains(&version) {
         return Err(StorageError::Decode(format!(
             "unsupported segment format version {version}"
         )));
@@ -193,6 +245,7 @@ fn decode_footer(
     version: u16,
 ) -> Result<SegmentFooter, StorageError> {
     let v2 = version >= SEGMENT_FORMAT_VERSION_V2;
+    let v4 = version >= SEGMENT_FORMAT_VERSION_V4;
     let mut cursor = footer_bytes;
 
     let writer_epoch = be_i64(take(&mut cursor, 8)?);
@@ -206,6 +259,15 @@ fn decode_footer(
         let topic_len = be_u16(take(&mut cursor, 2)?) as usize;
         let topic = String::from_utf8(take(&mut cursor, topic_len)?.to_vec())
             .map_err(|e| StorageError::Decode(e.to_string()))?;
+        // Sub-stream identity (v4+): 16 raw uuid bytes. The nil uuid is the
+        // writer's way of saying "this one is still keyed by name", so it must
+        // decode back to `None` rather than to a uuid that happens to be zero.
+        let topic_id = if v4 {
+            Some(Uuid::from_slice(take(&mut cursor, TOPIC_ID_LEN)?).expect("16 bytes"))
+                .filter(|id| !id.is_nil())
+        } else {
+            None
+        };
         let partition = be_i32(take(&mut cursor, 4)?);
         let base_offset = be_i64(take(&mut cursor, 8)?);
         let record_count = be_i64(take(&mut cursor, 8)?);
@@ -232,6 +294,7 @@ fn decode_footer(
 
         entries.push(SubstreamEntry {
             topic,
+            topic_id,
             partition,
             base_offset,
             record_count,
@@ -255,18 +318,20 @@ pub fn decode_whole_segment(bytes: &Bytes) -> Result<FooterOutcome, StorageError
 }
 
 /// One sub-stream to place in a test segment: `(topic, partition, base_offset,
-/// record_count, region_bytes, max_timestamp)`. `region_bytes` is the
+/// record_count, region_bytes, max_timestamp, topic_id)`. `region_bytes` is the
 /// sub-stream's concatenated `RecordBatch` wire bytes (e.g. real `.batch`
-/// fixtures joined).
+/// fixtures joined). `topic_id` is written only at v4 — `None` there encodes the
+/// nil uuid, i.e. a name-keyed sub-stream sharing a v4 segment.
 #[cfg(test)]
-pub(crate) type TestRegion<'a> = (&'a str, i32, i64, i64, &'a [u8], i64);
+pub(crate) type TestRegion<'a> = (&'a str, i32, i64, i64, &'a [u8], i64, Option<Uuid>);
 
-/// Builds a v1/v2 segment object (regions, then footer, then the 18-byte
-/// trailer) the way Tansu's writer does — for reader integration tests. Emits no
-/// producer coordinates (their skip-decode is covered by a dedicated unit test).
+/// Builds a segment object (regions, then footer, then the 18-byte trailer) the
+/// way Tansu's writer does — for reader integration tests. Emits no producer
+/// coordinates (their skip-decode is covered by a dedicated unit test).
 #[cfg(test)]
 pub(crate) fn build_test_segment(version: u16, writer_epoch: i64, regions: &[TestRegion]) -> Bytes {
     let v2 = version >= SEGMENT_FORMAT_VERSION_V2;
+    let v4 = version >= SEGMENT_FORMAT_VERSION_V4;
     let mut body = Vec::new();
     let mut footer = Vec::new();
     footer.extend_from_slice(&writer_epoch.to_be_bytes());
@@ -274,7 +339,7 @@ pub(crate) fn build_test_segment(version: u16, writer_epoch: i64, regions: &[Tes
         footer.extend_from_slice(&0u64.to_be_bytes()); // nonce
     }
 
-    for (topic, partition, base_offset, record_count, region, max_ts) in regions {
+    for (topic, partition, base_offset, record_count, region, max_ts, topic_id) in regions {
         let byte_start = body.len() as u64;
         body.extend_from_slice(region);
         let byte_len = body.len() as u64 - byte_start;
@@ -282,6 +347,9 @@ pub(crate) fn build_test_segment(version: u16, writer_epoch: i64, regions: &[Tes
         let t = topic.as_bytes();
         footer.extend_from_slice(&(t.len() as u16).to_be_bytes());
         footer.extend_from_slice(t);
+        if v4 {
+            footer.extend_from_slice(topic_id.unwrap_or(Uuid::nil()).as_bytes());
+        }
         footer.extend_from_slice(&partition.to_be_bytes());
         footer.extend_from_slice(&base_offset.to_be_bytes());
         footer.extend_from_slice(&record_count.to_be_bytes());
@@ -330,11 +398,37 @@ mod tests {
             }
         }
 
-        /// Append a sub-stream region of `region` raw bytes.
+        /// Append a name-keyed sub-stream region of `region` raw bytes.
         #[allow(clippy::too_many_arguments)]
         fn region(
+            self,
+            topic: &str,
+            partition: i32,
+            base_offset: i64,
+            record_count: i64,
+            max_timestamp: i64,
+            region: &[u8],
+            pcoords: u16,
+        ) -> Self {
+            self.keyed_region(
+                topic,
+                None,
+                partition,
+                base_offset,
+                record_count,
+                max_timestamp,
+                region,
+                pcoords,
+            )
+        }
+
+        /// Append a region whose sub-stream is keyed by `topic_id` (v4). `None`
+        /// encodes the nil uuid — a name-keyed entry in a v4 segment.
+        #[allow(clippy::too_many_arguments)]
+        fn keyed_region(
             mut self,
             topic: &str,
+            topic_id: Option<Uuid>,
             partition: i32,
             base_offset: i64,
             record_count: i64,
@@ -346,6 +440,7 @@ mod tests {
             self.body.extend_from_slice(region);
             self.entries.push(SubstreamEntry {
                 topic: topic.to_string(),
+                topic_id,
                 partition,
                 base_offset,
                 record_count,
@@ -368,6 +463,9 @@ mod tests {
                 let t = e.topic.as_bytes();
                 buf.extend_from_slice(&(t.len() as u16).to_be_bytes());
                 buf.extend_from_slice(t);
+                if self.version >= SEGMENT_FORMAT_VERSION_V4 {
+                    buf.extend_from_slice(e.topic_id.unwrap_or(Uuid::nil()).as_bytes());
+                }
                 buf.extend_from_slice(&e.partition.to_be_bytes());
                 buf.extend_from_slice(&e.base_offset.to_be_bytes());
                 buf.extend_from_slice(&e.record_count.to_be_bytes());
@@ -417,14 +515,14 @@ mod tests {
         };
         assert_eq!(footer.writer_epoch, 0);
         assert_eq!(footer.entries.len(), 2);
-        let e = footer.get("orders", 0).unwrap();
+        let e = footer.get(SubstreamId::Name("orders"), 0).unwrap();
         assert_eq!(
             (e.base_offset, e.record_count, e.end_offset()),
             (100, 3, 103)
         );
         assert_eq!((e.byte_start, e.byte_len), (0, 4));
         assert_eq!(e.max_timestamp, 555);
-        let e1 = footer.get("orders", 1).unwrap();
+        let e1 = footer.get(SubstreamId::Name("orders"), 1).unwrap();
         assert_eq!((e1.byte_start, e1.byte_len), (4, 2));
     }
 
@@ -442,8 +540,11 @@ mod tests {
         };
         assert_eq!(footer.writer_epoch, 7);
         assert_eq!(footer.entries.len(), 2);
-        assert_eq!(footer.get("t", 0).unwrap().max_timestamp, 10);
-        let e1 = footer.get("t", 1).unwrap();
+        assert_eq!(
+            footer.get(SubstreamId::Name("t"), 0).unwrap().max_timestamp,
+            10
+        );
+        let e1 = footer.get(SubstreamId::Name("t"), 1).unwrap();
         assert_eq!(
             e1.byte_start, 4,
             "second region starts after the first (4B)"
@@ -468,8 +569,11 @@ mod tests {
         };
         assert_eq!(footer.writer_epoch, 9);
         assert_eq!(footer.entries.len(), 2);
-        assert_eq!(footer.get("t", 0).unwrap().max_timestamp, 10);
-        let e1 = footer.get("t", 1).unwrap();
+        assert_eq!(
+            footer.get(SubstreamId::Name("t"), 0).unwrap().max_timestamp,
+            10
+        );
+        let e1 = footer.get(SubstreamId::Name("t"), 1).unwrap();
         assert_eq!(
             e1.byte_start, 4,
             "second region starts after the first (4B)"
@@ -492,15 +596,117 @@ mod tests {
 
     #[test]
     fn unknown_version_is_rejected() {
-        let mut seg = SegBuilder::new(1, 0)
-            .region("t", 0, 0, 1, 1, b"Z", 0)
-            .build()
-            .to_vec();
-        // Overwrite version field (bytes [len-6..len-4]) with 99.
-        let n = seg.len();
-        seg[n - 6..n - 4].copy_from_slice(&99u16.to_be_bytes());
-        let err = decode_segment_footer(&seg).unwrap_err();
-        assert!(matches!(err, StorageError::Decode(_)), "got {err:?}");
+        // 5 as much as 99 and 0: widening the accepted set to admit v4 must not
+        // widen it to "anything at least as new as v4". A version we do not know
+        // the entry layout of decodes as garbage, silently.
+        for version in [0u16, 5, 99] {
+            let mut seg = SegBuilder::new(1, 0)
+                .region("t", 0, 0, 1, 1, b"Z", 0)
+                .build()
+                .to_vec();
+            // Overwrite version field (bytes [len-6..len-4]).
+            let n = seg.len();
+            seg[n - 6..n - 4].copy_from_slice(&version.to_be_bytes());
+            let err = decode_segment_footer(&seg).unwrap_err();
+            assert!(
+                matches!(err, StorageError::Decode(_)),
+                "version {version} got {err:?}"
+            );
+        }
+    }
+
+    /// v4 inserts 16 bytes per entry; below v4 they are not on the wire and must
+    /// not be read. Every pre-v4 entry is therefore name-keyed — and the second
+    /// entry decoding correctly is what proves the cursor did not advance.
+    #[test]
+    fn pre_v4_entries_are_name_keyed() {
+        for version in [1u16, 2, 3] {
+            let seg = SegBuilder::new(version, 4)
+                .region("orders", 0, 100, 3, 555, b"AAAA", 0)
+                .region("orders", 1, 0, 2, 777, b"BB", 0)
+                .build();
+            let footer = match decode_whole_segment(&seg).unwrap() {
+                FooterOutcome::Footer(f) => f,
+                other => panic!("v{version}: expected footer, got {other:?}"),
+            };
+            assert!(
+                footer.entries.iter().all(|e| e.topic_id.is_none()),
+                "v{version}: no id on the wire below v4"
+            );
+            let e1 = footer.get(SubstreamId::Name("orders"), 1).unwrap();
+            assert_eq!(
+                (e1.byte_start, e1.byte_len, e1.max_timestamp),
+                (4, 2, 777),
+                "v{version}: second entry decoded from an aligned cursor"
+            );
+        }
+    }
+
+    /// A v4 segment multiplexes both kinds of sub-stream — it must, for as long
+    /// as a topic created before the flip is alive — and each answers only to its
+    /// own key.
+    #[test]
+    fn decodes_v4_footer_with_mixed_substream_identity() {
+        let id = Uuid::from_u128(0x0192_ABCD);
+        let seg = SegBuilder::new(4, 11)
+            // Same name, same partition, different incarnations: the retired
+            // name-keyed one and the live id-keyed one, in one segment.
+            .keyed_region("orders", None, 0, 10, 3, 555, b"AAAA", 2)
+            .keyed_region("orders", Some(id), 0, 0, 2, 777, b"BB", 1)
+            .build();
+        let footer = match decode_whole_segment(&seg).unwrap() {
+            FooterOutcome::Footer(f) => f,
+            other => panic!("expected footer, got {other:?}"),
+        };
+        assert_eq!(footer.writer_epoch, 11);
+        assert_eq!(footer.entries.len(), 2);
+        // The nil uuid is "no id", not a uuid that happens to be zero.
+        assert_eq!(footer.entries[0].topic_id, None);
+        assert_eq!(footer.entries[1].topic_id, Some(id));
+
+        let by_name = footer.get(SubstreamId::Name("orders"), 0).unwrap();
+        assert_eq!((by_name.base_offset, by_name.record_count), (10, 3));
+        let by_id = footer.get(SubstreamId::Id(id), 0).unwrap();
+        assert_eq!(
+            (by_id.base_offset, by_id.record_count),
+            (0, 2),
+            "the live topic starts at 0, not at its predecessor's 10"
+        );
+        assert_eq!(
+            (by_id.byte_start, by_id.byte_len),
+            (4, 2),
+            "and reads its own region, decoded from behind a producer coordinate"
+        );
+    }
+
+    /// The two key spaces never fall back to one another.
+    #[test]
+    fn identities_do_not_cross_over() {
+        let id = Uuid::from_u128(7);
+        let seg = SegBuilder::new(4, 0)
+            .keyed_region("id-keyed", Some(id), 0, 0, 1, 1, b"A", 0)
+            .keyed_region("name-keyed", None, 0, 0, 1, 1, b"B", 0)
+            .build();
+        let footer = match decode_whole_segment(&seg).unwrap() {
+            FooterOutcome::Footer(f) => f,
+            other => panic!("expected footer, got {other:?}"),
+        };
+        assert!(
+            footer.get(SubstreamId::Name("id-keyed"), 0).is_none(),
+            "an id-keyed entry must not answer to its own name"
+        );
+        assert!(
+            footer.get(SubstreamId::Id(id), 0).is_some(),
+            "it answers to its id"
+        );
+        assert!(
+            footer.get(SubstreamId::Id(Uuid::nil()), 0).is_none(),
+            "and the nil uuid is nobody's id, least of all a name-keyed entry's"
+        );
+        assert!(
+            footer.get(SubstreamId::Name("name-keyed"), 0).is_some(),
+            "a name-keyed entry answers to its name"
+        );
     }
 
     #[test]

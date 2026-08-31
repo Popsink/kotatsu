@@ -15,7 +15,7 @@ documented in `Popsink/tansu:docs/virtual-topics-format.md`):
 ```
 clusters/{cluster}/meta.json                                        producer/txn metadata
 clusters/{cluster}/topic-metadata/{topic}.json                      per-topic spec + configs
-clusters/{cluster}/topic-routing/{topic}.json                       the prefix a topic's records are routed under
+clusters/{cluster}/topic-routing/{topic}.json                       the prefix a topic is routed under + its sub-stream id
 clusters/{cluster}/topics/{topic}/partitions/{p:010}/watermark.json high, truncation floor, served end
 clusters/{cluster}/prefixes/{prefix}/segments/{seq:020}.seg         the records themselves
 clusters/{cluster}/groups/consumers/{group}.json                    consumer group detail
@@ -23,12 +23,15 @@ clusters/{cluster}/groups/consumers/{group}/offsets/{topic}/partitions/{p:010}.j
 ```
 
 Records live in **shared per-prefix segment objects**, each multiplexing many
-`(topic, partition)` sub-streams: a footer at the tail of the segment says where
-each sub-stream's bytes and offsets are, so reading one topition is a ranged GET of
-exactly its own byte span. Which prefix a topic is routed under is **pinned at
-creation** and not derivable from its name — a compacted topic is routed under its
-own full name. The per-partition `records/{offset}.batch` layout this replaced is
-gone from the broker and from Kotatsu (#93).
+sub-streams: a footer at the tail of the segment says where each sub-stream's bytes
+and offsets are, so reading one topition is a ranged GET of exactly its own byte
+span. Which prefix a topic is routed under, and **what identifies its sub-stream**
+inside those segments, are both **pinned at creation** and not derivable from its
+name: a compacted topic is routed under its own full name, and a topic created
+since footer v4 is keyed by a `substream_id` rather than by its name, so a topic
+recreated under a dead topic's name cannot read the slices that outlived it (#118).
+The per-partition `records/{offset}.batch` layout this replaced is gone from the
+broker and from Kotatsu (#93).
 
 Kotatsu reads these objects via the `object_store` crate and decodes the record
 batches with `tansu-sans-io`, pinned to the same fork revision the broker writes
