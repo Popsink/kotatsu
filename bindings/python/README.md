@@ -51,8 +51,8 @@ async def main():
 
     page = await src.messages(
         "orders",
-        partition=None,             # None = every partition, merged newest-first
-        offset="earliest",
+        partition=None,             # None = every partition, merged
+        offset="earliest",          # also sets which way the read travels
         limit=50,
         value_format="auto",        # auto | avro | json | raw
         value_contains="widget",    # optional forward-scan filter
@@ -61,8 +61,21 @@ async def main():
     )
     print(page["count"], page["scanned"], page["records"])
     # With partition=None the payload carries a per-partition summary instead of
-    # a single watermark, and `order_best_effort` marks the merge as best effort.
+    # a single watermark. `order` follows the read — "timestamp_asc" here, and
+    # "timestamp_desc" from `latest` — and `order_best_effort` marks the merge
+    # across partitions as best effort.
     print(page["partitions"], page["order"])
+
+    # Every response says where each partition would resume. Hand those back as
+    # `cursor` for the next window; `exhausted` is True once there is no more.
+    while not page["exhausted"]:
+        cursor = ",".join(
+            f"{p['partition']}:{p['resume']}"
+            for p in page["partitions"]
+            if p["resume"] is not None
+        )
+        page = await src.messages("orders", offset="earliest", cursor=cursor, limit=50)
+        print(page["count"])
 
 asyncio.run(main())
 ```

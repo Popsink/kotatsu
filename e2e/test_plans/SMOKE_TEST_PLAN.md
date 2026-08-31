@@ -93,7 +93,8 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 4 | Topics listed | `GET /api/clusters/demo/topics` | `orders`, `events`, `spread`, `empty-topic`, `avro-orders`, `truncated`, `acme.prod.db2.dbz_config` present | TOP-001 |
 | 5 | Topic detail | `GET /api/clusters/demo/topics/events` | 3 partitions; `messages: 6` | TOP-002 |
 | 6 | Read messages | `GET .../topics/orders/messages?partition=0&offset=earliest` | `count: 3`, watermark `{0,3}` | MSG-001 |
-| 6b | Search all partitions | `GET .../topics/spread/messages?partition=all&offset=earliest` | records from every populated partition, newest first, `order: timestamp_desc` | MSG-011 |
+| 6b | Search all partitions | `GET .../topics/spread/messages?partition=all&offset=earliest` | records from every populated partition, oldest first, `order: timestamp_asc` | MSG-011 |
+| 6c | Page through a topic | `GET .../topics/spread/messages?partition=all&offset=earliest&limit=5`, then the same with `cursor=` from `partitions[].resume` | the two pages share no record and paging to the end accounts for all 12 | MSG-012 |
 | 6c | Topic-wide scan budget | same with `&max_scan=6` | `scanned` ≤ budget + partition count, not budget × partitions | MSG-011 |
 | 7 | Empty topic | `GET .../topics/empty-topic/messages?partition=0` | `count: 0`, `exhausted: true` | MSG-005 |
 | 8 | Avro decode | `GET .../topics/avro-orders/messages?partition=0&offset=earliest` | values `kind: "avro"`, decoded `{id,item}` | SCH-001 |

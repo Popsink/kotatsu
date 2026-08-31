@@ -26,7 +26,7 @@ mean anything are rejected with a 400 rather than silently reinterpreted.
 - **Requirement ID**: MSG-REQ-011 (Cross-partition search, #102)
 - **Business Rules**:
   - `partition` defaults to `all`; a number narrows to one partition and keeps the historical response shape.
-  - With `all`, records are ordered by timestamp descending, tie-broken by `(partition, offset)`. The order is **best effort**: Kafka does not order timestamps across partitions, and the response says so via `order_best_effort: true`.
+  - Records are ordered the way the read travels: `latest` walks towards older records (`order: "timestamp_desc"`), every other `offset` towards newer (`order: "timestamp_asc"`), tie-broken by `(partition, offset)`. The order is **best effort**: Kafka does not order timestamps across partitions, and the response says so via `order_best_effort: true`.
   - The scan budget (`max_scan`) belongs to the topic. A search over N partitions must not read N × the budget.
   - `offset=<n>` names a different record in each partition, so it is only valid against a single partition.
 
@@ -42,11 +42,12 @@ mean anything are rejected with a 400 rather than silently reinterpreted.
 |------|--------|------------|-----------------|
 | 1 | Confirm the data really spans partitions | `GET /api/clusters/demo/topics/spread` | More than one entry in `partitions[]` has `messages > 0` |
 | 2 | Search the whole topic | `GET .../topics/spread/messages?partition=all&offset=earliest&limit=100` | `count: 12`; `records[].partition` covers every populated partition |
-| 3 | Check the ordering | same response | `timestamp` values are non-increasing; `order: "timestamp_desc"`; `order_best_effort: true` |
+| 3 | Check the ordering follows the read | same response | `timestamp` values are non-**de**creasing; `order: "timestamp_asc"`; `order_best_effort: true` |
+| 3b | …and reverses with `latest` | `?partition=all&offset=latest&limit=100` | `timestamp` values are non-increasing; `order: "timestamp_desc"` |
 | 4 | Check the provenance summary | same response | `partitions[]` has one entry per partition with `watermark`, `scanned`, `exhausted`; no top-level `watermark` |
 | 5 | Filter across partitions | `&key_contains=k-12` | `count: 1`, and the match is returned regardless of which partition holds it |
 | 6 | Topic-wide budget | `&value_contains=zzz-no-match&max_scan=6` | `scanned` ≤ 6 + partition count — **not** 6 × 3; `exhausted: false` |
-| 7 | Narrow to one partition | `?partition=0&offset=earliest` | Historical shape: top-level `partition` and `watermark`, no `partitions[]`, storage order preserved |
+| 7 | Narrow to one partition | `?partition=0&offset=earliest` | Single-partition shape: top-level `partition` and `watermark`, no `partitions[]` |
 | 8 | Reject a concrete offset | `?partition=all&offset=42` | HTTP 400, error naming the constraint ("needs a single partition") |
 | 9 | Reject an unparseable partition | `?partition=nope` | HTTP 400, error naming `'all'` as the alternative |
 | 10 | Out-of-range partition | `?partition=99` | HTTP 400, `partition 99 out of range (topic has 3 partitions)` |
@@ -76,7 +77,7 @@ mean anything are rejected with a 400 rather than silently reinterpreted.
   "records": 12,
   "keys": ["k-1", "k-2", "k-3", "k-4", "k-5", "k-6", "k-7", "k-8", "k-9", "k-10", "k-11", "k-12"],
   "expected": {
-    "order": "timestamp_desc",
+    "order": "timestamp_asc",
     "order_best_effort": true,
     "count": 12
   }
@@ -108,4 +109,5 @@ mean anything are rejected with a 400 rather than silently reinterpreted.
 ## Notes
 
 - The merge is **not** a total order and must never be presented as one: two records in different partitions can carry the same timestamp, and a producer can write out of order. `order_best_effort: true` exists so a consumer of the API cannot mistake the merge for a global sort.
-- Narrowing to a single partition intentionally returns records in storage order, not newest-first. Making both directions consistent is #108.
+- Both modes order by the direction of the read, so `partition=0&offset=latest` is newest-first like the fan-out. #104 made this necessary: a page that stops at `limit` must keep the end the reader asked for, not the opposite one.
+- Pagination and permalinks for this screen are MSG-012 (#104).
