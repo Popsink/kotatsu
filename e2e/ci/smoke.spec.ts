@@ -149,7 +149,7 @@ test.describe('API smoke', () => {
   });
 
   /** `spread` is the seed's only topic whose records really span partitions (#102). */
-  test('partition=all merges records from every partition, newest first', async ({ request }) => {
+  test('partition=all merges records from every partition, in the read direction', async ({ request }) => {
     const detail = await (await request.get(`/api/clusters/${CLUSTER}/topics/spread`)).json();
     const populated = detail.partitions
       .filter((p: { messages: number }) => p.messages > 0)
@@ -164,13 +164,119 @@ test.describe('API smoke', () => {
     expect(seen).toEqual([...populated].sort());
     expect(body.count).toBe(detail.messages);
 
+    // `earliest` travels towards newer records, so the merge must too: sorting the
+    // other way would drop the oldest records — exactly the ones asked for — at the
+    // truncation, and let page two precede page one (#104).
     const timestamps = body.records.map((r: { timestamp: number }) => r.timestamp);
-    expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => b - a));
-    expect(body.order).toBe('timestamp_desc');
+    expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => a - b));
+    expect(body.order).toBe('timestamp_asc');
     expect(body.order_best_effort).toBe(true);
 
     expect(body.partitions).toHaveLength(detail.partitions.length);
     expect(body.partitions.every((p: { exhausted: boolean }) => p.exhausted)).toBe(true);
+    // Nothing left anywhere, so there is no next page to ask for.
+    expect(body.partitions.every((p: { resume: number | null }) => p.resume === null)).toBe(true);
+    expect(body.exhausted).toBe(true);
+  });
+
+  test('latest travels the other way, and says so', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=latest&limit=100`,
+    )).json();
+    const timestamps = body.records.map((r: { timestamp: number }) => r.timestamp);
+    expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => b - a));
+    expect(body.order).toBe('timestamp_desc');
+  });
+
+  /**
+   * #104: a page is a page. Dividing `limit` across partitions returned four
+   * records for a request for fifty on a topic whose records sit in one partition
+   * — which the sticky partitioner makes the usual shape, not the exception.
+   */
+  test('an unfiltered page is not divided across partitions', async ({ request }) => {
+    const detail = await (await request.get(`/api/clusters/${CLUSTER}/topics/events`)).json();
+    expect(detail.partitions.length).toBeGreaterThan(1);
+    expect(detail.messages).toBe(6);
+
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/events/messages?partition=all&offset=earliest&limit=6`,
+    )).json();
+    expect(body.count).toBe(6);
+  });
+
+  /**
+   * #104's core: `Load more` continues the read instead of restarting it, and the
+   * two pages together are the whole topic, each record exactly once.
+   */
+  test('the resume cursor pages through a topic without gap or repeat', async ({ request }) => {
+    const url = (extra: string) =>
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=earliest&limit=5${extra}`;
+
+    const first = await (await request.get(url(''))).json();
+    expect(first.count).toBe(5);
+    expect(first.exhausted).toBe(false);
+
+    const cursor = first.partitions
+      .filter((p: { resume: number | null }) => p.resume !== null)
+      .map((p: { partition: number; resume: number }) => `${p.partition}:${p.resume}`)
+      .join(',');
+    expect(cursor).not.toBe('');
+
+    const second = await (await request.get(url(`&cursor=${encodeURIComponent(cursor)}`))).json();
+    expect(second.count).toBeGreaterThan(0);
+
+    const id = (r: { partition: number; offset: number }) => `${r.partition}:${r.offset}`;
+    const firstIds = first.records.map(id);
+    const secondIds = second.records.map(id);
+    // No repeat: a record shown on page one must not come back on page two.
+    expect(secondIds.filter((k: string) => firstIds.includes(k))).toEqual([]);
+    // No gap: paging to the end accounts for every record in the topic.
+    let seen = [...firstIds, ...secondIds];
+    let page = second;
+    while (!page.exhausted) {
+      const next = page.partitions
+        .filter((p: { resume: number | null }) => p.resume !== null)
+        .map((p: { partition: number; resume: number }) => `${p.partition}:${p.resume}`)
+        .join(',');
+      page = await (await request.get(url(`&cursor=${encodeURIComponent(next)}`))).json();
+      seen = [...seen, ...page.records.map(id)];
+    }
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen.length).toBe(12);
+  });
+
+  test('paging backwards from latest reaches the start of the topic', async ({ request }) => {
+    const url = (extra: string) =>
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&offset=latest&limit=5${extra}`;
+    let page = await (await request.get(url(''))).json();
+    const id = (r: { partition: number; offset: number }) => `${r.partition}:${r.offset}`;
+    let seen = page.records.map(id);
+    while (!page.exhausted) {
+      const next = page.partitions
+        .filter((p: { resume: number | null }) => p.resume !== null)
+        .map((p: { partition: number; resume: number }) => `${p.partition}:${p.resume}`)
+        .join(',');
+      page = await (await request.get(url(`&cursor=${encodeURIComponent(next)}`))).json();
+      seen = [...seen, ...page.records.map(id)];
+    }
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen.length).toBe(12);
+  });
+
+  test('a cursor naming a partition the query does not read is a 400', async ({ request }) => {
+    const res = await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=0&cursor=2%3A1`,
+    );
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toContain('does not read');
+  });
+
+  test('a malformed cursor is a 400, not a 500', async ({ request }) => {
+    const res = await request.get(
+      `/api/clusters/${CLUSTER}/topics/spread/messages?partition=all&cursor=nope`,
+    );
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toContain('partition:offset');
   });
 
   test('a filter finds its record whichever partition holds it', async ({ request }) => {
@@ -297,8 +403,36 @@ test.describe('UI smoke', () => {
     await expect(results.getByRole('columnheader', { name: 'partition' })).toBeVisible();
     // Populated, not merely present: the cell after the caret, on the first row.
     await expect(results.locator('tbody tr.row').first().locator('td').nth(1)).toHaveText(/^[0-2]$/);
-    await expect(page.getByText('3 partitions, newest first')).toBeVisible();
+    // `earliest` reads towards newer records, and the label must not claim otherwise.
+    await expect(page.getByText('3 partitions, oldest first')).toBeVisible();
     await expect(page.getByText('k-12')).toBeVisible();
+  });
+
+  /** #104: a query lives in the URL, so an investigation can be pasted into a ticket. */
+  test('a search is captured in the URL and replayed from it', async ({ page }) => {
+    await page.goto('/topics/spread');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs')).toBeVisible();
+    await expect(page).toHaveURL(/[?&]from=earliest/);
+
+    // A fresh load of that URL runs the query on arrival — the user clicked a link,
+    // which is still a user action (#7).
+    await page.goto('/topics/spread?from=earliest&key_contains=k-12');
+    await expect(page.getByText('k-12')).toBeVisible();
+    await expect(page.locator('table.msgs tbody tr.row')).toHaveCount(1);
+  });
+
+  test('Load more appends the next window, and Back takes it away again', async ({ page }) => {
+    await page.goto('/topics/spread?from=earliest&limit=5');
+    const rows = page.locator('table.msgs tbody tr.row');
+    await expect(rows).toHaveCount(5);
+
+    await page.getByRole('button', { name: 'Load more' }).click();
+    await expect(rows).toHaveCount(10);
+
+    await page.getByRole('button', { name: 'Back' }).click();
+    await expect(rows).toHaveCount(5);
   });
 
   test('avro-orders decodes in the event browser', async ({ page }) => {

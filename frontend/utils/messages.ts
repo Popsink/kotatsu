@@ -5,7 +5,7 @@ export const FORMATS: Format[] = ['auto', 'avro', 'json', 'raw']
 
 export type OffsetMode = 'earliest' | 'latest' | 'specific' | 'timestamp'
 
-/** `'all'` merges every partition of the topic newest-first (#102). */
+/** `'all'` merges every partition of the topic into one result set (#102). */
 export type PartitionSpec = number | 'all'
 
 export interface MessageQuery {
@@ -21,6 +21,8 @@ export interface MessageQuery {
   headerKey?: string
   headerValue?: string
   regex?: boolean
+  /** Resume points from the previous page's `resume`, as `0:412,3:998` (#104). */
+  cursor?: string
 }
 
 /** The `offset=` parameter: a keyword, a bare offset, or `timestamp:<ms>`. */
@@ -48,5 +50,107 @@ export function buildMessagesQuery(q: MessageQuery): URLSearchParams {
   if (q.headerKey) p.set('header_key', q.headerKey)
   if (q.headerValue) p.set('header_value', q.headerValue)
   if (q.regex) p.set('regex', 'true')
+  if (q.cursor) p.set('cursor', q.cursor)
   return p
+}
+
+/** Splits an `offset=` string back into the two form controls that produced it. */
+export function parseOffsetParam(raw: string): { offsetMode: OffsetMode; offsetValue?: string } {
+  if (raw === 'earliest' || raw === 'latest') return { offsetMode: raw }
+  if (raw.startsWith('timestamp:')) return { offsetMode: 'timestamp', offsetValue: raw.slice(10) }
+  return { offsetMode: 'specific', offsetValue: raw }
+}
+
+/** What a query looks like when nothing has been changed from the defaults. */
+export const DEFAULT_QUERY: MessageQuery = {
+  partition: 'all',
+  offsetMode: 'latest',
+  limit: 50,
+  keyFormat: 'auto',
+  valueFormat: 'auto',
+}
+
+/**
+ * The page's query as URL parameters, for the address bar and the Copy link
+ * button (#104).
+ *
+ * Only what differs from `DEFAULT_QUERY` is written, so a shared link reads as
+ * the investigation it captures rather than as every control on the form. The
+ * `cursor` is deliberately left out: a permalink reproduces the *first* page, and
+ * a resume point pasted without the page it continues means nothing.
+ */
+export function toRouteQuery(q: MessageQuery): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (q.partition !== DEFAULT_QUERY.partition) out.partition = String(q.partition)
+  const from = offsetParam(q.offsetMode, q.offsetValue)
+  if (from !== DEFAULT_QUERY.offsetMode) out.from = from
+  if (q.limit !== DEFAULT_QUERY.limit) out.limit = String(q.limit)
+  if (q.keyFormat !== DEFAULT_QUERY.keyFormat) out.key_format = q.keyFormat
+  if (q.valueFormat !== DEFAULT_QUERY.valueFormat) out.value_format = q.valueFormat
+  if (q.keyContains) out.key_contains = q.keyContains
+  if (q.valueContains) out.value_contains = q.valueContains
+  if (q.headerKey) out.header_key = q.headerKey
+  if (q.headerValue) out.header_value = q.headerValue
+  if (q.regex) out.regex = '1'
+  return out
+}
+
+type RouteQuery = Record<string, string | (string | null)[] | null | undefined>
+
+/** Reads back what `toRouteQuery` wrote, filling the rest from the defaults. */
+export function fromRouteQuery(r: RouteQuery): MessageQuery {
+  const str = (k: string): string | undefined => {
+    const v = r[k]
+    const one = Array.isArray(v) ? v[0] : v
+    return one == null || one === '' ? undefined : String(one)
+  }
+  const partition = str('partition')
+  const limit = Number(str('limit'))
+  const format = (k: string, fallback: Format): Format => {
+    const v = str(k)
+    return FORMATS.includes(v as Format) ? (v as Format) : fallback
+  }
+  return {
+    ...DEFAULT_QUERY,
+    ...(partition ? { partition: partition === 'all' ? 'all' : Number(partition) } : {}),
+    ...parseOffsetParam(str('from') ?? DEFAULT_QUERY.offsetMode),
+    ...(Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+    keyFormat: format('key_format', DEFAULT_QUERY.keyFormat),
+    valueFormat: format('value_format', DEFAULT_QUERY.valueFormat),
+    keyContains: str('key_contains'),
+    valueContains: str('value_contains'),
+    headerKey: str('header_key'),
+    headerValue: str('header_value'),
+    regex: str('regex') === '1',
+  }
+}
+
+/** One partition's contribution to a `partition=all` read. */
+export interface PartitionSummary {
+  partition: number
+  scanned: number
+  exhausted: boolean
+  /** Where this partition's next page starts; `null` once it has nothing left. */
+  resume: number | null
+}
+
+/**
+ * The `cursor=` that fetches the page after this response, or `null` when there
+ * is nothing left to read.
+ *
+ * One `offset` cannot resume a fan-out — each partition stopped somewhere else —
+ * so the continuation names a point per partition, and the ones that are done
+ * drop out rather than being read again (#104).
+ */
+export function nextCursor(res: {
+  partition?: number
+  resume?: number | null
+  partitions?: PartitionSummary[]
+}): string | null {
+  const points = res.partitions
+    ? res.partitions.filter((p) => p.resume != null).map((p) => `${p.partition}:${p.resume}`)
+    : res.resume != null
+      ? [`${res.partition}:${res.resume}`]
+      : []
+  return points.length ? points.join(',') : null
 }

@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { fieldBadge, fieldPreview, fieldText, type FieldValue } from '~/utils/field'
 import { fmtTime } from '~/utils/format'
-import { buildMessagesQuery, type OffsetMode, type PartitionSpec } from '~/utils/messages'
+import {
+  buildMessagesQuery,
+  fromRouteQuery,
+  nextCursor,
+  toRouteQuery,
+  type MessageQuery,
+  type OffsetMode,
+  type PartitionSpec,
+  type PartitionSummary,
+} from '~/utils/messages'
 
 interface Header { key: FieldValue; value: FieldValue }
 interface Record {
@@ -14,6 +23,7 @@ interface Record {
 }
 
 const route = useRoute()
+const router = useRouter()
 const topic = route.params.name as string
 
 // Cluster comes from the configured source (single source for now).
@@ -62,40 +72,96 @@ function groupLag(g: ConsumingGroup) {
 }
 
 // Controls. Searching the whole topic is the default: hunting for one event in
-// a 12-partition topic used to be twelve manual searches (#102).
-const partition = ref<PartitionSpec>('all')
-const allPartitions = computed(() => partition.value === 'all')
-const offsetMode = ref<OffsetMode>('latest')
-const offsetValue = ref('')
-const limit = ref(50)
+// a 12-partition topic used to be twelve manual searches (#102). Their initial
+// values come from the URL, so a pasted link opens on the query it captured.
+const initial = fromRouteQuery(route.query)
+const partition = ref<PartitionSpec>(initial.partition)
+const offsetMode = ref<OffsetMode>(initial.offsetMode)
+const offsetValue = ref(initial.offsetValue ?? '')
+const limit = ref(initial.limit)
 
-// Serializer choice, remembered per topic.
+// Serializer choice, remembered per topic (#32) — unless the link says otherwise:
+// whoever shared it chose a format deliberately, and it must render what they saw.
 const { keyFormat, valueFormat } = useTopicFormat(topic)
+if (route.query.key_format) keyFormat.value = initial.keyFormat
+if (route.query.value_format) valueFormat.value = initial.valueFormat
 watch([keyFormat, valueFormat], () => {
   if (searched.value) search() // re-decode with the new format
 })
 
 // Filters
-const keyContains = ref('')
-const valueContains = ref('')
-const headerKey = ref('')
-const headerValue = ref('')
-const useRegex = ref(false)
-const showFilters = ref(false)
+const keyContains = ref(initial.keyContains ?? '')
+const valueContains = ref(initial.valueContains ?? '')
+const headerKey = ref(initial.headerKey ?? '')
+const headerValue = ref(initial.headerValue ?? '')
+const useRegex = ref(initial.regex ?? false)
+// A link that carries a filter should open with the filter panel already showing.
+const showFilters = ref(Boolean(initial.keyContains || initial.valueContains || initial.headerKey))
 
-// Results
-const records = ref<Record[]>([])
+/** The controls as one value — what goes to the API, the URL and Copy link. */
+const query = computed<MessageQuery>(() => ({
+  partition: partition.value,
+  offsetMode: offsetMode.value,
+  offsetValue: offsetValue.value,
+  limit: limit.value,
+  keyFormat: keyFormat.value,
+  valueFormat: valueFormat.value,
+  keyContains: keyContains.value,
+  valueContains: valueContains.value,
+  headerKey: headerKey.value,
+  headerValue: headerValue.value,
+  regex: useRegex.value,
+}))
+
+// Results. `Load more` appends a window rather than replacing the table, so the
+// results are a stack of pages: `Back` pops one, with no refetch (#104).
 // `served_end` is present only when a segment expiry certified that the offsets
 // from it up to `high` were destroyed (Popsink/tansu#290) — a gap no fetch can
 // ever return, so it is not part of the message count.
-interface PartitionSummary {
-  partition: number
+type Watermark = { low: number; high: number; served_end?: number }
+interface Page {
+  rows: Record[]
+  /** The cursor that fetches the page after this one; `null` when nothing is left. */
+  next: string | null
+  /** One row per partition for a fan-out; `null` when one partition was read. */
+  partitions: PartitionSummary[] | null
+  /** The partition read, when it was a single one. */
+  partition: number | null
+  watermark: Watermark | null
   scanned: number
-  exhausted: boolean
+  filtered: boolean
+  order: string
 }
-const watermark = ref<{ low: number; high: number; served_end?: number } | null>(null)
-// Present instead of `watermark` when the read covered every partition.
-const partitionSummary = ref<PartitionSummary[] | null>(null)
+const pages = ref<Page[]>([])
+const last = computed(() => pages.value.at(-1) ?? null)
+const records = computed(() => pages.value.flatMap((p) => p.rows))
+const allPartitions = computed(() => last.value?.partitions != null)
+const watermark = computed(() => last.value?.watermark ?? null)
+const scanned = computed(() => pages.value.reduce((n, p) => n + p.scanned, 0))
+const filtered = computed(() => last.value?.filtered ?? false)
+const exhausted = computed(() => last.value?.next == null)
+const canLoadMore = computed(() => last.value?.next != null)
+const canGoBack = computed(() => pages.value.length > 1)
+// The merge follows the read: `latest` walks towards older records, everything
+// else towards newer, and the label must not claim the opposite (#104).
+const orderLabel = computed(() => (last.value?.order === 'timestamp_asc' ? 'oldest first' : 'newest first'))
+
+/**
+ * Per-partition totals across every page loaded so far.
+ *
+ * `scanned` accumulates — it is what this investigation has cost. A partition
+ * that ran out drops out of later responses, so its last entry is kept rather
+ * than the row disappearing from under the reader.
+ */
+const partitionSummary = computed<PartitionSummary[] | null>(() => {
+  const seen = new Map<number, PartitionSummary>()
+  for (const page of pages.value) {
+    for (const s of page.partitions ?? []) {
+      seen.set(s.partition, { ...s, scanned: (seen.get(s.partition)?.scanned ?? 0) + s.scanned })
+    }
+  }
+  return seen.size ? [...seen.values()].sort((a, b) => a.partition - b.partition) : null
+})
 const messageCount = computed(() => {
   const wm = watermark.value
   if (!wm) return 0
@@ -108,45 +174,84 @@ const error = ref<string | null>(null)
 const expanded = ref<Set<string>>(new Set())
 const rowKey = (r: Record) => `${r.partition}:${r.offset}`
 const searched = ref(false)
-const scanned = ref(0)
-const filtered = ref(false)
-const exhausted = ref(true)
 
 // Messages are fetched only on user action — never automatically.
+async function fetchPage(cursor?: string): Promise<Page> {
+  const p = buildMessagesQuery({ ...query.value, cursor })
+  const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages?${p}`
+  const res = await $fetch<any>(url)
+  return {
+    rows: res.records,
+    next: nextCursor(res),
+    // One shape per mode: a single watermark, or one row per partition.
+    partitions: res.partitions ?? null,
+    partition: res.partition ?? null,
+    watermark: res.watermark ?? null,
+    scanned: res.scanned ?? res.records.length,
+    filtered: res.filtered ?? false,
+    order: res.order ?? 'timestamp_desc',
+  }
+}
+
 async function search() {
   if (!cluster.value) return
   loading.value = true
   error.value = null
   expanded.value = new Set()
   try {
-    const p = buildMessagesQuery({
-      partition: partition.value,
-      offsetMode: offsetMode.value,
-      offsetValue: offsetValue.value,
-      limit: limit.value,
-      keyFormat: keyFormat.value,
-      valueFormat: valueFormat.value,
-      keyContains: keyContains.value,
-      valueContains: valueContains.value,
-      headerKey: headerKey.value,
-      headerValue: headerValue.value,
-      regex: useRegex.value,
-    })
-    const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages?${p}`
-    const res = await $fetch<any>(url)
-    records.value = res.records
-    // One shape per mode: a single watermark, or one row per partition.
-    watermark.value = res.watermark ?? null
-    partitionSummary.value = res.partitions ?? null
-    scanned.value = res.scanned ?? res.records.length
-    filtered.value = res.filtered ?? false
-    exhausted.value = res.exhausted ?? true
+    pages.value = [await fetchPage()]
     searched.value = true
+    // The URL is the query's home once a search has run: back/forward, bookmarks
+    // and Copy link all work off it. `replace`, so paging does not fill history.
+    router.replace({ query: toRouteQuery(query.value) })
   } catch (e: any) {
     error.value = e?.data?.error || e?.message || 'request failed'
-    records.value = []
+    pages.value = []
   } finally {
     loading.value = false
+  }
+}
+
+/** Appends the window after the current one, continuing the scan (#104). */
+async function loadMore() {
+  const cursor = last.value?.next
+  if (!cursor || !cluster.value) return
+  loading.value = true
+  error.value = null
+  try {
+    pages.value = [...pages.value, await fetchPage(cursor)]
+  } catch (e: any) {
+    error.value = e?.data?.error || e?.message || 'request failed'
+  } finally {
+    loading.value = false
+  }
+}
+
+/** Drops the last window. The pages are already in hand — nothing is refetched. */
+function back() {
+  if (canGoBack.value) pages.value = pages.value.slice(0, -1)
+}
+
+// A link that carries a query runs it on arrival. That is still a user action —
+// they clicked the link — so it does not break the on-demand contract (#7); a
+// bare `/topics/x` still waits for Search.
+onMounted(() => {
+  if (Object.keys(toRouteQuery(initial)).length) search()
+})
+
+const linkCopied = ref(false)
+/** Puts the current query's permalink on the clipboard (#104). */
+async function copyLink() {
+  const url = new URL(window.location.href)
+  url.search = new URLSearchParams(toRouteQuery(query.value)).toString()
+  try {
+    await navigator.clipboard.writeText(url.toString())
+    linkCopied.value = true
+    setTimeout(() => (linkCopied.value = false), 1500)
+  } catch {
+    // Same failure modes as copying a record (#65): say so rather than let the
+    // user paste nothing.
+    error.value = 'could not copy the link to the clipboard'
   }
 }
 
@@ -334,7 +439,7 @@ async function copyMsg(r: Record) {
     </p>
 
     <p v-if="watermark" class="muted wm">
-      partition {{ partition }} — low {{ watermark.low }}, high {{ watermark.high }}
+      partition {{ last?.partition }} — low {{ watermark.low }}, high {{ watermark.high }}
       ({{ messageCount }} messages)
       <template v-if="watermark.served_end !== undefined">
         — offsets {{ watermark.served_end }}–{{ watermark.high - 1 }} were removed by
@@ -345,7 +450,7 @@ async function copyMsg(r: Record) {
     <template v-if="partitionSummary">
       <p class="muted wm">
         {{ partitionSummary.length }} partition{{ partitionSummary.length === 1 ? '' : 's' }},
-        newest first
+        {{ orderLabel }}
         <span class="hint" title="Timestamps are not ordered across partitions, so the merge across them is best-effort.">(best effort)</span>
       </p>
       <!-- What the query read, per partition. Low/high live in the topic's own
@@ -369,6 +474,7 @@ async function copyMsg(r: Record) {
     <div v-if="records.length" class="exporttb">
       <button type="button" class="ghost" @click="exportJson">Export JSON</button>
       <button type="button" class="ghost" @click="exportNdjson">Export NDJSON</button>
+      <button type="button" class="ghost" @click="copyLink">{{ linkCopied ? 'Link copied ✓' : 'Copy link' }}</button>
     </div>
 
     <table v-if="records.length" class="msgs">
@@ -387,7 +493,7 @@ async function copyMsg(r: Record) {
           </tr>
           <tr v-if="expanded.has(rowKey(r))" class="detail">
             <td></td>
-            <td colspan="4">
+            <td :colspan="allPartitions ? 5 : 4">
               <div class="kv">
                 <span class="lbl">key
                   <em v-if="r.key" class="tag">{{ fieldBadge(r.key) }}</em>
@@ -417,6 +523,14 @@ async function copyMsg(r: Record) {
       </tbody>
     </table>
 
+    <div v-if="records.length" class="paging">
+      <button type="button" class="ghost" :disabled="!canGoBack || loading" @click="back">← Back</button>
+      <button type="button" class="ghost" :disabled="!canLoadMore || loading" @click="loadMore">
+        <Spinner v-if="loading" size="12px" /> Load more
+      </button>
+      <span class="muted">{{ records.length }} loaded<template v-if="!canLoadMore"> — end of the {{ allPartitions ? 'topic' : 'partition' }}</template></span>
+    </div>
+
     <p v-else-if="searched && !loading" class="muted">No messages in this range.</p>
   </section>
 </template>
@@ -440,6 +554,9 @@ h2 code { color: var(--accent); }
 .cfg td { padding: 0.25rem 1rem 0.25rem 0; font-size: 0.82rem; }
 .browse-h { margin: 1.5rem 0 0; font-size: 1rem; }
 .exporttb { display: flex; gap: 0.5rem; margin: 0.75rem 0 0; }
+.paging { display: flex; gap: 0.5rem; align-items: center; margin: 0.75rem 0 0; }
+.paging .ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--border); }
+.paging .ghost:disabled { opacity: 0.45; cursor: default; }
 .exporttb .ghost, .copy { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
 .copy { margin-top: 0.5rem; }
 .copy.copyfail { color: var(--err); border-color: var(--err); }
