@@ -435,6 +435,20 @@ test.describe('UI smoke', () => {
     await expect(rows).toHaveCount(5);
   });
 
+  /**
+   * A cursor only means anything against the query it came from: a forward resume
+   * point read as a backward ceiling would return the wrong records silently.
+   */
+  test('Load more stops offering itself once the query has changed', async ({ page }) => {
+    await page.goto('/topics/spread?from=earliest&limit=5');
+    await expect(page.locator('table.msgs tbody tr.row')).toHaveCount(5);
+    await expect(page.getByRole('button', { name: 'Load more' })).toBeEnabled();
+
+    await page.getByRole('combobox', { name: 'From' }).selectOption('latest');
+    await expect(page.getByRole('button', { name: 'Load more' })).toBeDisabled();
+    await expect(page.getByText('the query changed, Search to apply it')).toBeVisible();
+  });
+
   test('avro-orders decodes in the event browser', async ({ page }) => {
     await page.goto('/topics/avro-orders');
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');

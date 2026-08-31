@@ -134,13 +134,22 @@ interface Page {
 }
 const pages = ref<Page[]>([])
 const last = computed(() => pages.value.at(-1) ?? null)
+// The query the stack was fetched under — the one `Load more` continues, rather
+// than whatever the controls say by the time it is clicked. A resume point from a
+// forward read, applied to a backward one, is taken as a ceiling and hands back
+// the wrong records without saying so.
+const pagedQuery = ref<MessageQuery | null>(null)
+const asParams = (q: MessageQuery) => buildMessagesQuery(q).toString()
+const queryChanged = computed(
+  () => pagedQuery.value != null && asParams(pagedQuery.value) !== asParams(query.value),
+)
 const records = computed(() => pages.value.flatMap((p) => p.rows))
 const allPartitions = computed(() => last.value?.partitions != null)
 const watermark = computed(() => last.value?.watermark ?? null)
 const scanned = computed(() => pages.value.reduce((n, p) => n + p.scanned, 0))
 const filtered = computed(() => last.value?.filtered ?? false)
 const exhausted = computed(() => last.value?.next == null)
-const canLoadMore = computed(() => last.value?.next != null)
+const canLoadMore = computed(() => last.value?.next != null && !queryChanged.value)
 const canGoBack = computed(() => pages.value.length > 1)
 // The merge follows the read: `latest` walks towards older records, everything
 // else towards newer, and the label must not claim the opposite (#104).
@@ -176,8 +185,8 @@ const rowKey = (r: Record) => `${r.partition}:${r.offset}`
 const searched = ref(false)
 
 // Messages are fetched only on user action — never automatically.
-async function fetchPage(cursor?: string): Promise<Page> {
-  const p = buildMessagesQuery({ ...query.value, cursor })
+async function fetchPage(q: MessageQuery, cursor?: string): Promise<Page> {
+  const p = buildMessagesQuery({ ...q, cursor })
   const url = `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}/messages?${p}`
   const res = await $fetch<any>(url)
   return {
@@ -198,12 +207,16 @@ async function search() {
   loading.value = true
   error.value = null
   expanded.value = new Set()
+  // Snapshot before awaiting: the controls can move while the request is in
+  // flight, and the stack must remember what was actually asked.
+  const asked: MessageQuery = { ...query.value }
   try {
-    pages.value = [await fetchPage()]
+    pages.value = [await fetchPage(asked)]
+    pagedQuery.value = asked
     searched.value = true
     // The URL is the query's home once a search has run: back/forward, bookmarks
     // and Copy link all work off it. `replace`, so paging does not fill history.
-    router.replace({ query: toRouteQuery(query.value) })
+    router.replace({ query: toRouteQuery(asked) })
   } catch (e: any) {
     error.value = e?.data?.error || e?.message || 'request failed'
     pages.value = []
@@ -215,11 +228,12 @@ async function search() {
 /** Appends the window after the current one, continuing the scan (#104). */
 async function loadMore() {
   const cursor = last.value?.next
-  if (!cursor || !cluster.value) return
+  const asked = pagedQuery.value
+  if (!cursor || !asked || !cluster.value) return
   loading.value = true
   error.value = null
   try {
-    pages.value = [...pages.value, await fetchPage(cursor)]
+    pages.value = [...pages.value, await fetchPage(asked, cursor)]
   } catch (e: any) {
     error.value = e?.data?.error || e?.message || 'request failed'
   } finally {
@@ -528,7 +542,9 @@ async function copyMsg(r: Record) {
       <button type="button" class="ghost" :disabled="!canLoadMore || loading" @click="loadMore">
         <Spinner v-if="loading" size="12px" /> Load more
       </button>
-      <span class="muted">{{ records.length }} loaded<template v-if="!canLoadMore"> — end of the {{ allPartitions ? 'topic' : 'partition' }}</template></span>
+      <span class="muted">
+        {{ records.length }} loaded<template v-if="queryChanged"> — the query changed, Search to apply it</template><template v-else-if="!canLoadMore"> — end of the {{ allPartitions ? 'topic' : 'partition' }}</template>
+      </span>
     </div>
 
     <p v-else-if="searched && !loading" class="muted">No messages in this range.</p>
