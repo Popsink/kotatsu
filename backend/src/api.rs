@@ -255,6 +255,8 @@ pub struct MessagesQuery {
     partition: String,
     #[serde(default = "default_offset")]
     offset: String,
+    /// Resume points from a previous response's `resume`: `0:412,3:998` (#104).
+    cursor: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
     /// `auto` | `avro` | `json` | `raw` (see [`FieldFormat`]).
@@ -379,8 +381,10 @@ pub async fn schema_version(
 /// `GET /api/clusters/{cluster}/topics/{topic}/messages`
 ///
 /// Reads records directly from S3 on user action. `offset` accepts
-/// `earliest`, `latest`, a specific offset, or `timestamp:<ms>`. Confluent-
-/// framed Avro keys/values are decoded against the schema registry (#8).
+/// `earliest`, `latest`, a specific offset, or `timestamp:<ms>`, and sets which
+/// way the read travels. Every response carries a `resume` point per partition;
+/// handing those back as `cursor` returns the next page (#104). Confluent-framed
+/// Avro keys/values are decoded against the schema registry (#8).
 pub async fn messages(
     State(state): State<AppState>,
     Path((cluster, topic)): Path<(String, String)>,
@@ -390,6 +394,7 @@ pub async fn messages(
     let params = MessageParams {
         partition: query.partition,
         offset: query.offset,
+        cursor: query.cursor,
         limit: query.limit,
         key_format: query.key_format,
         value_format: query.value_format,

@@ -170,7 +170,12 @@ pub struct MessageParams {
     /// Partition spec: `all` (every partition, merged) or a concrete number.
     pub partition: String,
     /// Offset spec string: `earliest` | `latest` | `timestamp:<ms>` | `<n>`.
+    ///
+    /// With `cursor` set this names only the *direction* of travel; the cursor
+    /// supplies each partition's starting point.
     pub offset: String,
+    /// Resume points from a previous page's `resume`, as `0:412,3:998` (#104).
+    pub cursor: Option<String>,
     pub limit: usize,
     /// `auto` | `avro` | `json` | `raw`.
     pub key_format: Option<String>,
@@ -188,6 +193,7 @@ impl Default for MessageParams {
         Self {
             partition: "all".to_string(),
             offset: "latest".to_string(),
+            cursor: None,
             limit: 50,
             key_format: None,
             value_format: None,
@@ -222,6 +228,38 @@ pub fn parse_partition(raw: &str) -> Result<PartitionSelector, QueryError> {
     }
 }
 
+/// Which way a read walks a partition.
+///
+/// `latest` starts at the log end and every further page is *older*; every other
+/// spec starts somewhere and walks *newer*. Four things turn on the sense — which
+/// edge proves coverage, which end of the fetched window is scanned first, where
+/// the next page resumes, and which end of the merge survives truncation — so it
+/// is named once rather than re-derived from the spec at each site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Towards older offsets: `latest`.
+    Backward,
+    /// Towards newer offsets: `earliest`, `timestamp:<ms>`, `<n>`.
+    Forward,
+}
+
+impl Direction {
+    fn of(spec: OffsetSpec) -> Self {
+        match spec {
+            OffsetSpec::Latest => Direction::Backward,
+            _ => Direction::Forward,
+        }
+    }
+
+    /// The offset a page resumes from, given the last one it accounted for.
+    fn past(self, edge: i64) -> i64 {
+        match self {
+            Direction::Forward => edge + 1,
+            Direction::Backward => edge - 1,
+        }
+    }
+}
+
 /// Whether a scan that filled its budget nonetheless covered the whole partition.
 ///
 /// Which edge proves it depends on the direction of the read. `latest` returns the
@@ -229,11 +267,36 @@ pub fn parse_partition(raw: &str) -> Result<PartitionSelector, QueryError> {
 /// end would call every `latest` read complete, however little of the partition it
 /// actually looked at. Reading backwards, only reaching the log start proves
 /// coverage; reading forward, only reaching the served end does.
-fn covers_partition(spec: OffsetSpec, first: i64, last: i64, low: i64, served_end: i64) -> bool {
-    match spec {
-        OffsetSpec::Latest => first <= low,
-        _ => last + 1 >= served_end,
+fn covers_partition(dir: Direction, first: i64, last: i64, low: i64, served_end: i64) -> bool {
+    match dir {
+        Direction::Backward => first <= low,
+        Direction::Forward => last + 1 >= served_end,
     }
+}
+
+/// Parses a resume cursor: `0:412,3:998` — one offset per partition.
+///
+/// A fan-out cannot be resumed by one `offset`: partition 0 and partition 3 stop
+/// in different places (#104). So a continuation carries a point per partition,
+/// and `offset` is left naming only the *direction* of travel. A partition the
+/// previous page exhausted is simply absent, and is not read again.
+pub fn parse_cursor(raw: &str) -> Result<Vec<(i32, i64)>, QueryError> {
+    let bad = |pair: &str| {
+        QueryError::BadRequest(format!(
+            "invalid cursor: {pair} (expected comma-separated `partition:offset` pairs)"
+        ))
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|pair| {
+            let (p, o) = pair.split_once(':').ok_or_else(|| bad(pair))?;
+            Ok((
+                p.trim().parse().map_err(|_| bad(pair))?,
+                o.trim().parse().map_err(|_| bad(pair))?,
+            ))
+        })
+        .collect()
 }
 
 /// What one partition contributed to a read.
@@ -242,7 +305,22 @@ struct PartitionScan {
     watermark: Watermark,
     rendered: Vec<Value>,
     scanned: usize,
-    exhausted: bool,
+    /// Whether the scan covered the partition to its edge in the read direction.
+    covered: bool,
+    /// The furthest offset the scan actually looked at, in the read direction —
+    /// the frontier a partition that matched nothing resumes from (#104).
+    frontier: Option<i64>,
+}
+
+/// Where one partition's scan begins, and where a backward page must stop.
+#[derive(Clone, Copy, Debug)]
+struct Window {
+    spec: OffsetSpec,
+    /// Reading backwards, the newest offset this page may include. `fetch` only
+    /// ever walks *forward* from a computed start, so a continuation window that
+    /// bumps into the log floor would otherwise run back over the page already
+    /// shown; the ceiling trims it. `None` for a forward read.
+    ceiling: Option<i64>,
 }
 
 /// The decoded, filtered records of a single partition, bounded by `budget`.
@@ -252,13 +330,17 @@ async fn scan_partition(
     registry: Option<&SchemaRegistry>,
     topic: &str,
     partition: i32,
-    spec: OffsetSpec,
+    win: Window,
+    dir: Direction,
     budget: usize,
     limit: usize,
     f: &Filters<'_>,
 ) -> Result<PartitionScan, QueryError> {
     let watermark = source.watermark(topic, partition).await?;
-    let records = source.fetch(topic, partition, spec, budget).await?;
+    let mut records = source.fetch(topic, partition, win.spec, budget).await?;
+    if let Some(ceiling) = win.ceiling {
+        records.retain(|r| r.offset <= ceiling);
+    }
     // Fetched fewer than asked ⇒ we reached the end. Reading *exactly* the budget
     // is no longer rare once it is split across partitions (#102), so also check
     // whether the records we got happen to span to the partition's edge.
@@ -266,15 +348,26 @@ async fn scan_partition(
     let reached_end = records.len() < budget
         || match (records.first(), records.last()) {
             (Some(f), Some(l)) => {
-                covers_partition(spec, f.offset, l.offset, watermark.low, served_end)
+                covers_partition(dir, f.offset, l.offset, watermark.low, served_end)
             }
             _ => true,
         };
 
+    // Scan in the direction of travel. `fetch` always hands back ascending offsets,
+    // so a backward read walks them in reverse — otherwise the `limit` break below
+    // would keep the *oldest* matches of a window the caller asked the newest of,
+    // and the records past the break could never be reached by a further page.
+    let ordered: Vec<&DecodedRecord> = match dir {
+        Direction::Forward => records.iter().collect(),
+        Direction::Backward => records.iter().rev().collect(),
+    };
+
     let mut rendered = Vec::new();
     let mut scanned = 0usize;
-    for record in &records {
+    let mut frontier = None;
+    for record in ordered {
         scanned += 1;
+        frontier = Some(record.offset);
         let key = decode_field(registry, &record.key, f.key_format).await;
         let value = decode_field(registry, &record.value, f.value_format).await;
 
@@ -303,20 +396,34 @@ async fn scan_partition(
         watermark,
         scanned,
         // A short `scanned` means the `limit` break fired, so records went unlooked-at.
-        exhausted: reached_end && scanned == records.len(),
+        covered: reached_end && scanned == records.len(),
+        frontier,
         rendered,
     })
 }
 
 /// How many records each partition of a fan-out may read.
 ///
-/// The budget belongs to the topic, not to each partition: splitting it is what
-/// keeps a 12-partition search from costing twelve times a single-partition one.
-/// Every partition still gets at least one record so a wide topic with a small
-/// limit still reports from all of them — the overshoot is then bounded by the
-/// partition count, never by a multiple of the budget.
+/// The *scan* budget belongs to the topic, not to each partition: splitting it is
+/// what keeps a 12-partition filtered search from costing twelve times a
+/// single-partition one. Every partition still gets at least one record so a wide
+/// topic with a small budget still reports from all of them — the overshoot is
+/// then bounded by the partition count, never by a multiple of the budget.
 fn partition_budget(scan_limit: usize, partitions: usize) -> usize {
     (scan_limit / partitions.max(1)).max(1)
+}
+
+/// How many records each partition may read when nothing is being filtered.
+///
+/// `limit`, not a share of it. Dividing the page across partitions made a page
+/// stop being a page: on a topic whose records sit in one partition — the usual
+/// shape, since the sticky partitioner concentrates keyless writes — asking for
+/// 50 on 12 partitions returned 4. #102's budget rule is about `max_scan` and the
+/// S3 amplification of a *filtered* scan; an unfiltered read is capped at
+/// `MAX_LIMIT` records per partition, which is a different order of cost. The
+/// topic-wide cap still applies, so a 200-partition topic does not read 200 pages.
+fn page_budget(limit: usize, partitions: usize) -> usize {
+    limit.min(partition_budget(MAX_SCAN_CAP, partitions))
 }
 
 /// Sort key for the cross-partition merge. Timestamps are not globally ordered
@@ -327,19 +434,80 @@ fn merge_key(record: &Value) -> (i64, i64, i64) {
     (n("timestamp"), n("partition"), n("offset"))
 }
 
+/// Orders the merged records the way the read travels, then keeps one page.
+///
+/// The sense matters because of the truncation: a descending sort keeps the newest
+/// `limit`, which is right for `latest` and wrong for `earliest` — there it would
+/// throw away exactly the oldest records the caller asked for, and page two could
+/// then hold records *newer* than page one (#104).
+fn merge_page(records: &mut Vec<Value>, dir: Direction, limit: usize) {
+    match dir {
+        Direction::Backward => records.sort_by_key(|r| std::cmp::Reverse(merge_key(r))),
+        Direction::Forward => records.sort_by_key(merge_key),
+    }
+    records.truncate(limit);
+}
+
+/// Where each partition resumes, keyed by partition, given the page just built.
+///
+/// The frontier is *past the last record this page returned*, not past everything
+/// the scan touched: a record that was scanned, matched and then dropped by the
+/// merge's truncation has not been shown to anyone, and must come back next page.
+/// Only a partition that returned nothing resumes at its scan frontier — which is
+/// the case #104 asks for, an unproductive filtered region not walked twice.
+///
+/// `None` for a partition with nothing left in the read direction.
+///
+/// Paging is exact as long as a partition's own timestamps do not go backwards.
+/// They can — a producer sets them — and a record whose timestamp regressed far
+/// enough to be truncated out of a page below one that was kept is then stepped
+/// over. Resuming from the *lowest* gap instead would return records already shown,
+/// which reads worse; this shares the response's `order_best_effort` caveat rather
+/// than pretending a total order the log does not have.
+fn resume_points(scans: &[PartitionScan], page: &[Value], dir: Direction) -> Vec<Option<i64>> {
+    scans
+        .iter()
+        .map(|s| {
+            let shown = page
+                .iter()
+                .filter(|r| r.get("partition").and_then(Value::as_i64) == Some(s.partition as i64))
+                .filter_map(|r| r.get("offset").and_then(Value::as_i64));
+            let edge = match dir {
+                Direction::Forward => shown.max(),
+                Direction::Backward => shown.min(),
+            }
+            .or(s.frontier)?;
+
+            let next = dir.past(edge);
+            let served_end = s.watermark.served_end.unwrap_or(s.watermark.high);
+            match dir {
+                Direction::Forward => (next < served_end).then_some(next),
+                Direction::Backward => (next >= s.watermark.low).then_some(next),
+            }
+        })
+        .collect()
+}
+
 /// Fetches, decodes and filters messages from a topic, returning the full
 /// response object. Shared by the HTTP handler and the Python binding.
 ///
 /// `params.partition` is either one partition — storage order, today's response
 /// shape — or `all`, which fans out over every partition concurrently and merges
-/// newest-first (#102). The scan budget is topic-wide in both cases: a 12-partition
-/// search spends one budget, not twelve, give or take a record per partition.
+/// them (#102). `params.offset` sets both where the read starts and which way it
+/// travels: `latest` walks towards older records, everything else towards newer,
+/// and the merge is ordered to match so that page two never holds records the
+/// wrong side of page one.
 ///
-/// That budget is what makes `all` approximate, and deliberately so. Each partition
-/// is read up to its share, so with a `limit` small next to the partition count the
-/// answer is "the newest few of every partition", not provably "the newest `limit`
-/// of the topic" — proving that would mean reading `limit` from every partition,
-/// which is the N× cost the budget exists to prevent. `order_best_effort` marks it.
+/// Every response carries a `resume` point per partition — the offset the next
+/// page starts from, or `null` where there is nothing left. Handing those back as
+/// `params.cursor` continues the read instead of restarting it (#104).
+///
+/// A *filtered* read's scan budget is topic-wide: a 12-partition search spends one
+/// `max_scan`, not twelve, give or take a record per partition. That is what makes
+/// a filtered `all` approximate — each partition is read up to its share, so with
+/// a small budget the answer is "what every partition had near its frontier", not
+/// provably "the best `limit` of the topic". `order_best_effort` marks it. An
+/// unfiltered read is not divided: a page is a page (see `page_budget`).
 pub async fn messages(
     source: &StorageSource,
     registry: Option<&SchemaRegistry>,
@@ -348,13 +516,15 @@ pub async fn messages(
 ) -> Result<Value, QueryError> {
     let spec = parse_offset(&p.offset)?;
     let selector = parse_partition(&p.partition)?;
+    let dir = Direction::of(spec);
+    let cursor = p.cursor.as_deref().map(parse_cursor).transpose()?;
 
     // Validate topic + partition up front so a missing topic or an out-of-range
     // partition returns a clean, distinct error rather than a storage NotFound
     // whose message leaks the internal S3 object key (#63). A missing topic
     // surfaces as `StorageError::TopicNotFound` from `topic_partitions`.
     let partitions = source.topic_partitions(topic).await?;
-    let targets: Vec<i32> = match selector {
+    let selected: Vec<i32> = match selector {
         PartitionSelector::One(n) => {
             if n < 0 || n >= partitions {
                 return Err(QueryError::BadRequest(partition_out_of_range(
@@ -377,22 +547,68 @@ pub async fn messages(
         }
     };
 
+    // A cursor narrows the read to the partitions that still have something left,
+    // and replaces `offset` as each one's starting point. Its partitions must be
+    // ones this request selected, or the page would silently answer about a
+    // different topic slice than the caller asked for.
+    let targets: Vec<i32> = match &cursor {
+        None => selected.clone(),
+        Some(points) => {
+            for (part, _) in points {
+                if !selected.contains(part) {
+                    return Err(QueryError::BadRequest(format!(
+                        "cursor names partition {part}, which this query does not read"
+                    )));
+                }
+            }
+            points.iter().map(|(part, _)| *part).collect()
+        }
+    };
+
     let limit = p.limit.clamp(1, MAX_LIMIT);
     let filters = Filters::build(p)?;
-    let scan_limit = if filters.filtering {
-        p.max_scan.clamp(1, MAX_SCAN_CAP)
+    let budget = if filters.filtering {
+        partition_budget(p.max_scan.clamp(1, MAX_SCAN_CAP), targets.len())
     } else {
-        limit
+        page_budget(limit, targets.len())
     };
-    let budget = partition_budget(scan_limit, targets.len());
+
+    let window = |partition: i32| -> Window {
+        let Some(from) = cursor
+            .as_ref()
+            .and_then(|c| c.iter().find(|(part, _)| *part == partition))
+            .map(|(_, off)| *off)
+        else {
+            return Window {
+                spec,
+                ceiling: None,
+            };
+        };
+        match dir {
+            // Forward, the resume point *is* the start.
+            Direction::Forward => Window {
+                spec: OffsetSpec::At(from),
+                ceiling: None,
+            },
+            // Backward, it is the newest offset still unread, so the window is the
+            // `budget` records ending there — `fetch` reads forward from its start.
+            Direction::Backward => Window {
+                spec: OffsetSpec::At((from + 1).saturating_sub(budget as i64)),
+                ceiling: Some(from),
+            },
+        }
+    };
 
     let (source, registry, topic, filters) = (source, registry, topic, &filters);
     let mut scans: Vec<PartitionScan> = futures::stream::iter(targets.iter().copied())
-        .map(|partition| async move {
-            scan_partition(
-                source, registry, topic, partition, spec, budget, limit, filters,
-            )
-            .await
+        .map(|partition| {
+            let win = window(partition);
+            async move {
+                scan_partition(
+                    source, registry, topic, partition, win, dir, budget, limit, filters,
+                )
+                .await
+            }
         })
         .buffer_unordered(FANOUT)
         .try_collect()
@@ -400,19 +616,40 @@ pub async fn messages(
     scans.sort_by_key(|s| s.partition);
 
     let scanned: usize = scans.iter().map(|s| s.scanned).sum();
-    let all_exhausted = scans.iter().all(|s| s.exhausted);
+
+    let order = match dir {
+        Direction::Backward => "timestamp_desc",
+        Direction::Forward => "timestamp_asc",
+    };
 
     if let PartitionSelector::One(n) = selector {
-        // One partition: the response shape and record order are unchanged.
-        let scan = scans.remove(0);
+        // A cursor listing no partition is a caller paging past the end. There is
+        // nothing to read and nothing to say about it, so answer an empty page
+        // rather than index a scan that was never run.
+        let Some(mut scan) = scans.pop() else {
+            return Ok(json!({
+                "partition": n, "count": 0, "scanned": 0,
+                "filtered": filters.filtering, "exhausted": true,
+                "resume": Value::Null, "order": order, "records": [],
+            }));
+        };
+        // One partition: the response shape #102 kept, plus the `resume` and
+        // `order` every mode now carries. Records come back in the direction of
+        // travel, so a `latest` read is newest-first rather than in storage order —
+        // otherwise a page that stopped at `limit` would hand back the oldest
+        // records of a window the caller asked the newest of.
+        let page = std::mem::take(&mut scan.rendered);
+        let resume = resume_points(std::slice::from_ref(&scan), &page, dir)[0];
         return Ok(json!({
             "partition": n,
             "watermark": scan.watermark,
-            "count": scan.rendered.len(),
+            "count": page.len(),
             "scanned": scanned,
             "filtered": filters.filtering,
-            "exhausted": all_exhausted,
-            "records": scan.rendered,
+            "exhausted": resume.is_none(),
+            "resume": resume,
+            "order": order,
+            "records": page,
         }));
     }
 
@@ -420,22 +657,26 @@ pub async fn messages(
         .iter()
         .flat_map(|s| s.rendered.iter().cloned())
         .collect();
-    records.sort_by_key(|r| std::cmp::Reverse(merge_key(r)));
-    let truncated = records.len() > limit;
-    records.truncate(limit);
+    merge_page(&mut records, dir, limit);
+    let resume = resume_points(&scans, &records, dir);
 
     Ok(json!({
-        "partitions": scans.iter().map(|s| json!({
+        "partitions": scans.iter().zip(&resume).map(|(s, r)| json!({
             "partition": s.partition,
             "watermark": s.watermark,
             "scanned": s.scanned,
-            "exhausted": s.exhausted,
+            // Nothing left to read here, in this direction. `covered` is the
+            // narrower question of whether *this* scan reached the edge; a page
+            // that stopped at `limit` mid-partition is not covered but does resume.
+            "exhausted": r.is_none(),
+            "covered": s.covered,
+            "resume": r,
         })).collect::<Vec<_>>(),
         "count": records.len(),
         "scanned": scanned,
         "filtered": filters.filtering,
-        "exhausted": all_exhausted && !truncated,
-        "order": "timestamp_desc",
+        "exhausted": resume.iter().all(Option::is_none),
+        "order": order,
         "order_best_effort": true,
         "records": records,
     }))
@@ -451,20 +692,31 @@ mod tests {
     #[test]
     fn a_latest_scan_is_only_covered_once_it_reaches_the_log_start() {
         // Read the last record of a 6-record partition: 5 more remain below.
-        assert!(!covers_partition(OffsetSpec::Latest, 5, 5, 0, 6));
+        assert!(!covers_partition(Direction::Backward, 5, 5, 0, 6));
         // Read all six.
-        assert!(covers_partition(OffsetSpec::Latest, 0, 5, 0, 6));
+        assert!(covers_partition(Direction::Backward, 0, 5, 0, 6));
         // A truncated partition starts at its floor, not at 0.
-        assert!(covers_partition(OffsetSpec::Latest, 2, 5, 2, 6));
+        assert!(covers_partition(Direction::Backward, 2, 5, 2, 6));
     }
 
     #[test]
     fn a_forward_scan_is_covered_once_it_reaches_the_served_end() {
-        assert!(covers_partition(OffsetSpec::Earliest, 0, 5, 0, 6));
-        assert!(!covers_partition(OffsetSpec::Earliest, 0, 3, 0, 6));
+        assert!(covers_partition(Direction::Forward, 0, 5, 0, 6));
+        assert!(!covers_partition(Direction::Forward, 0, 3, 0, 6));
         // `served_end` below `high` is retention having destroyed the tail (#95):
         // reaching it is as far as any read can go.
-        assert!(covers_partition(OffsetSpec::Earliest, 0, 3, 0, 4));
+        assert!(covers_partition(Direction::Forward, 0, 3, 0, 4));
+    }
+
+    #[test]
+    fn only_latest_reads_backwards() {
+        assert_eq!(Direction::of(OffsetSpec::Latest), Direction::Backward);
+        assert_eq!(Direction::of(OffsetSpec::Earliest), Direction::Forward);
+        assert_eq!(Direction::of(OffsetSpec::At(42)), Direction::Forward);
+        assert_eq!(
+            Direction::of(OffsetSpec::Timestamp(1700)),
+            Direction::Forward
+        );
     }
 
     #[test]
@@ -531,6 +783,156 @@ mod tests {
             })
             .collect();
         assert_eq!(order, vec![(2, 1), (0, 9), (0, 5)]);
+    }
+
+    /// Building a `PartitionScan` as a fan-out would leave it, to exercise the
+    /// resume arithmetic without S3.
+    fn scan(
+        partition: i32,
+        low: i64,
+        high: i64,
+        frontier: Option<i64>,
+        shown: &[i64],
+    ) -> PartitionScan {
+        PartitionScan {
+            partition,
+            watermark: Watermark {
+                low,
+                high,
+                served_end: None,
+            },
+            rendered: shown
+                .iter()
+                .map(|o| json!({ "partition": partition, "offset": o }))
+                .collect(),
+            scanned: shown.len(),
+            covered: false,
+            frontier,
+        }
+    }
+
+    #[test]
+    fn a_cursor_carries_one_offset_per_partition() {
+        assert_eq!(
+            parse_cursor("0:412,3:998").unwrap(),
+            vec![(0, 412), (3, 998)]
+        );
+        assert_eq!(parse_cursor("2:7").unwrap(), vec![(2, 7)]);
+        // An exhausted read hands back nothing, and that must not be an error.
+        assert_eq!(parse_cursor("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_malformed_cursor_names_the_pair_it_choked_on() {
+        for raw in ["0", "0:", "a:1", "0:x", "0:1,nope"] {
+            let err = parse_cursor(raw).unwrap_err().to_string();
+            assert!(err.contains("partition:offset"), "{raw}: {err}");
+        }
+    }
+
+    /// #104: dividing the page across partitions made a page stop being a page —
+    /// 50 records asked for on a 12-partition topic came back as 4.
+    #[test]
+    fn an_unfiltered_page_is_not_divided_across_partitions() {
+        assert_eq!(page_budget(50, 12), 50);
+        assert_eq!(page_budget(500, 1), 500);
+        // The topic-wide cap still bites on a very wide topic.
+        assert_eq!(page_budget(500, 200), MAX_SCAN_CAP / 200);
+    }
+
+    /// A forward read asked for the *oldest* records; keeping the newest of the
+    /// merge would hand back the opposite, and let page two precede page one.
+    #[test]
+    fn the_merge_keeps_the_end_of_the_page_the_read_travels_towards() {
+        let rec = |ts: i64| json!({ "timestamp": ts, "partition": 0, "offset": ts });
+        let src = || vec![rec(10), rec(30), rec(20)];
+
+        let mut back = src();
+        merge_page(&mut back, Direction::Backward, 2);
+        assert_eq!(
+            back.iter()
+                .map(|r| r["timestamp"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![30, 20]
+        );
+
+        let mut fwd = src();
+        merge_page(&mut fwd, Direction::Forward, 2);
+        assert_eq!(
+            fwd.iter()
+                .map(|r| r["timestamp"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+    }
+
+    #[test]
+    fn a_page_resumes_past_the_last_record_it_showed() {
+        let scans = [scan(0, 0, 100, Some(40), &[10, 40])];
+        let page: Vec<Value> = scans[0].rendered.clone();
+        assert_eq!(
+            resume_points(&scans, &page, Direction::Forward),
+            vec![Some(41)]
+        );
+        assert_eq!(
+            resume_points(&scans, &page, Direction::Backward),
+            vec![Some(9)]
+        );
+    }
+
+    /// The distinction #104 turns on: a record scanned, matched, then dropped by
+    /// the merge's truncation was never shown, so the next page must return it.
+    #[test]
+    fn a_record_truncated_out_of_the_page_is_not_skipped() {
+        let scans = [scan(0, 0, 100, Some(40), &[10, 40])];
+        // The merge kept only offset 10; 40 never reached the caller.
+        let page = vec![json!({ "partition": 0, "offset": 10 })];
+        assert_eq!(
+            resume_points(&scans, &page, Direction::Forward),
+            vec![Some(11)]
+        );
+    }
+
+    /// ...whereas a partition that matched nothing resumes at its scan frontier,
+    /// so an unproductive filtered region is not walked a second time.
+    #[test]
+    fn a_partition_that_matched_nothing_resumes_past_what_it_scanned() {
+        let scans = [scan(3, 0, 100, Some(64), &[])];
+        assert_eq!(
+            resume_points(&scans, &[], Direction::Forward),
+            vec![Some(65)]
+        );
+        assert_eq!(
+            resume_points(&scans, &[], Direction::Backward),
+            vec![Some(63)]
+        );
+    }
+
+    #[test]
+    fn a_partition_with_nothing_left_reports_no_resume() {
+        // Forward, past the served end.
+        assert_eq!(
+            resume_points(
+                &[scan(0, 0, 6, Some(5), &[5])],
+                &[json!({ "partition": 0, "offset": 5 })],
+                Direction::Forward
+            ),
+            vec![None]
+        );
+        // Backward, past the truncation floor.
+        assert_eq!(
+            resume_points(
+                &[scan(0, 2, 6, Some(2), &[2])],
+                &[json!({ "partition": 0, "offset": 2 })],
+                Direction::Backward
+            ),
+            vec![None]
+        );
+        // Nothing scanned at all: an empty partition.
+        assert_eq!(
+            resume_points(&[scan(0, 0, 0, None, &[])], &[], Direction::Forward),
+            vec![None]
+        );
     }
 
     #[test]
