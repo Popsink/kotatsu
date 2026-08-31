@@ -31,7 +31,7 @@ the read path.
 1. **System State**:
    - Docker stack is up (`docker compose ps` shows all services `Up`).
    - Kotatsu UI/API reachable at `http://localhost:8080`.
-   - `GET /api/source` returns `status.connected: true` (may require at least one topic to exist).
+   - `GET /api/source/status` returns `connected: true` (may require at least one topic to exist).
    - MinIO reachable; `tansu` bucket exists.
    - Tansu broker reachable at `localhost:9092`, cluster `demo`.
 
@@ -55,7 +55,7 @@ the read path.
 |------|--------|------------|-----------------|
 | 1 | Create the topic | `kafka-topics.sh --create --topic orders --partitions 1 --replication-factor 1` | `Created topic orders.` |
 | 2 | Produce the 3 keyed records | see Test Data | Producer exits without error |
-| 3 | Verify source is connected | `GET /api/source` | `status.connected: true`, `cluster: "demo"` |
+| 3 | Verify source is connected | `GET /api/source/status` | `connected: true` (cluster id comes from `GET /api/source`) |
 | 4 | Verify cluster discovery | `GET /api/clusters` | Response `clusters` contains `"demo"` |
 | 5 | Verify topic listing | `GET /api/clusters/demo/topics` | `items` contains `orders` with `messages: 3`, `partitions: 1`, `storage_bytes > 0` |
 | 6 | Read messages via API | `GET /api/clusters/demo/topics/orders/messages` | `count: 3`, `records` array of 3, `watermark: {low:0, high:3}`, `exhausted: true` |
@@ -86,7 +86,7 @@ the read path.
 ### Secondary Verification Points
 
 4. **Source status**:
-   - `GET /api/source` reports the correct `bucket` (`tansu`), `cluster` (`demo`), `endpoint`, and `connected: true`.
+   - `GET /api/source` reports the correct `bucket` (`tansu`), `cluster` (`demo`) and `endpoint`; `GET /api/source/status` reports `connected: true`.
 
 5. **No Kafka on read path**:
    - Data is served even if the Tansu broker is stopped after production (optional check) — reads come from S3 only.
@@ -128,6 +128,7 @@ printf 'key-1:{"id":1,"item":"widget"}\nkey-2:{"id":2,"item":"gadget"}\nkey-3:{"
 
 # Steps 3-6 — verify via API
 curl -s http://localhost:8080/api/source
+curl -s http://localhost:8080/api/source/status
 curl -s http://localhost:8080/api/clusters
 curl -s http://localhost:8080/api/clusters/demo/topics
 curl -s http://localhost:8080/api/clusters/demo/topics/orders/messages
@@ -149,7 +150,7 @@ curl -s http://localhost:8080/api/clusters/demo/topics/orders/messages
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| Source shows `connected: false` on empty bucket | Medium | Low | Produce at least one record first; re-check `/api/source` |
+| Source shows `connected: false` on empty bucket | Medium | Low | Produce at least one record first; re-check `/api/source/status` |
 | Producer image pull slow/offline | Low | Medium | Pre-pull `apache/kafka:latest` before test |
 | Timestamps differ run-to-run | High | None | Do not assert exact timestamp; assert non-zero only |
 | S3 write lag after produce | Low | Medium | Retry the read after a few seconds |

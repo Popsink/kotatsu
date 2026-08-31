@@ -37,7 +37,8 @@ Verify the service exposes a working health probe (on both `/health` and
 |------|--------|------------|-----------------|
 | 1 | Health (root) | `GET /health` | HTTP 200; `{"service":"kotatsu","status":"ok"}` |
 | 2 | Health (api) | `GET /api/health` | HTTP 200; identical body |
-| 3 | Source metadata | `GET /api/source` | `configured: true`; `bucket`, `cluster`, `endpoint`, `region` present; `status.connected: true` |
+| 3 | Source metadata | `GET /api/source` | `configured: true`; `bucket`, `cluster`, `endpoint`, `region` present (no `status` — the probe moved to `/api/source/status`) |
+| 3b | Source reachable | `GET /api/source/status` | `connected: true` |
 | 4 | Cluster stats | `GET /api/clusters/demo` | `cluster: "demo"`; integer `topics`, `producers`, `transactions` (>= 0) |
 | 5 | Consistency check | compare step 4 `topics` with `GET /api/clusters/demo/topics` `total` | equal |
 | 6 | UI header/status | open the UI | Source/cluster indicators reflect the same figures |
@@ -47,7 +48,7 @@ Verify the service exposes a working health probe (on both `/health` and
 ### Primary Verification Points
 
 1. Both health paths return HTTP 200 and the same `{service, status}` body.
-2. `/api/source` reports the configured source and `connected: true`.
+2. `/api/source` reports the configured source, and `/api/source/status` reports `connected: true`.
 3. `/api/clusters/demo` returns numeric `topics`, `producers`, `transactions`.
 4. Cluster `topics` equals the topic-listing `total`.
 
@@ -71,6 +72,7 @@ Verify the service exposes a working health probe (on both `/health` and
 curl -s -w " [HTTP %{http_code}]" http://localhost:8080/health
 curl -s -w " [HTTP %{http_code}]" http://localhost:8080/api/health
 curl -s http://localhost:8080/api/source
+curl -s http://localhost:8080/api/source/status
 curl -s http://localhost:8080/api/clusters/demo
 ```
 

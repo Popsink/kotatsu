@@ -24,11 +24,18 @@ test.describe('API smoke', () => {
     expect(await res.json()).toMatchObject({ service: 'kotatsu', status: 'ok' });
   });
 
-  test('source is connected', async ({ request }) => {
+  test('source reports its configuration without probing the store', async ({ request }) => {
     const body = await (await request.get('/api/source')).json();
     expect(body.configured).toBe(true);
-    expect(body.status.connected).toBe(true);
     expect(body.cluster).toBe(CLUSTER);
+    // The live probe moved to /api/source/status (#109): this answer is pure
+    // config, so every page can ask for it without touching S3.
+    expect(body).not.toHaveProperty('status');
+  });
+
+  test('source status probes the store and reports it reachable', async ({ request }) => {
+    const body = await (await request.get('/api/source/status')).json();
+    expect(body).toMatchObject({ configured: true, connected: true });
   });
 
   test('cluster demo is discovered', async ({ request }) => {
@@ -157,8 +164,32 @@ test.describe('UI smoke', () => {
   test('overview shows source connected and cluster stats', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
-    await expect(page.getByText('connected')).toBeVisible();
+    await expect(page.getByText('connected', { exact: true })).toBeVisible();
     await expect(page.getByText('demo')).toBeVisible();
+  });
+
+  /**
+   * #109: /api/source used to be fetched per page and to probe S3 on every
+   * call, so a four-page session cost four object-store round-trips to render
+   * a dot only Overview shows. Config is now cached for the session and the
+   * probe is asked for only where it is displayed.
+   */
+  test('source config is fetched once, and only Overview probes the store', async ({ page }) => {
+    const calls: string[] = [];
+    page.on('request', (r) => {
+      const path = new URL(r.url()).pathname;
+      if (path === '/api/source' || path === '/api/source/status') calls.push(path);
+    });
+
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+    for (const nav of ['Topics', 'Consumer groups', 'Schemas']) {
+      await page.getByRole('link', { name: nav, exact: true }).click();
+      await expect(page.getByRole('heading', { name: nav })).toBeVisible();
+    }
+
+    expect(calls.filter((p) => p === '/api/source')).toHaveLength(1);
+    expect(calls.filter((p) => p === '/api/source/status')).toHaveLength(1);
   });
 
   test('topics page lists the seeded topics', async ({ page }) => {

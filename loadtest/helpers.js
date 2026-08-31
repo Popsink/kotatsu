@@ -25,8 +25,16 @@ export function health() {
   return http.get(`${BASE}/api/health`, { tags: { op: 'health', name: 'GET /api/health' } });
 }
 
+// Pure config since #109 — no object-store call, so this measures the HTTP path
+// only. `sourceStatus` is the one that costs an S3 round-trip.
 export function source() {
   return http.get(`${BASE}/api/source`, { tags: { op: 'source', name: 'GET /api/source' } });
+}
+
+export function sourceStatus() {
+  return http.get(`${BASE}/api/source/status`, {
+    tags: { op: 'source_status', name: 'GET /api/source/status' },
+  });
 }
 
 export function clusters() {

@@ -10,7 +10,7 @@
 
 import { check, sleep } from 'k6';
 import {
-  health, source, clusters, clusterStats, topicTree, listTopics, topicDetail,
+  health, source, sourceStatus, clusters, clusterStats, topicTree, listTopics, topicDetail,
   messages, groups, groupDetail, listSchemas, schemaDetail, itemsOf, CLUSTER,
 } from '../helpers.js';
 
@@ -41,6 +41,8 @@ export default function (data) {
   // 1. Service + source + cluster overview
   check(health(), { 'health: ok': (r) => r.status === 200 });
   check(source(), { 'source: 200': (r) => r.status === 200 });
+  // The only read whose cost is an S3 round-trip rather than a config lookup (#109).
+  check(sourceStatus(), { 'source status: 200': (r) => r.status === 200 });
   check(clusters(), { 'clusters: 200': (r) => r.status === 200 });
   check(clusterStats(), { 'cluster_stats: 200': (r) => r.status === 200 });
 

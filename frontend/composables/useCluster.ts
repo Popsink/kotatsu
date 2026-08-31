@@ -4,21 +4,25 @@ export interface SourceInfo {
   cluster?: string
   endpoint?: string
   region?: string
-  status?: { connected: boolean; error?: string }
 }
 
 const KEY = 'kotatsu:source'
 
 /**
- * The configured S3 source, behind one composable instead of a `useFetch`
- * inlined in every page.
+ * The configured S3 source — one fetch for the whole session.
  *
- * The fetch is keyed so the pages share one cache entry rather than each
- * defining its own. Whether that entry survives a client-side navigation —
- * today it does not, so every navigation re-probes the store — is #109.
+ * Every page needs the cluster id to build its API URLs, and Nuxt refetches on
+ * client-side navigation, so a normal browsing session asked for it once per
+ * page (#109). Serving it from the payload cache makes it one request full
+ * stop. `/api/source` is pure configuration, fixed for the lifetime of the
+ * process, so a cached answer cannot go stale — the connectivity that *can*
+ * change lives at `/api/source/status`, which the Overview page asks for.
  */
 export async function useCluster() {
-  const asyncData = useFetch<SourceInfo>('/api/source', { key: KEY })
+  const asyncData = useFetch<SourceInfo>('/api/source', {
+    key: KEY,
+    getCachedData: (key, nuxtApp) => nuxtApp.payload.data[key] ?? nuxtApp.static.data[key] ?? undefined,
+  })
   await asyncData
 
   const { data: source } = asyncData
@@ -26,6 +30,5 @@ export async function useCluster() {
     source,
     cluster: computed(() => source.value?.cluster),
     configured: computed(() => source.value?.configured === true),
-    connected: computed(() => source.value?.status?.connected === true),
   }
 }

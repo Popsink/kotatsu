@@ -14,7 +14,8 @@ use crate::{api, config::Config, state::AppState};
 ///
 /// - `GET /health` — liveness probe.
 /// - `GET /api/health` — liveness probe (API namespace).
-/// - `GET /api/source` — configured source + connectivity status.
+/// - `GET /api/source` — configured source (no I/O).
+/// - `GET /api/source/status` — live connectivity probe against the store.
 /// - `GET /api/clusters/{cluster}/topics/{topic}/messages` — event browser.
 /// - everything else — frontend static assets in production, when
 ///   `KOTATSU_STATIC_DIR` is set (SPA fallback to `index.html`).
@@ -22,6 +23,7 @@ pub fn router(config: &Config, state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health))
         .route("/source", get(source))
+        .route("/source/status", get(source_status))
         .route("/clusters", get(api::clusters))
         .route("/clusters/{cluster}", get(api::cluster))
         .route("/clusters/{cluster}/topic-tree", get(api::topic_tree))
@@ -64,16 +66,15 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "kotatsu" }))
 }
 
-/// Reports the configured source and whether it is currently reachable.
-/// The connectivity check is on-demand (this request), never on a timer.
+/// Reports the configured source: bucket, cluster, endpoint, region.
+///
+/// Pure configuration — no object-store call. Every page needs the cluster id
+/// to build its URLs, so this used to carry a live S3 probe that every
+/// navigation paid for and only the Overview screen displayed (#109). The probe
+/// moved to `/api/source/status`.
 async fn source(State(state): State<AppState>) -> impl IntoResponse {
-    let (Some(source), Some(info)) = (&state.source, &state.source_info) else {
+    let Some(info) = &state.source_info else {
         return Json(json!({ "configured": false }));
-    };
-
-    let status = match source.check().await {
-        Ok(()) => json!({ "connected": true }),
-        Err(err) => json!({ "connected": false, "error": err.to_string() }),
     };
 
     Json(json!({
@@ -82,6 +83,25 @@ async fn source(State(state): State<AppState>) -> impl IntoResponse {
         "cluster": info.cluster,
         "endpoint": info.endpoint,
         "region": info.region,
-        "status": status,
     }))
+}
+
+/// Probes the object store and reports whether it is reachable.
+///
+/// The one endpoint that costs an S3 round-trip to answer, so it is asked for
+/// explicitly — on the Overview screen and on its re-check button — never as a
+/// side effect of rendering another page, and never on a timer.
+async fn source_status(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(source) = &state.source else {
+        return Json(json!({ "configured": false, "connected": false }));
+    };
+
+    match source.check().await {
+        Ok(()) => Json(json!({ "configured": true, "connected": true })),
+        Err(err) => Json(json!({
+            "configured": true,
+            "connected": false,
+            "error": err.to_string(),
+        })),
+    }
 }
