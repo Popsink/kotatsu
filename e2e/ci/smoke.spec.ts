@@ -290,7 +290,13 @@ test.describe('UI smoke', () => {
     await page.getByRole('button', { name: 'Search' }).click();
 
     // Provenance: the column only appears when a result set can span partitions.
-    await expect(page.getByRole('columnheader', { name: 'partition' })).toBeVisible();
+    // Scoped to the results table — the topic's own partition table and the scan
+    // summary carry that header too, and the first of them is already on the page
+    // before the search lands, so an unscoped locator asserts the wrong table.
+    const results = page.locator('table.msgs');
+    await expect(results.getByRole('columnheader', { name: 'partition' })).toBeVisible();
+    // Populated, not merely present: the cell after the caret, on the first row.
+    await expect(results.locator('tbody tr.row').first().locator('td').nth(1)).toHaveText(/^[0-2]$/);
     await expect(page.getByText('3 partitions, newest first')).toBeVisible();
     await expect(page.getByText('k-12')).toBeVisible();
   });
