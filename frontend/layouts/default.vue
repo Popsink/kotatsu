@@ -1,3 +1,19 @@
+<script setup lang="ts">
+const palette = ref<{ show: () => void } | null>(null)
+
+/**
+ * The chord label, resolved after mount.
+ *
+ * `navigator` does not exist while rendering on the server, and guessing wrong
+ * would swap the label on hydration — so it starts generic and narrows once the
+ * platform is known.
+ */
+const chord = ref('Ctrl K')
+onMounted(() => {
+  if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) chord.value = '\u2318 K'
+})
+</script>
+
 <template>
   <div class="app">
     <aside class="sidebar">
@@ -11,10 +27,18 @@
         <NuxtLink to="/groups">Consumer groups</NuxtLink>
         <NuxtLink to="/schemas">Schemas</NuxtLink>
       </nav>
+
+      <!-- The palette answers "where is topic X?" from any page. Discoverable as
+           a button too: a keyboard-only affordance is one nobody finds (#105). -->
+      <button type="button" class="jump" @click="palette?.show()">
+        <span>Quick jump</span>
+        <kbd>{{ chord }}</kbd>
+      </button>
     </aside>
     <main class="content">
       <slot />
     </main>
+    <QuickJump ref="palette" />
   </div>
 </template>
 
@@ -50,5 +74,13 @@ nav a, nav span { color: var(--fg); text-decoration: none; padding: 0.45rem 0.6r
 nav a:hover { background: #0e2a40; }
 nav a.router-link-active { background: var(--accent-deep); color: var(--accent); }
 nav .muted { color: var(--muted); cursor: not-allowed; }
+.jump {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%;
+  margin-top: 1rem; padding: 0.45rem 0.6rem;
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--muted); font: inherit; font-size: 0.82rem; cursor: pointer;
+}
+.jump:hover, .jump:focus-visible { border-color: var(--accent); color: var(--accent); }
+.jump kbd { margin-left: auto; border: 1px solid var(--border); border-radius: 4px; padding: 0 0.25rem; font-family: inherit; font-size: 0.75rem; }
 .content { padding: 2rem; }
 </style>
