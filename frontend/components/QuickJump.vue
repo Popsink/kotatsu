@@ -124,7 +124,8 @@ watch(
   },
 )
 
-defineExpose({ show, hide })
+// The sidebar button opens it; `Esc` and the chord are the only ways to close.
+defineExpose({ show })
 </script>
 
 <template>

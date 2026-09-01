@@ -74,7 +74,14 @@ watch(flat, first)
 const level = computed(() => (flat.value ? 'flat' : (data.value?.level ?? 'group')))
 const nodes = computed(() => (level.value === 'group' ? (data.value?.items as TreeNode[]) : []) ?? [])
 const topics = computed(() => (level.value === 'topic' ? (data.value?.items as TopicSummary[]) : []) ?? [])
-const found = computed(() => (level.value === 'flat' ? (data.value?.items as TopicSummary[]) : []) ?? [])
+// Flat rows carry their connector path, split once per record rather than three
+// times per render as the template would otherwise ask for.
+const found = computed(() =>
+  ((level.value === 'flat' ? (data.value?.items as TopicSummary[]) : []) ?? []).map((t) => ({
+    ...t,
+    ...splitTopicPath(t.name),
+  })),
+)
 const count = computed(() => nodes.value.length + topics.value.length + found.value.length)
 const columns = computed(() =>
   level.value === 'group'
@@ -182,7 +189,7 @@ function suffix(name: string) {
         <tr v-for="t in found" :key="t.name">
           <td>
             <NuxtLink :to="`/topics/${encodeURIComponent(t.name)}`" class="link">
-              <span v-if="splitTopicPath(t.name).path" class="path">{{ splitTopicPath(t.name).path }} / </span>{{ splitTopicPath(t.name).leaf }}
+              <span v-if="t.path" class="path">{{ t.path }} / </span>{{ t.leaf }}
             </NuxtLink>
           </td>
           <td class="mono">{{ t.partitions }}</td>

@@ -583,11 +583,15 @@ test.describe('UI smoke', () => {
     await expect(page.getByRole('link', { name: 'acme.prod.db2 / dbz_config' })).toBeVisible();
 
     await page.getByRole('button', { name: 'back to the tree' }).click();
-    await expect(page.getByText('Organizations')).toBeVisible();
+    await expect(page.locator('.crumbs')).toContainText('Organizations');
   });
 
   test('the quick-jump palette reaches a topic from another page', async ({ page }) => {
     await page.goto('/groups');
+    // The chord is served by a `document` listener the palette registers on
+    // mount, so a keypress before the SPA has hydrated is simply lost — and
+    // unlike a click there is no element for Playwright to wait on.
+    await page.waitForLoadState('networkidle');
     await page.keyboard.press('ControlOrMeta+k');
 
     const box = page.getByRole('combobox', { name: /Search topics/ });
@@ -600,6 +604,7 @@ test.describe('UI smoke', () => {
 
   test('the palette is keyboard-only operable, and Escape leaves the page alone', async ({ page }) => {
     await page.goto('/schemas');
+    await page.waitForLoadState('networkidle'); // as above: the chord needs the palette mounted
     await page.keyboard.press('ControlOrMeta+k');
     await page.getByRole('combobox', { name: /Search topics/ }).fill('avro-orders');
 

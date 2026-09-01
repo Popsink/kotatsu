@@ -30,7 +30,6 @@ const KINDS: Record<JumpKind, { label: string; detail: string; index: string }> 
   subject: { label: 'Schemas', detail: '/schemas/', index: '/schemas' },
 }
 
-/** The heading a kind's section carries. */
 export function kindLabel(kind: JumpKind): string {
   return KINDS[kind].label
 }
@@ -54,12 +53,13 @@ export function seeAllTo(kind: JumpKind, term: string): string {
   return kind === 'topic' ? `${base}?all=1&${q}` : `${base}?${q}`
 }
 
-export const RECENT_MAX = 5
+/** How many selections the palette offers before anything is typed. */
+const RECENT_MAX = 5
 
 /** `item` first, then the rest of `list` without it, capped. */
-export function withRecent(list: JumpItem[], item: JumpItem, max = RECENT_MAX): JumpItem[] {
+export function withRecent(list: JumpItem[], item: JumpItem): JumpItem[] {
   const rest = list.filter((i) => !(i.kind === item.kind && i.name === item.name))
-  return [item, ...rest].slice(0, max)
+  return [item, ...rest].slice(0, RECENT_MAX)
 }
 
 /**
