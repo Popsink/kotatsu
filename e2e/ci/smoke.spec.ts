@@ -560,4 +560,57 @@ test.describe('UI smoke', () => {
     await expect(page.getByRole('heading', { name: 'Group qa-group' })).toBeVisible();
     await expect(page.getByText('orders').first()).toBeVisible();
   });
+
+  /**
+   * The tree matches only the level you stand on, so at the root a topic name is
+   * compared against org names and finds nothing. That was the dead end #105
+   * names: `dbz_config` is unreachable unless you already know it lives under
+   * `acme.prod.db2`.
+   */
+  test('a topic is findable from the root without knowing its org', async ({ page }) => {
+    await page.goto('/topics');
+    await page.getByRole('textbox', { name: 'Search organizations' }).fill('dbz_config');
+    await expect(page.getByText('No organizations match.')).toBeVisible();
+
+    await page.getByRole('button', { name: /Search all topics instead/ }).click();
+    await expect(page).toHaveURL(/all=1/);
+    // The path stays legible now that no breadcrumb stands above the row.
+    await expect(page.getByRole('link', { name: 'acme.prod.db2 / dbz_config' })).toBeVisible();
+  });
+
+  test('flat search survives a reload, and the tree is one click back', async ({ page }) => {
+    await page.goto('/topics?all=1&q=dbz_config');
+    await expect(page.getByRole('link', { name: 'acme.prod.db2 / dbz_config' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'back to the tree' }).click();
+    await expect(page.getByText('Organizations')).toBeVisible();
+  });
+
+  test('the quick-jump palette reaches a topic from another page', async ({ page }) => {
+    await page.goto('/groups');
+    await page.keyboard.press('ControlOrMeta+k');
+
+    const box = page.getByRole('combobox', { name: /Search topics/ });
+    await expect(box).toBeFocused();
+    await box.fill('dbz_config');
+    await page.getByRole('option', { name: /dbz_config/ }).first().click();
+
+    await expect(page).toHaveURL(/\/topics\/acme\.prod\.db2\.dbz_config/);
+  });
+
+  test('the palette is keyboard-only operable, and Escape leaves the page alone', async ({ page }) => {
+    await page.goto('/schemas');
+    await page.keyboard.press('ControlOrMeta+k');
+    await page.getByRole('combobox', { name: /Search topics/ }).fill('avro-orders');
+
+    // Enter opens whatever the arrow keys left active — no pointer involved.
+    await expect(page.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/topics\/avro-orders/);
+
+    await page.keyboard.press('ControlOrMeta+k');
+    await expect(page.getByRole('dialog', { name: 'Quick jump' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Quick jump' })).toBeHidden();
+  });
 });
