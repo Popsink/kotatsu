@@ -8,6 +8,22 @@ export interface SourceInfo {
 
 const KEY = 'kotatsu:source'
 
+/** The keyed, payload-cached fetch both accessors below share. */
+function sourceFetch() {
+  return useFetch<SourceInfo>('/api/source', {
+    key: KEY,
+    getCachedData: (key, nuxtApp) => nuxtApp.payload.data[key] ?? nuxtApp.static.data[key] ?? undefined,
+  })
+}
+
+function view(source: ReturnType<typeof sourceFetch>['data']) {
+  return {
+    source,
+    cluster: computed(() => source.value?.cluster),
+    configured: computed(() => source.value?.configured === true),
+  }
+}
+
 /**
  * The configured S3 source — one fetch for the whole session.
  *
@@ -19,16 +35,20 @@ const KEY = 'kotatsu:source'
  * change lives at `/api/source/status`, which the Overview page asks for.
  */
 export async function useCluster() {
-  const asyncData = useFetch<SourceInfo>('/api/source', {
-    key: KEY,
-    getCachedData: (key, nuxtApp) => nuxtApp.payload.data[key] ?? nuxtApp.static.data[key] ?? undefined,
-  })
+  const asyncData = sourceFetch()
   await asyncData
+  return view(asyncData.data)
+}
 
-  const { data: source } = asyncData
-  return {
-    source,
-    cluster: computed(() => source.value?.cluster),
-    configured: computed(() => source.value?.configured === true),
-  }
+/**
+ * The same source, not awaited.
+ *
+ * The quick-jump palette renders from the layout, outside the Suspense boundary
+ * that resolves a page's top-level `await`, so blocking there would gate the
+ * whole app on this fetch. It does not need to block: `cluster` is read when the
+ * user has typed something, long after the first paint. Same key as
+ * `useCluster`, so this adds no request (#105).
+ */
+export function useClusterLazy() {
+  return view(sourceFetch().data)
 }
