@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmtBytes, fmtTime } from '~/utils/format'
+import { fmtBytes, fmtTime, splitTopicPath } from '~/utils/format'
 
 describe('fmtBytes', () => {
   it('shows nothing stored as 0 B', () => {
@@ -25,5 +25,27 @@ describe('fmtTime', () => {
   it('renders unix ms as a UTC timestamp without the T/Z noise', () => {
     expect(fmtTime(0)).toBe('1970-01-01 00:00:00.000')
     expect(fmtTime(1700000000123)).toBe('2023-11-14 22:13:20.123')
+  })
+})
+
+describe('splitTopicPath', () => {
+  it('splits a connector-qualified name into path and leaf', () => {
+    expect(splitTopicPath('acme.prod.db2.dbz_config')).toEqual({
+      path: 'acme.prod.db2',
+      leaf: 'dbz_config',
+    })
+  })
+
+  it('keeps a dotted leaf whole below the connector', () => {
+    expect(splitTopicPath('acme.prod.db2.public.orders')).toEqual({
+      path: 'acme.prod.db2',
+      leaf: 'public.orders',
+    })
+  })
+
+  it('invents no path for a name that has none', () => {
+    expect(splitTopicPath('orders')).toEqual({ path: '', leaf: 'orders' })
+    expect(splitTopicPath('acme.prod')).toEqual({ path: '', leaf: 'acme.prod' })
+    expect(splitTopicPath('acme.prod.db2')).toEqual({ path: '', leaf: 'acme.prod.db2' })
   })
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { fmtBytes } from '~/utils/format'
+import { fmtBytes, splitTopicPath } from '~/utils/format'
 
 interface TreeNode {
   segment: string
@@ -26,35 +26,71 @@ const prefix = computed(() => (route.query.p as string) || '')
 const parts = computed(() => (prefix.value ? prefix.value.split('.') : []))
 const depth = computed(() => parts.value.length)
 
+/**
+ * Flat mode: search every topic name in the cluster instead of one tree level.
+ *
+ * The tree only matches the level you are standing on, so at the root a topic
+ * name is compared against org names and finds nothing — "where is `orders`?"
+ * was unanswerable without already knowing its org and environment (#105). The
+ * hierarchy stays the default; this is a mode reached from a search, and it is
+ * in the URL so it can be shared and walked back out of.
+ *
+ * `?p=` is deliberately left alone while flat, so leaving flat mode returns to
+ * the branch the user was standing on.
+ */
+const flat = computed(() => route.query.all === '1')
+
 const LEVELS = ['Organizations', 'Environments', 'Connectors']
 const levelLabel = computed(() => LEVELS[depth.value] ?? 'Topics')
 const searchLabel = computed(() =>
-  depth.value >= 3 ? 'topics' : (LEVELS[depth.value] ?? 'topics').toLowerCase(),
+  flat.value ? 'all topics' : depth.value >= 3 ? 'topics' : (LEVELS[depth.value] ?? 'topics').toLowerCase(),
 )
 
-const { search, q, data, pending, error, refresh, pager, prev, next, reset } = await usePagedList<{
-  level: 'group' | 'topic'
+const { search, q, data, pending, error, refresh, pager, prev, next, first, reset } = await usePagedList<{
+  level?: 'group' | 'topic'
   items: TreeNode[] | TopicSummary[]
   total: number
-}>(({ q, limit, offset }) =>
-  cluster.value
-    ? `/api/clusters/${cluster.value}/topic-tree?prefix=${encodeURIComponent(prefix.value)}` +
-      `&search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`
-    : '',
+}>(
+  ({ q, limit, offset }) => {
+    if (!cluster.value) return ''
+    const paging = `&limit=${limit}&offset=${offset}`
+    const term = `search=${encodeURIComponent(q)}`
+    // `list_topics` already matches the full name across the cluster; it was
+    // simply unreachable from the UI before this mode existed.
+    return flat.value
+      ? `/api/clusters/${cluster.value}/topics?${term}${paging}`
+      : `/api/clusters/${cluster.value}/topic-tree?prefix=${encodeURIComponent(prefix.value)}&${term}${paging}`
+  },
+  // The palette's "see all" link lands here with its term already typed.
+  (route.query.q as string) || '',
 )
 
 // Moving to a different level resets the search box and paging.
 watch(prefix, reset)
+// Switching mode keeps the term — carrying it over is the whole point — but the
+// offset from the old result set means nothing against the new one.
+watch(flat, first)
 
-const level = computed(() => data.value?.level ?? 'group')
+const level = computed(() => (flat.value ? 'flat' : (data.value?.level ?? 'group')))
 const nodes = computed(() => (level.value === 'group' ? (data.value?.items as TreeNode[]) : []) ?? [])
 const topics = computed(() => (level.value === 'topic' ? (data.value?.items as TopicSummary[]) : []) ?? [])
-const count = computed(() => nodes.value.length + topics.value.length)
+const found = computed(() => (level.value === 'flat' ? (data.value?.items as TopicSummary[]) : []) ?? [])
+const count = computed(() => nodes.value.length + topics.value.length + found.value.length)
 const columns = computed(() =>
-  level.value === 'topic'
-    ? ['topic', 'partitions', 'messages', 'size']
-    : [levelLabel.value.replace(/s$/, ''), 'topics', ''],
+  level.value === 'group'
+    ? [levelLabel.value.replace(/s$/, ''), 'topics', '']
+    : ['topic', 'partitions', 'messages', 'size'],
 )
+
+/** Enters or leaves flat mode, keeping the term and the branch behind it. */
+function setFlat(on: boolean) {
+  const query = { ...route.query }
+  if (on) query.all = '1'
+  else delete query.all
+  if (search.value) query.q = search.value
+  else delete query.q
+  router.push({ path: '/topics', query })
+}
 
 function crumbTo(n: number) {
   const p = parts.value.slice(0, n).join('.')
@@ -82,13 +118,20 @@ function suffix(name: string) {
       <!-- Breadcrumb of the chosen org / env / connector. A div, not a <nav>,
            so the layout's global `nav` flex rules don't leak in. -->
       <div class="crumbs">
-        <button class="crumb" :disabled="depth === 0" @click="crumbTo(0)">root</button>
-        <template v-for="(seg, i) in parts" :key="i">
-          <span class="sep">›</span>
-          <button class="crumb" :disabled="i === parts.length - 1" @click="crumbTo(i + 1)">{{ seg }}</button>
+        <template v-if="flat">
+          <span class="here">Every topic in the cluster</span>
+          <span class="sep">·</span>
+          <button class="crumb" @click="setFlat(false)">back to the tree</button>
         </template>
-        <span class="sep">·</span>
-        <span class="here">{{ levelLabel }}</span>
+        <template v-else>
+          <button class="crumb" :disabled="depth === 0" @click="crumbTo(0)">root</button>
+          <template v-for="(seg, i) in parts" :key="i">
+            <span class="sep">›</span>
+            <button class="crumb" :disabled="i === parts.length - 1" @click="crumbTo(i + 1)">{{ seg }}</button>
+          </template>
+          <span class="sep">·</span>
+          <span class="here">{{ levelLabel }}</span>
+        </template>
       </div>
 
       <DataToolbar
@@ -100,6 +143,13 @@ function suffix(name: string) {
         @prev="prev"
         @next="next"
       />
+
+      <!-- The way out of the dead end: a term at a group level is matched against
+           org or environment names, which is almost never what was meant. -->
+      <p v-if="!flat && q && depth < 3" class="offer">
+        Matching {{ searchLabel }} at this level only.
+        <button type="button" class="linkish" @click="setFlat(true)">Search all topics instead ›</button>
+      </p>
 
       <DataTable
         :columns="columns"
@@ -126,6 +176,19 @@ function suffix(name: string) {
           <td class="mono">{{ t.messages }}</td>
           <td class="mono muted">{{ fmtBytes(t.storage_bytes) }}</td>
         </tr>
+
+        <!-- Flat search: no breadcrumb stands above these rows, so each carries
+             its own connector path. -->
+        <tr v-for="t in found" :key="t.name">
+          <td>
+            <NuxtLink :to="`/topics/${encodeURIComponent(t.name)}`" class="link">
+              <span v-if="splitTopicPath(t.name).path" class="path">{{ splitTopicPath(t.name).path }} / </span>{{ splitTopicPath(t.name).leaf }}
+            </NuxtLink>
+          </td>
+          <td class="mono">{{ t.partitions }}</td>
+          <td class="mono">{{ t.messages }}</td>
+          <td class="mono muted">{{ fmtBytes(t.storage_bytes) }}</td>
+        </tr>
       </DataTable>
     </template>
   </section>
@@ -139,4 +202,8 @@ function suffix(name: string) {
 .crumb:not(:disabled):hover { text-decoration: underline; }
 .sep { color: var(--muted); }
 .here { color: var(--muted); font-size: 0.85rem; }
+.offer { max-width: 560px; margin: 0.25rem 0 0; color: var(--muted); font-size: 0.8rem; }
+.linkish { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.linkish:hover { text-decoration: underline; }
+.path { color: var(--muted); }
 </style>
