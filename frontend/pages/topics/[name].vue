@@ -515,12 +515,15 @@ async function copyMsg(r: Record) {
             <td :colspan="allPartitions ? 5 : 4">
               <JsonTree :field="r.key" label="key" :raw="rawJson">
                 <template #links>
-                  <NuxtLink v-if="r.key?.schemaId != null && keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}`" class="schemalink">↗ schema</NuxtLink>
+                  <!-- Carries the record's schema id so the subject page can land on
+                       the version this record was written with, diffed against the one
+                       in force now (#112). -->
+                  <NuxtLink v-if="r.key?.schemaId != null && keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}?id=${r.key.schemaId}`" class="schemalink">↗ schema</NuxtLink>
                 </template>
               </JsonTree>
               <JsonTree :field="r.value" label="value" :raw="rawJson">
                 <template #links>
-                  <NuxtLink v-if="r.value?.schemaId != null && valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}`" class="schemalink">↗ schema</NuxtLink>
+                  <NuxtLink v-if="r.value?.schemaId != null && valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}?id=${r.value.schemaId}`" class="schemalink">↗ schema</NuxtLink>
                 </template>
               </JsonTree>
 
