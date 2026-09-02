@@ -644,10 +644,10 @@ test.describe('UI smoke', () => {
     const sort = page.getByRole('button', { name: /^lag/ });
     await expect(sort).toHaveAttribute('aria-pressed', 'true');
 
-    const row = page.getByRole('row').filter({ hasText: 'qa-group' });
-    await expect(row.getByRole('link', { name: 'qa-group' })).toBeVisible();
-    // Caught up on one topic — the figures the API just reported, rendered.
-    await expect(row.getByText('0', { exact: true })).toBeVisible();
+    // Columns: group · state · members · topics · lag.
+    const cells = page.getByRole('row').filter({ hasText: 'qa-group' }).locator('td');
+    await expect(cells.nth(3)).toHaveText('1'); // one topic committed on
+    await expect(cells.nth(4)).toHaveText('0'); // caught up — a real 0, not `—`
 
     // Name order stays reachable for someone looking up a group they know.
     await sort.click();

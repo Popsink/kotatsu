@@ -865,6 +865,25 @@ mod tests {
         assert_eq!(second.items[0].name, "bbb");
     }
 
+    /// The third mode, and the issue's "visible page only" reading: the figures
+    /// without the full-set read that ranking needs.
+    #[tokio::test]
+    async fn page_mode_keeps_name_order_and_reads_only_the_page() {
+        let (store, src) = source();
+        seed_commit(&store, &src, "aaa", "orders", 0, 99, 100).await; // 1
+        seed_commit(&store, &src, "zzz", "orders", 1, 0, 100).await; // 100
+
+        let page = src
+            .list_groups(&Page::new(None, 1, 0), LagMode::Page)
+            .await
+            .unwrap();
+
+        // Name order, so the worst group does *not* come first here.
+        assert_eq!(page.items[0].name, "aaa");
+        assert_eq!(page.items[0].lag.as_ref().unwrap().total, Some(1));
+        assert_eq!(page.total, 2);
+    }
+
     /// A group deleted inside the catalog's TTL window is still in the name
     /// index. Reading every match to rank them makes that a near-certainty on a
     /// busy cluster, so it must cost that group's row and not the whole page.

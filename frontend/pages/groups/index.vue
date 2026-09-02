@@ -34,9 +34,19 @@ const { search, q, data, pending, error, refresh, pager, prev, next, first } = a
   (route.query.q as string) || '',
 )
 
-// Reordering the whole result set keeps the search but not the offset: page 3
-// of the lag ranking is not page 3 of the alphabet.
-watch(sort, first)
+/**
+ * Flips the ordering and goes back to page one.
+ *
+ * Both in one handler, on purpose: `usePagedList` creates its fetch watcher
+ * before this component can add one, so resetting the offset in a `watch(sort)`
+ * would fire a request at the stale offset first and the real one second.
+ * Page 3 of the lag ranking is not page 3 of the alphabet, and under `sort=lag`
+ * that wasted request reads every group in the cluster.
+ */
+function toggleSort() {
+  sort.value = sort.value === 'lag' ? 'name' : 'lag'
+  first()
+}
 
 const items = computed(() => data.value?.items ?? [])
 
@@ -77,7 +87,7 @@ function stateClass(s: string) {
             type="button"
             class="sort"
             :aria-pressed="sort === 'lag'"
-            @click="sort = sort === 'lag' ? 'name' : 'lag'"
+            @click="toggleSort"
           >
             lag<span v-if="sort === 'lag'" aria-hidden="true"> ▼</span>
           </button>
