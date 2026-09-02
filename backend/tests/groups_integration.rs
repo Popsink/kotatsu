@@ -14,7 +14,11 @@
 use bytes::Bytes;
 use object_store::{ObjectStore, PutPayload};
 
-use kotatsu::{config::S3Config, pagination::Page, storage::StorageSource};
+use kotatsu::{
+    config::S3Config,
+    pagination::Page,
+    storage::{LagMode, StorageSource},
+};
 
 const GROUP: &str = "kotatsu-it-group";
 const TOPIC: &str = "kotatsu-it-topic";
@@ -68,9 +72,10 @@ async fn seeded_group_lists_with_offsets_and_lag() {
     )
     .await;
 
-    // list_groups includes our group, derived state Empty.
+    // list_groups includes our group, derived state Empty. No lag asked for, so
+    // none reported — the listing that existed before #107, at its old cost.
     let groups = source
-        .list_groups(&Page::new(None, 200, 0))
+        .list_groups(&Page::new(None, 200, 0), LagMode::Off)
         .await
         .expect("list groups")
         .items;
@@ -80,6 +85,26 @@ async fn seeded_group_lists_with_offsets_and_lag() {
         .expect("seeded group present");
     assert_eq!(summary.state, "Empty");
     assert_eq!(summary.members, 0);
+    assert!(summary.lag.is_none());
+
+    // Asked for, the list's figure is the same lag the detail page computes —
+    // against a real store, where the high watermark comes from the segments and
+    // not from a hand-written fixture (#107).
+    let ranked = source
+        .list_groups(&Page::new(Some(GROUP.into()), 200, 0), LagMode::RankAll)
+        .await
+        .expect("list groups with lag")
+        .items;
+    let lag = ranked
+        .iter()
+        .find(|g| g.name == GROUP)
+        .expect("seeded group present")
+        .lag
+        .as_ref()
+        .expect("lag requested");
+    assert_eq!(lag.total, Some(6));
+    assert_eq!(lag.topics, 1);
+    assert_eq!(lag.max_partition, Some(6));
 
     // group_detail computes lag = high - committed = 10 - 4 = 6.
     let detail = source.group_detail(GROUP).await.expect("group detail");

@@ -14,7 +14,7 @@ use crate::{
     query::{self, MessageParams, QueryError},
     schema::{SchemaError, SchemaRegistry},
     state::AppState,
-    storage::{StorageError, StorageSource},
+    storage::{LagMode, StorageError, StorageSource},
 };
 
 /// Query params for paginated list endpoints (`?search=&limit=&offset=`).
@@ -286,14 +286,39 @@ fn default_limit() -> usize {
     50
 }
 
-/// `GET /api/clusters/{cluster}/groups?search=&limit=&offset=`
+/// Query params for the consumer-group listing: the usual search/paging, plus
+/// the opt-in lag figures and what to order by (#107).
+#[derive(Deserialize)]
+pub struct GroupsQuery {
+    search: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+    /// Compute lag. Off by default: it reads the high watermark behind every
+    /// committed offset, so the plain listing has to stay cheap for callers that
+    /// only want names and states.
+    #[serde(default)]
+    lag: bool,
+    /// `lag` (default when lag is on) or `name`.
+    sort: Option<String>,
+}
+
+impl From<&GroupsQuery> for Page {
+    fn from(q: &GroupsQuery) -> Self {
+        Page::new(q.search.clone(), q.limit, q.offset)
+    }
+}
+
+/// `GET /api/clusters/{cluster}/groups?search=&limit=&offset=&lag=&sort=`
 pub async fn groups(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
-    Query(query): Query<ListQuery>,
+    Query(query): Query<GroupsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
-    let paged = source.list_groups(&query.into()).await?;
+    let mode = LagMode::from_request(query.lag, query.sort.as_deref());
+    let paged = source.list_groups(&(&query).into(), mode).await?;
     Ok(Json(json!({
         "cluster": cluster,
         "items": paged.items,
