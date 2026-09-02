@@ -21,6 +21,9 @@ set -euo pipefail
 NETWORK="${NETWORK:-kotatsu_default}"
 BOOTSTRAP="${BOOTSTRAP:-tansu:9092}"
 KORA_URL="${KORA_URL:-http://kora:8080}"
+# Kora as reached from the host, for the registrations below (the variable above
+# is the URL a container on NETWORK uses).
+KORA_HTTP="${KORA_HTTP:-http://localhost:8085}"
 KAFKA_IMG="apache/kafka:latest"
 AVRO_IMG="confluentinc/cp-schema-registry:7.6.0"
 
@@ -147,5 +150,20 @@ docker run --rm --network "$NETWORK" -v "$DR_DIR:/dr" "$KAFKA_IMG" \
 echo "→ creating consumer group qa-group (consume orders from beginning)…"
 kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server "$BOOTSTRAP" \
   --topic orders --from-beginning --group qa-group --max-messages 3 --timeout-ms 10000 || true
+
+# A subject with two versions, so the version diff (#112) has something to show.
+# Registered straight against the registry: schemas exist independently of any
+# topic, and producing records here would only add noise to the message cases.
+echo "→ registering diff-demo-value v1 and v2 (added field, widened type)…"
+register_schema() {
+  curl -fsS -X POST "$KORA_HTTP/subjects/diff-demo-value/versions" \
+    -H 'content-type: application/vnd.schemaregistry.v1+json' \
+    -d "{\"schemaType\":\"AVRO\",\"schema\":$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" >/dev/null
+}
+# v1 → v2 carries one of each labelled change: `item` widens to a union, `note`
+# is added with a default, and the keys are deliberately written in a different
+# order so the diff has to canonicalise before comparing.
+register_schema '{"type":"record","name":"Demo","fields":[{"name":"id","type":"int"},{"name":"item","type":"string"}]}'
+register_schema '{"name":"Demo","type":"record","fields":[{"name":"id","type":"int"},{"name":"item","type":["null","string"],"default":null},{"name":"note","type":"string","default":""}]}'
 
 echo "✓ seed complete"
