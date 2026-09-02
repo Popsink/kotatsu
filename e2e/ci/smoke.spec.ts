@@ -168,10 +168,18 @@ test.describe('API smoke', () => {
       `/api/clusters/${CLUSTER}/groups?lag=true`,
     )).json();
     const group = body.items.find((g: { name: string }) => g.name === 'qa-group');
+    expect(group).toBeTruthy();
     // The seed consumes `orders` to the end, so the group is caught up: a real
     // `0`, which must not be confused with the `—` of a group that never
     // committed.
     expect(group.lag).toMatchObject({ total: 0, topics: 1, max_partition: 0 });
+
+    // The listing and the detail page compute lag by different routes; they must
+    // not be allowed to drift apart.
+    const detail = await (await request.get(
+      `/api/clusters/${CLUSTER}/groups/qa-group`,
+    )).json();
+    expect(group.lag.total).toBe(detail.total_lag);
   });
 
   /** `spread` is the seed's only topic whose records really span partitions (#102). */

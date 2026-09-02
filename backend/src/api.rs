@@ -288,6 +288,10 @@ fn default_limit() -> usize {
 
 /// Query params for the consumer-group listing: the usual search/paging, plus
 /// the opt-in lag figures and what to order by (#107).
+///
+/// The paging fields are repeated rather than `#[serde(flatten)]`-ed from
+/// [`ListQuery`]: flattening needs a self-describing format, which a query
+/// string is not, and the extractor would reject every request.
 #[derive(Deserialize)]
 pub struct GroupsQuery {
     search: Option<String>,
@@ -318,7 +322,8 @@ pub async fn groups(
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
     let mode = LagMode::from_request(query.lag, query.sort.as_deref());
-    let paged = source.list_groups(&(&query).into(), mode).await?;
+    let page = Page::from(&query);
+    let paged = source.list_groups(&page, mode).await?;
     Ok(Json(json!({
         "cluster": cluster,
         "items": paged.items,
