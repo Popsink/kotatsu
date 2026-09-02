@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canonical, diffLines, fieldChanges, hasChanges, typeLabel } from '~/utils/schemadiff'
+import { canonical, diffLines, fieldChanges, hasChanges } from '~/utils/schemadiff'
 
 const record = (fields: unknown[]) =>
   JSON.stringify({ type: 'record', name: 'Order', fields })
@@ -74,8 +74,17 @@ describe('fieldChanges', () => {
   it('reports a type change with both renderings', () => {
     const a = record([{ name: 'id', type: 'int' }])
     const b = record([{ name: 'id', type: ['null', 'int'] }])
+    // A union reads as its branches, which is what makes a widening legible.
     expect(fieldChanges(a, b)).toEqual([
       { name: 'id', kind: 'type', from: 'int', to: 'null | int' },
+    ])
+  })
+
+  it('names a complex type by its kind rather than dumping it', () => {
+    const a = record([{ name: 'tags', type: 'string' }])
+    const b = record([{ name: 'tags', type: { type: 'array', items: 'string' } }])
+    expect(fieldChanges(a, b)).toEqual([
+      { name: 'tags', kind: 'type', from: 'string', to: 'array' },
     ])
   })
 
@@ -105,15 +114,5 @@ describe('fieldChanges', () => {
     // below still shows what moved, this just does not label it.
     expect(fieldChanges('{"type":"enum","symbols":["A"]}', '{"type":"enum"}')).toEqual([])
     expect(fieldChanges('syntax = "proto3";', 'syntax = "proto3";')).toEqual([])
-  })
-})
-
-describe('typeLabel', () => {
-  it('renders a union as its branches', () => {
-    expect(typeLabel(['null', 'string'])).toBe('null | string')
-  })
-
-  it('renders a complex type by its kind', () => {
-    expect(typeLabel({ type: 'array', items: 'string' })).toBe('array')
   })
 })

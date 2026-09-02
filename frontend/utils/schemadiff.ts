@@ -136,22 +136,11 @@ export function fieldChanges(from: string, to: string): FieldChange[] {
       changes.push({ name, kind: 'removed' })
       continue
     }
-    const before = field
-    if (typeLabel(before.type) !== typeLabel(after.type)) {
-      changes.push({
-        name,
-        kind: 'type',
-        from: typeLabel(before.type),
-        to: typeLabel(after.type),
-      })
+    if (typeLabel(field.type) !== typeLabel(after.type)) {
+      changes.push({ name, kind: 'type', from: typeLabel(field.type), to: typeLabel(after.type) })
     }
-    if (defaultLabel(before) !== defaultLabel(after)) {
-      changes.push({
-        name,
-        kind: 'default',
-        from: defaultLabel(before),
-        to: defaultLabel(after),
-      })
+    if (defaultLabel(field) !== defaultLabel(after)) {
+      changes.push({ name, kind: 'default', from: defaultLabel(field), to: defaultLabel(after) })
     }
   }
   for (const name of b.keys()) {
@@ -180,7 +169,7 @@ function fieldsOf(raw: string): Map<string, AvroField> | null {
 }
 
 /** A field type as one readable string: `string`, `null | string`, `array`. */
-export function typeLabel(type: unknown): string {
+function typeLabel(type: unknown): string {
   if (typeof type === 'string') return type
   if (Array.isArray(type)) return type.map(typeLabel).join(' | ')
   if (type && typeof type === 'object') {
