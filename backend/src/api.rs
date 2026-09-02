@@ -365,6 +365,27 @@ pub async fn schema_subject(
     })))
 }
 
+/// `GET /api/schemas/ids/{id}/versions` — the subjects and versions a schema id
+/// is registered under.
+///
+/// The event browser tags a decoded record with its schema **id**; the subject
+/// page is addressed by **version**. This is the only thing that maps one to the
+/// other, and the registry answers it from its own index (#112).
+pub async fn schema_id_versions(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    let registry = registry(&state)?;
+    let versions = registry.id_versions(id).await.map_err(|e| match e {
+        SchemaError::NotFound => ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("no schema registered with id {id}"),
+        ),
+        other => other.into(),
+    })?;
+    Ok(Json(json!({ "id": id, "versions": versions })))
+}
+
 /// `GET /api/schemas/{subject}/versions/{version}` — a specific version's schema.
 pub async fn schema_version(
     State(state): State<AppState>,
