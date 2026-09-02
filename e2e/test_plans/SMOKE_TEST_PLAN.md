@@ -100,6 +100,8 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 8 | Avro decode | `GET .../topics/avro-orders/messages?partition=0&offset=earliest` | values `kind: "avro"`, decoded `{id,item}` | SCH-001 |
 | 9 | Schemas listed | `GET /api/schemas` | contains `avro-orders-value` | SCH-001 |
 | 10 | Groups + lag | `GET /api/clusters/demo/groups/qa-group` | `committed_offset: 3`, `lag: 0`, `total_lag: 0` | GRP-002 |
+| 10b | Lag is opt-in | `GET /api/clusters/demo/groups` | rows carry no `lag` key at all | GRP-003 |
+| 10c | Lag in the listing | `GET /api/clusters/demo/groups?lag=true` | `qa-group` carries `lag: {total: 0, topics: 1, max_partition: 0}` | GRP-003 |
 | 11 | Compacted topic routing | `GET .../topics/acme.prod.db2.dbz_config/messages?partition=0&offset=earliest` | `count: 2`, watermark `{0,2}`, keys `cfg-a`/`cfg-b`; detail `storage_bytes > 0` | #92 |
 | 12 | Truncation floor | `GET .../topics/truncated/messages?partition=0&offset=earliest` and `?partition=0&offset=0` | watermark `{2,3}`, `count: 1`, only offset 2 — the deleted records are not served | #95 |
 | 13 | Payload tree | open a `nested` record in the event browser | the value opens as a tree collapsed past depth 2, and `find in payload` = `4711` opens down to the match | MSG-013 |

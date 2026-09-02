@@ -154,6 +154,26 @@ test.describe('API smoke', () => {
     expect(body.total_lag).toBe(0);
   });
 
+  test('the groups list carries no lag unless it is asked for', async ({ request }) => {
+    // The opt-in half of #107: the cheap listing has to stay exactly what it was,
+    // because computing lag reads the high watermark behind every commit.
+    const body = await (await request.get(`/api/clusters/${CLUSTER}/groups`)).json();
+    const group = body.items.find((g: { name: string }) => g.name === 'qa-group');
+    expect(group).toBeTruthy();
+    expect(group).not.toHaveProperty('lag');
+  });
+
+  test('lag=true reports the group lag the detail page agrees with', async ({ request }) => {
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/groups?lag=true`,
+    )).json();
+    const group = body.items.find((g: { name: string }) => g.name === 'qa-group');
+    // The seed consumes `orders` to the end, so the group is caught up: a real
+    // `0`, which must not be confused with the `—` of a group that never
+    // committed.
+    expect(group.lag).toMatchObject({ total: 0, topics: 1, max_partition: 0 });
+  });
+
   /** `spread` is the seed's only topic whose records really span partitions (#102). */
   test('partition=all merges records from every partition, in the read direction', async ({ request }) => {
     const detail = await (await request.get(`/api/clusters/${CLUSTER}/topics/spread`)).json();
@@ -617,5 +637,20 @@ test.describe('UI smoke', () => {
     await expect(page.getByRole('dialog', { name: 'Quick jump' })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: 'Quick jump' })).toBeHidden();
+  });
+
+  test('groups list ranks by lag, and says so in the header', async ({ page }) => {
+    await page.goto('/groups');
+    const sort = page.getByRole('button', { name: /^lag/ });
+    await expect(sort).toHaveAttribute('aria-pressed', 'true');
+
+    const row = page.getByRole('row').filter({ hasText: 'qa-group' });
+    await expect(row.getByRole('link', { name: 'qa-group' })).toBeVisible();
+    // Caught up on one topic — the figures the API just reported, rendered.
+    await expect(row.getByText('0', { exact: true })).toBeVisible();
+
+    // Name order stays reachable for someone looking up a group they know.
+    await sort.click();
+    await expect(sort).toHaveAttribute('aria-pressed', 'false');
   });
 });
