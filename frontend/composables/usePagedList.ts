@@ -64,7 +64,14 @@ export async function usePagedList<T extends PagedResponse>(
   function next() {
     if (pager.value.canNext) offset.value += limit.value
   }
-  /** Back to page one, keeping the search — for when the list's shape changes. */
+  /**
+   * Back to page one, keeping the search — for when the list's shape changes.
+   *
+   * That is a change which reorders the whole result set rather than narrowing
+   * it — switching the groups list between lag and name order (#107) — where
+   * the term still applies but an offset into the old ordering means nothing
+   * against the new one.
+   */
   function first() {
     offset.value = 0
   }
