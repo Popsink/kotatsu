@@ -21,7 +21,7 @@ onMounted(() => {
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <img src="/brand/popsink-logo-light.svg" alt="Popsink" class="logo" />
+        <BrandWordmark class="logo" />
         <span class="product">kotatsu</span>
       </div>
       <nav>
@@ -95,7 +95,7 @@ onMounted(() => {
   --accent-ink: #051522;
   /* The wordmark ships in white ink only, so on a light ground it needs a field
      of its own rather than a colour it does not have — see `.brand .logo`. */
-  --brand-plate: transparent;
+  --brand-ink: #ffffff;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -114,10 +114,7 @@ onMounted(() => {
     --raised: #eef1f5;
     --hairline: #e3e8ee;
     --accent-ink: #ffffff;
-    --raised: #eef1f5;
-  --hairline: #e3e8ee;
-  --accent-ink: #ffffff;
-  --brand-plate: #051522;
+  --brand-ink: #051522;
     color-scheme: light;
   }
 }
@@ -133,7 +130,10 @@ onMounted(() => {
   --ok: #0d7a5f;
   --warn: #8a5200;
   --err: #b3251e;
-  --brand-plate: #051522;
+  --raised: #eef1f5;
+  --hairline: #e3e8ee;
+  --accent-ink: #ffffff;
+  --brand-ink: #051522;
   color-scheme: light;
 }
 
@@ -155,14 +155,9 @@ code, pre, .mono { font-family: 'Geist Mono', ui-monospace, monospace; }
 .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 .sidebar { background: var(--panel); padding: 1.25rem 1rem; border-right: 1px solid var(--border); }
 .brand { display: flex; flex-direction: column; gap: 0.35rem; margin: 0 0 1.75rem; }
-.brand .logo {
-  height: 22px; width: auto; align-self: flex-start;
-  /* Transparent in dark; a navy field in light, because the wordmark exists in
-     white ink only. The proper fix is a `popsink-logo-dark.svg`, which is a
-     design deliverable and not one this branch should invent. */
-  background: var(--brand-plate); border-radius: 5px;
-  padding: 0.2rem 0.3rem; box-sizing: content-box;
-}
+/* The wordmark is inline SVG painted with `currentColor`, so its ink is a token
+   like any other text. */
+.brand .logo { height: 22px; width: auto; align-self: flex-start; color: var(--brand-ink); }
 .brand .product { font-size: 0.95rem; font-weight: 600; color: var(--accent); letter-spacing: 0.02em; }
 nav { display: flex; flex-direction: column; gap: 0.3rem; }
 nav a, nav span { color: var(--fg); text-decoration: none; padding: 0.45rem 0.6rem; border-radius: 8px; font-size: 0.92rem; }
