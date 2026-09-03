@@ -168,6 +168,20 @@ test.describe('API smoke', () => {
     expect(body.latest.version).toBe(2);
   });
 
+  test('a record reports its serialized size', async ({ request }) => {
+    // The number that answers "why is this partition 40 GiB" per record (#108).
+    const body = await (await request.get(
+      `/api/clusters/${CLUSTER}/topics/orders/messages?partition=0&offset=earliest`,
+    )).json();
+
+    const first = body.records.find((r: { offset: number }) => r.offset === 0);
+    // `key-1` is 5 bytes and `{"id":1,"item":"widget"}` is 24 — the seed's first
+    // record, asserted exactly so a change to either is noticed here.
+    expect(first.size).toBe(29);
+    // Serialized bytes, so no record the seed writes is weightless.
+    expect(body.records.every((r: { size: number }) => r.size > 0)).toBe(true);
+  });
+
   test('qa-group reports committed offsets and lag', async ({ request }) => {
     const body = await (await request.get(`/api/clusters/${CLUSTER}/groups/qa-group`)).json();
     expect(body.name).toBe('qa-group');
@@ -705,5 +719,72 @@ test.describe('UI smoke', () => {
     // Name order stays reachable for someone looking up a group they know.
     await sort.click();
     await expect(sort).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  /**
+   * #108: `From: latest` seeks to the end of the log, so the newest record has to
+   * be the first row — and the reader must be able to turn that around without
+   * re-reading, because the window is already in the browser.
+   */
+  test('a latest read puts the newest record on top, and the order flips', async ({ page }) => {
+    await page.goto('/topics/spread');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('latest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
+
+    // `offset` is the first monospaced cell; the caret column carries its own class.
+    const edges = async () => {
+      const rows = page.locator('table.msgs tbody tr.row');
+      return [
+        Number(await rows.first().locator('td.mono').first().innerText()),
+        Number(await rows.last().locator('td.mono').first().innerText()),
+      ];
+    };
+
+    const [newest, oldest] = await edges();
+    expect(newest).toBeGreaterThan(oldest);
+
+    await page.getByRole('button', { name: /newest first/ }).click();
+    const [top, bottom] = await edges();
+    expect(top).toBe(oldest);
+    expect(bottom).toBe(newest);
+  });
+
+  test('a timestamp says which zone it is in', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+
+    // caret · offset · timestamp, with the default columns.
+    const cell = page.locator('table.msgs tbody tr.row').first().locator('td').nth(2);
+    // An unmarked UTC string is what #108 calls out: a reader in any other zone
+    // mis-reads it by their whole offset with no cue that they have.
+    await expect(cell).toHaveText(/ [+-]\d{2}:\d{2}$/);
+
+    await page.getByRole('combobox', { name: 'Time' }).selectOption('utc');
+    await expect(cell).toHaveText(/ UTC$/);
+  });
+
+  test('a chosen column survives a reload', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: /Columns/ }).click();
+    await page.getByRole('checkbox', { name: 'size' }).check();
+    await page.getByRole('button', { name: 'Search' }).click();
+
+    const header = page.locator('table.msgs thead').getByText('size', { exact: true });
+    await expect(header).toBeVisible();
+
+    // The preference lives beside the per-topic formats, so it outlives the page.
+    await page.reload();
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(header).toBeVisible();
+  });
+
+  test('the partition table shows the size the API has always reported', async ({ page }) => {
+    // Served per partition since #76, dropped by the frontend interface until #108.
+    await page.goto('/topics/orders');
+    const parts = page.locator('table.parts').first();
+    await expect(parts.getByText('size', { exact: true })).toBeVisible();
+    // `orders` holds three records, so its partition cannot be weightless.
+    await expect(parts.locator('tbody tr').first().locator('td').last()).not.toHaveText('0 B');
   });
 });
