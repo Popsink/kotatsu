@@ -124,10 +124,13 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 27b | Burger menu | viewport 600×900 on `/topics` | the nav is `display: none` and the burger reads `aria-expanded=false`; a click opens it, `Escape` closes it, and following a link closes it too | ACC-003 |
 | 27c | No phantom control | `/topics` at desktop width | the burger is absent from the accessibility tree, and the nav links are visible | ACC-003 |
 | 28 | 600 px viewport | `/topics/orders`, Search, viewport 600×900 | the table scrolls inside its own box and `scrollWidth == clientWidth` on the document | ACC-003 |
+| 29 | Follow is gated | `/topics/orders`, `From: earliest` then `latest` | the Follow button is absent on the historical read and present on the live-edge one | MSG-015 |
+| 30 | Nothing polls when off | search, then idle 6 s | no further `/messages` request leaves the page | MSG-015 |
+| 31 | Follow spends visibly, then stops | arm Follow at 2 s on `orders` | `following · n polls · …` appears, requests increase, and after three quiet polls it disarms saying `nothing new`; no request after that | MSG-015 |
 
 ## Pass/Fail
 
-- **Pass**: all 28 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
+- **Pass**: all 31 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
 - **Fail**: any step deviates → open the corresponding per-module ISTQB case to isolate.
 
 ## Tear down

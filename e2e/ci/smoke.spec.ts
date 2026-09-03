@@ -773,6 +773,66 @@ test.describe('UI smoke', () => {
     expect(overflow).toBeLessThanOrEqual(0);
   });
 
+  /** #106: following a historical window would poll for records that are not
+   *  next to what is on screen, so the control is not offered there. */
+  test('Follow is offered on a live-edge read and not on a historical one', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /Follow/ })).toBeHidden();
+
+    await page.getByRole('combobox', { name: 'From' }).selectOption('latest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.getByRole('button', { name: /Follow/ })).toBeVisible();
+  });
+
+  test('nothing polls until Follow is armed', async ({ page }) => {
+    // The read contract, asserted rather than asserted-about: no request leaves
+    // without a user action, so an idle page must be silent (#106, #7).
+    let reads = 0;
+    page.on('request', (r) => {
+      if (r.url().includes('/messages?')) reads += 1;
+    });
+
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
+
+    const afterSearch = reads;
+    await page.waitForTimeout(6000);
+    expect(reads).toBe(afterSearch);
+  });
+
+  test('arming Follow polls, says what it spent, and stops itself when nothing comes', async ({
+    page,
+  }) => {
+    let reads = 0;
+    page.on('request', (r) => {
+      if (r.url().includes('/messages?')) reads += 1;
+    });
+
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
+    const afterSearch = reads;
+
+    await page.getByRole('combobox', { name: 'Every' }).selectOption('2');
+    await page.getByRole('button', { name: /Follow/ }).click();
+
+    // `[1-9]` on purpose: the line appears at zero polls, so `\d+` would match
+    // before a request had left and the count below would race it.
+    await expect(page.getByText(/following · [1-9]\d* poll/)).toBeVisible();
+    expect(reads).toBeGreaterThan(afterSearch);
+
+    // `orders` is not being written to, so three quiet polls end it — and the
+    // page says why rather than going silently still.
+    await expect(page.getByText(/nothing new/)).toBeVisible({ timeout: 15000 });
+    const afterDisarm = reads;
+    await page.waitForTimeout(5000);
+    expect(reads).toBe(afterDisarm);
+  });
+
   test('consumer group detail shows zero lag', async ({ page }) => {
     await page.goto('/groups/qa-group');
     await expect(page.getByRole('heading', { name: 'Group qa-group' })).toBeVisible();
