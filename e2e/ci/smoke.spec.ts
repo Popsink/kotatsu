@@ -777,7 +777,12 @@ test.describe('UI smoke', () => {
     await page.getByRole('combobox', { name: /Search topics/ }).fill('avro-orders');
 
     // Enter opens whatever the arrow keys left active — no pointer involved.
-    await expect(page.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
+    // Scoped to the palette's own listbox: `option` is the implicit role of a
+    // native `<option>` too, and #111 put a `<select>` in the sidebar, which the
+    // DOM reaches before the results. An unscoped `.first()` resolved to
+    // `<option value="system">`.
+    const results = page.getByRole('listbox', { name: 'Results' });
+    await expect(results.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/topics\/avro-orders/);
 
