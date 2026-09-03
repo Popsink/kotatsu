@@ -729,8 +729,8 @@ mod tests {
     fn a_record_size_is_its_key_value_and_header_bytes() {
         use crate::storage::RecordHeader;
 
-        let record = |key: Option<&str>, value: Option<&str>, headers: Vec<(&str, &str)>| {
-            DecodedRecord {
+        let record =
+            |key: Option<&str>, value: Option<&str>, headers: Vec<(&str, &str)>| DecodedRecord {
                 offset: 0,
                 partition: 0,
                 timestamp: 0,
@@ -743,8 +743,7 @@ mod tests {
                         value: Some(bytes::Bytes::from(v.to_string())),
                     })
                     .collect(),
-            }
-        };
+            };
 
         assert_eq!(record_size(&record(Some("k"), Some("val"), vec![])), 4);
         // Headers count: they are bytes on the wire like any other field, and a
