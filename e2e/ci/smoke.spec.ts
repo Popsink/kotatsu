@@ -473,9 +473,12 @@ test.describe('UI smoke', () => {
     // before the search lands, so an unscoped locator asserts the wrong table.
     const results = page.locator('table.msgs');
     await expect(results.getByRole('columnheader', { name: 'partition' })).toBeVisible();
-    // Populated, not merely present. Columns are caret · offset · partition since
-    // #108 made them configurable in a fixed order, so partition is the third cell.
-    await expect(results.locator('tbody tr.row').first().locator('td').nth(2)).toHaveText(/^[0-2]$/);
+    // Populated, not merely present. Addressed by column name since #108 made
+    // the columns configurable: a positional index asserts whatever the reader
+    // last ticked.
+    await expect(
+      results.locator('tbody tr.row').first().locator('td[data-col="partition"]'),
+    ).toHaveText(/^[0-2]$/);
     // `earliest` reads towards newer records, and the label must not claim
     // otherwise. The order moved onto the button that flips it (#108).
     await expect(page.getByText('3 partitions read')).toBeVisible();
@@ -735,12 +738,11 @@ test.describe('UI smoke', () => {
     await page.getByRole('button', { name: 'Search' }).click();
     await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
 
-    // `offset` is the first monospaced cell; the caret column carries its own class.
     const edges = async () => {
       const rows = page.locator('table.msgs tbody tr.row');
       return [
-        Number(await rows.first().locator('td.mono').first().innerText()),
-        Number(await rows.last().locator('td.mono').first().innerText()),
+        Number(await rows.first().locator('td[data-col="offset"]').innerText()),
+        Number(await rows.last().locator('td[data-col="offset"]').innerText()),
       ];
     };
 
@@ -757,17 +759,16 @@ test.describe('UI smoke', () => {
     await page.goto('/topics/orders');
     await page.getByRole('button', { name: 'Search' }).click();
 
-    const row = page.locator('table.msgs tbody tr.row').first();
-    // Located by its content, not by a column index: `partition` is forced in
-    // whenever the read spans partitions — which the default `partition=all`
-    // means it always does — so an index here would assert the wrong cell.
-    //
+    // By column name, not by index: which cell is third depends on what the
+    // reader ticked, and `partition` is forced in whenever the read spans them —
+    // which the default `partition=all` means it always does.
+    const stamp = page.locator('table.msgs tbody tr.row').first().locator('td[data-col="timestamp"]');
     // An unmarked UTC string is what #108 calls out: a reader in any other zone
     // mis-reads it by their whole offset with no cue that they have.
-    await expect(row.getByRole('cell', { name: / [+-]\d{2}:\d{2}$/ })).toBeVisible();
+    await expect(stamp).toHaveText(/ [+-]\d{2}:\d{2}$/);
 
     await page.getByRole('combobox', { name: 'Time' }).selectOption('utc');
-    await expect(row.getByRole('cell', { name: / UTC$/ })).toBeVisible();
+    await expect(stamp).toHaveText(/ UTC$/);
   });
 
   test('a chosen column survives a reload', async ({ page }) => {

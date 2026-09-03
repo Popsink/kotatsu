@@ -603,21 +603,24 @@ async function copyMsg(r: Record) {
       <thead>
         <tr>
           <th></th>
-          <th v-for="c in shownColumns" :key="c">{{ c }}</th>
+          <!-- `data-col` names each column in the DOM, the same reason
+               `JsonTree` carries `data-field`: which cell is third depends on
+               what the reader ticked, so a positional selector is a coin flip. -->
+          <th v-for="c in shownColumns" :key="c" :data-col="c">{{ c }}</th>
         </tr>
       </thead>
       <tbody>
         <template v-for="r in rows" :key="rowKey(r)">
           <tr class="row" @click="toggle(rowKey(r))">
             <td class="caret">{{ expanded.has(rowKey(r)) ? '▾' : '▸' }}</td>
-            <td v-if="shows('offset')" class="mono">{{ r.offset }}</td>
-            <td v-if="shows('partition')" class="mono">{{ r.partition }}</td>
-            <td v-if="shows('timestamp')" class="mono muted" :title="fmtRelative(r.timestamp)">{{ fmtTime(r.timestamp, timeMode) }}</td>
+            <td v-if="shows('offset')" data-col="offset" class="mono">{{ r.offset }}</td>
+            <td v-if="shows('partition')" data-col="partition" class="mono">{{ r.partition }}</td>
+            <td v-if="shows('timestamp')" data-col="timestamp" class="mono muted" :title="fmtRelative(r.timestamp)">{{ fmtTime(r.timestamp, timeMode) }}</td>
             <!-- `—`, not `0 B`, for a record the API did not size: the same
                  distinction the lag cells draw between absent and zero. -->
-            <td v-if="shows('size')" class="mono muted">{{ r.size == null ? '—' : fmtBytes(r.size) }}</td>
-            <td v-if="shows('key')" class="mono">{{ fieldPreview(r.key, 40) }}</td>
-            <td v-if="shows('value')" class="mono">{{ fieldPreview(r.value) }}</td>
+            <td v-if="shows('size')" data-col="size" class="mono muted">{{ r.size == null ? '—' : fmtBytes(r.size) }}</td>
+            <td v-if="shows('key')" data-col="key" class="mono">{{ fieldPreview(r.key, 40) }}</td>
+            <td v-if="shows('value')" data-col="value" class="mono">{{ fieldPreview(r.value) }}</td>
           </tr>
           <tr v-if="expanded.has(rowKey(r))" class="detail">
             <td></td>
