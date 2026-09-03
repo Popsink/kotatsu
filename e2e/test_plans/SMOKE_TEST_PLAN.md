@@ -121,7 +121,7 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 19 | Tree from the keyboard | focus the `acme` row's link on `/topics`, `Enter` | the row navigates to `?p=acme` — a `<tr>` alone took neither focus nor `Enter` | ACC-001 |
 | 20 | Message from the keyboard | focus a row's disclosure button, `Enter` | the detail row opens and the button flips from `Expand offset n` / `aria-expanded=false` to `Collapse` / `true` | ACC-001 |
 | 21 | Focus is visible | `Tab` once on `/topics` | the focused element has a non-zero `outline-width` | ACC-001 |
-| 22 | Theme persists | Theme → `light`, reload, then → `system` | `<html data-theme="light">` survives the reload; `system` removes the attribute | ACC-002 |
+| 22 | Theme persists | tick the `light` radio, reload, then tick `system` | `<html data-theme="light">` survives the reload; `system` removes the attribute | ACC-002 |
 | 22b | Burger menu | viewport 600×900 on `/topics` | the nav is `display: none` and the burger reads `aria-expanded=false`; a click opens it, `Escape` closes it, and following a link closes it too | ACC-003 |
 | 22c | No phantom control | `/topics` at desktop width | the burger is absent from the accessibility tree, and the nav links are visible | ACC-003 |
 | 23 | 600 px viewport | `/topics/orders`, Search, viewport 600×900 | the table scrolls inside its own box and `scrollWidth == clientWidth` on the document | ACC-003 |

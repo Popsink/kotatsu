@@ -73,15 +73,20 @@ onMounted(() => {
         <kbd>{{ chord }}</kbd>
       </button>
 
-      <!-- A select, not a cycling button: it states which of the three is in
-           force, where a button would hide that in an icon. `system` is the
-           default and defers to `prefers-color-scheme` (#111). -->
-      <label class="theme">
-        Theme
-        <select v-model="theme">
-          <option v-for="t in THEMES" :key="t" :value="t">{{ t }}</option>
-        </select>
-      </label>
+      <!-- Three radios, not a `<select>`: a native popup is positioned and sized
+           by the platform, which on a phone put a tiny list in the middle of the
+           screen. Radios show all three states at once, need no popup at all,
+           and come with arrow-key navigation for free. `system` is the default
+           and defers to `prefers-color-scheme` (#111). -->
+      <fieldset class="theme">
+        <legend>Theme</legend>
+        <div class="seg">
+          <label v-for="t in THEMES" :key="t">
+            <input v-model="theme" type="radio" name="theme" :value="t" />
+            <span>{{ t }}</span>
+          </label>
+        </div>
+      </fieldset>
       </div>
     </aside>
     <main class="content">
@@ -222,16 +227,25 @@ nav .muted { color: var(--muted); cursor: not-allowed; }
 }
 .jump:hover, .jump:focus-visible { border-color: var(--accent); color: var(--accent); }
 .jump kbd { margin-left: auto; border: 1px solid var(--border); border-radius: 4px; padding: 0 0.25rem; font-family: inherit; font-size: 0.75rem; }
-.theme {
-  display: flex; align-items: center; gap: 0.5rem;
-  margin-top: 0.5rem; padding: 0.45rem 0.6rem;
-  color: var(--muted); font-size: 0.82rem;
+/* More air than the 1rem above `Quick jump`, not less: this opens its own group
+   with its own legend, and 0.75rem read as though the legend belonged to the
+   button above it. */
+.theme { border: 0; margin: 1.5rem 0 0; padding: 0; }
+.theme legend { padding: 0 0 0.35rem; color: var(--muted); font-size: 0.82rem; }
+/* One box split three ways. The radios stay in the DOM and keep their focus and
+   their arrow keys; only their default dots are taken out of the flow, which is
+   why the label is positioned. */
+.seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg label { position: relative; flex: 1; }
+.seg input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.seg span {
+  display: block; text-align: center; padding: 0.35rem 0.2rem;
+  color: var(--muted); font-size: 0.82rem; cursor: pointer;
 }
-.theme select {
-  margin-left: auto; background: var(--panel); color: var(--fg);
-  border: 1px solid var(--border); border-radius: 6px;
-  padding: 0.15rem 0.3rem; font: inherit; font-size: 0.78rem;
-}
+.seg span:hover { color: var(--fg); }
+.seg input:checked + span { background: var(--accent-deep); color: var(--accent); }
+/* Inset, because the ring would be clipped by the box's own `overflow: hidden`. */
+.seg input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
 .content { padding: 2rem; }
 
 /*

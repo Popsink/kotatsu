@@ -10,8 +10,16 @@ const STORAGE_KEY = 'kotatsu:theme'
  * `system` is the default and is **not** a third palette: it stamps nothing on
  * the root and lets `prefers-color-scheme` decide, which is where the CSS falls
  * back when no `data-theme` is present. Choosing light or dark explicitly is
- * what overrides the operating system — so a reader who never opens the toggle
+ * what overrides the operating system — so a reader who never opens the control
  * follows their machine, and one who does keeps their choice.
+ *
+ * It stays an offered option, rather than just being the initial state of a
+ * light/dark pair, for two reasons. It is the only one of the three that cannot
+ * be reached again once left: light and dark are always a click away, "follow
+ * the machine" would not be. And it is the cheaper design — with `system` in the
+ * set, the checked control *is* the stored string and this file never consults
+ * `matchMedia`; without it, something has to resolve the platform preference to
+ * know which of the two to check, and listen for it changing to stay honest.
  *
  * Storage can throw (Safari private mode, a disabled origin) and can hold
  * anything, so both ends are guarded the way `useTopicFormat` guards the

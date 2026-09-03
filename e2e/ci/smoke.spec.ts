@@ -694,15 +694,21 @@ test.describe('UI smoke', () => {
 
   test('the theme choice persists, and system un-stamps it', async ({ page }) => {
     await page.goto('/');
-    await page.getByLabel('Theme').selectOption('light');
+    // Three radios rather than a select, so all three states are on screen and
+    // there is no platform popup to position.
+    const choose = (name: string) => page.getByRole('radio', { name, exact: true });
+    await expect(choose('system')).toBeChecked();
+
+    await choose('light').check();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
     await page.reload();
     // The inline boot script is what makes this survive a reload without a
     // frame of the dark palette.
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await expect(choose('light')).toBeChecked();
 
-    await page.getByLabel('Theme').selectOption('system');
+    await choose('system').check();
     expect(await page.evaluate(() => document.documentElement.hasAttribute('data-theme'))).toBe(
       false,
     );
@@ -821,10 +827,12 @@ test.describe('UI smoke', () => {
     await page.getByRole('combobox', { name: /Search topics/ }).fill('avro-orders');
 
     // Enter opens whatever the arrow keys left active — no pointer involved.
-    // Scoped to the palette's own listbox: `option` is the implicit role of a
-    // native `<option>` too, and #111 put a `<select>` in the sidebar, which the
-    // DOM reaches before the results. An unscoped `.first()` resolved to
-    // `<option value="system">`.
+    // Scoped to the palette's own listbox, where it always belonged. `option` is
+    // also the implicit role of a native `<option>`, and #111 briefly put a
+    // `<select>` in the sidebar — which the DOM reaches first — so an unscoped
+    // `.first()` resolved to `<option value="system">`. That select is now three
+    // radios and the collision is gone; the scoping stays, because the next
+    // `option` anywhere on the page would break this again.
     const results = page.getByRole('listbox', { name: 'Results' });
     await expect(results.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
     await page.keyboard.press('Enter');
