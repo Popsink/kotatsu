@@ -532,7 +532,9 @@ async function copyMsg(r: Record) {
       </label>
     </form>
 
-    <p v-if="searched && filtered" class="muted wm">
+    <!-- Announced politely: a search that ran and matched nothing changes only
+         this line, and a screen reader has nothing else to go on (#111). -->
+    <p v-if="searched && filtered" class="muted wm" aria-live="polite">
       {{ records.length }} match{{ records.length === 1 ? '' : 'es' }} in {{ scanned }} scanned<template v-if="!exhausted"> — more to scan, Load more continues it</template>
     </p>
 
@@ -602,20 +604,34 @@ async function copyMsg(r: Record) {
       </template>
     </p>
 
-    <table v-if="records.length" class="msgs">
+    <!-- Six monospace columns at `width: 100%` pushed the whole page sideways on
+         a narrow viewport; now the table scrolls inside its own box (#111). -->
+    <div v-if="records.length" class="scroll">
+    <table class="msgs">
       <thead>
         <tr>
-          <th></th>
+          <th scope="col"></th>
           <!-- `data-col` names each column in the DOM, the same reason
                `JsonTree` carries `data-field`: which cell is third depends on
                what the reader ticked, so a positional selector is a coin flip. -->
-          <th v-for="c in shownColumns" :key="c" :data-col="c">{{ c }}</th>
+          <th v-for="c in shownColumns" :key="c" :data-col="c" scope="col">{{ c }}</th>
         </tr>
       </thead>
       <tbody>
         <template v-for="r in rows" :key="rowKey(r)">
           <tr class="row" @click="toggle(rowKey(r))">
-            <td class="caret">{{ expanded.has(rowKey(r)) ? '▾' : '▸' }}</td>
+            <!-- A real button, as `JsonNode`'s caret already is: a `<tr>` takes
+                 no focus and no Enter, so a message could not be expanded without
+                 a mouse (#111). The row click stays a convenience, and `.stop`
+                 keeps it from toggling a second time and cancelling the first. -->
+            <td class="caret">
+              <button
+                type="button"
+                :aria-expanded="expanded.has(rowKey(r))"
+                :aria-label="`${expanded.has(rowKey(r)) ? 'Collapse' : 'Expand'} offset ${r.offset}`"
+                @click.stop="toggle(rowKey(r))"
+              >{{ expanded.has(rowKey(r)) ? '▾' : '▸' }}</button>
+            </td>
             <td v-if="shows('offset')" data-col="offset" class="mono">{{ r.offset }}</td>
             <td v-if="shows('partition')" data-col="partition" class="mono">{{ r.partition }}</td>
             <td v-if="shows('timestamp')" data-col="timestamp" class="mono muted" :title="fmtRelative(r.timestamp)">{{ fmtTime(r.timestamp, timeMode) }}</td>
@@ -652,6 +668,7 @@ async function copyMsg(r: Record) {
         </template>
       </tbody>
     </table>
+    </div>
 
     <div v-if="records.length" class="paging">
       <button type="button" class="ghost" :disabled="!canGoBack || loading" @click="back">← Back</button>
@@ -696,7 +713,7 @@ h2 code { color: var(--accent); }
 .controls label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--muted); }
 .controls input, .controls select { background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem; }
 .controls input[type="number"] { width: 5rem; }
-.controls button { background: var(--accent); color: #051522; border: 0; border-radius: 6px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; }
+.controls button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 0.5rem 1rem; font-weight: 600; cursor: pointer; }
 .controls button:disabled { opacity: 0.5; cursor: default; }
 .controls button.ghost { background: var(--panel); color: var(--fg); border: 1px solid var(--border); font-weight: 400; }
 .filters { margin-top: 0; padding: 0.75rem; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
@@ -706,12 +723,14 @@ h2 code { color: var(--accent); }
 .err { color: var(--err); }
 .msgs { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
 .msgs th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.4rem; }
-.row { cursor: pointer; border-bottom: 1px solid #0e2a40; }
-.row:hover { background: #0e2a40; }
+.row { cursor: pointer; border-bottom: 1px solid var(--hairline); }
+.row:hover { background: var(--raised); }
 .row td { padding: 0.4rem; vertical-align: top; }
 .caret { color: var(--muted); width: 1.2rem; }
+.caret button { background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; }
+.scroll { overflow-x: auto; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
-.detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
+.detail td { padding: 0.5rem 0.4rem 1rem; background: var(--panel); }
 /* Two classes on purpose: `.controls label` above sets `column`, and a single
    class loses to it on specificity — which is why the checkbox used to sit above
    its own label instead of beside it. */
