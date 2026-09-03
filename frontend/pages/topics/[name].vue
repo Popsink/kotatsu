@@ -8,6 +8,7 @@ import {
   nextCursor,
   sizeStats,
   toRouteQuery,
+  visibleColumns,
   type MessageColumn,
   type MessageQuery,
   type OffsetMode,
@@ -20,8 +21,12 @@ interface Record {
   offset: number
   partition: number
   timestamp: number
-  /** Serialized key + value + header bytes, from the API (#108). */
-  size: number
+  /**
+   * Serialized key + value + header bytes (#108). Optional because a response
+   * from a build without it must not read as a record of zero bytes — `0` is a
+   * real size, the one a tombstone with no key has.
+   */
+  size?: number
   key: FieldValue
   value: FieldValue
   headers: Header[]
@@ -178,19 +183,8 @@ const newestFirst = computed(() =>
 const orderLabel = computed(() => (newestFirst.value ? 'newest first' : 'oldest first'))
 const rows = computed(() => (flipOrder.value ? [...records.value].reverse() : records.value))
 
-/**
- * The columns the table renders, always in `MESSAGE_COLUMNS` order.
- *
- * `partition` joins whatever the reader chose whenever the result set spans
- * partitions: there an offset alone does not identify a record, so two unrelated
- * rows would read as duplicates of each other (#102).
- */
-const visibleColumns = computed<MessageColumn[]>(() =>
-  MESSAGE_COLUMNS.filter(
-    (c) => columns.value.includes(c) || (c === 'partition' && allPartitions.value),
-  ),
-)
-const shows = (c: MessageColumn) => visibleColumns.value.includes(c)
+const shownColumns = computed(() => visibleColumns(columns.value, allPartitions.value))
+const shows = (c: MessageColumn) => shownColumns.value.includes(c)
 
 function toggleColumn(c: MessageColumn) {
   const next = columns.value.includes(c)
@@ -202,7 +196,7 @@ function toggleColumn(c: MessageColumn) {
   if (next.length) columns.value = next
 }
 
-/** Record sizes across the pages loaded — the window, not the topic. */
+/** Over the pages fetched, never over the topic — see the summary line's note. */
 const sizes = computed(() => sizeStats(records.value.map((r) => r.size)))
 const showColumns = ref(false)
 
@@ -506,7 +500,7 @@ async function copyMsg(r: Record) {
       <label v-for="c in MESSAGE_COLUMNS" :key="c" class="rawtoggle">
         <input
           type="checkbox"
-          :checked="visibleColumns.includes(c)"
+          :checked="shownColumns.includes(c)"
           :disabled="c === 'partition' && allPartitions"
           @change="toggleColumn(c)"
         />
@@ -597,7 +591,7 @@ async function copyMsg(r: Record) {
       <thead>
         <tr>
           <th></th>
-          <th v-for="c in visibleColumns" :key="c">{{ c }}</th>
+          <th v-for="c in shownColumns" :key="c">{{ c }}</th>
         </tr>
       </thead>
       <tbody>
@@ -607,13 +601,15 @@ async function copyMsg(r: Record) {
             <td v-if="shows('offset')" class="mono">{{ r.offset }}</td>
             <td v-if="shows('partition')" class="mono">{{ r.partition }}</td>
             <td v-if="shows('timestamp')" class="mono muted" :title="fmtRelative(r.timestamp)">{{ fmtTime(r.timestamp, timeMode) }}</td>
-            <td v-if="shows('size')" class="mono muted">{{ fmtBytes(r.size) }}</td>
+            <!-- `—`, not `0 B`, for a record the API did not size: the same
+                 distinction the lag cells draw between absent and zero. -->
+            <td v-if="shows('size')" class="mono muted">{{ r.size == null ? '—' : fmtBytes(r.size) }}</td>
             <td v-if="shows('key')" class="mono">{{ fieldPreview(r.key, 40) }}</td>
             <td v-if="shows('value')" class="mono">{{ fieldPreview(r.value) }}</td>
           </tr>
           <tr v-if="expanded.has(rowKey(r))" class="detail">
             <td></td>
-            <td :colspan="visibleColumns.length">
+            <td :colspan="shownColumns.length">
               <JsonTree :field="r.key" label="key" :raw="rawJson">
                 <template #links>
                   <!-- Carries the record's schema id so the subject page can land on

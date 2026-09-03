@@ -194,6 +194,22 @@ export function coerceColumns(value: unknown): MessageColumn[] | null {
 }
 
 /**
+ * The columns to render: what the reader chose, plus `partition` whenever the
+ * result set spans partitions.
+ *
+ * Forced there, not merely suggested: across partitions an offset does not
+ * identify a record, so two unrelated rows would read as duplicates of each other
+ * (#102). Always in `MESSAGE_COLUMNS` order, so the table's shape never depends
+ * on the order things were ticked.
+ */
+export function visibleColumns(
+  chosen: readonly MessageColumn[],
+  allPartitions: boolean,
+): MessageColumn[] {
+  return MESSAGE_COLUMNS.filter((c) => chosen.includes(c) || (c === 'partition' && allPartitions))
+}
+
+/**
  * Median and p99 of the record sizes in **the page that was fetched** — the cheap
  * version of a topic-analysis pane (#108).
  *
@@ -202,9 +218,13 @@ export function coerceColumns(value: unknown): MessageColumn[] | null {
  * rank, so every figure returned is a size some record really has rather than an
  * interpolation between two of them.
  */
-export function sizeStats(sizes: number[]): { p50: number; p99: number; max: number } | null {
-  const usable = sizes.filter((n) => Number.isFinite(n) && n >= 0).sort((a, b) => a - b)
+export function sizeStats(
+  sizes: readonly (number | undefined)[],
+): { p50: number; p99: number } | null {
+  const usable = sizes
+    .filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0)
+    .sort((a, b) => a - b)
   if (!usable.length) return null
   const at = (q: number) => usable[Math.min(usable.length - 1, Math.ceil(q * usable.length) - 1)]
-  return { p50: at(0.5), p99: at(0.99), max: usable[usable.length - 1] }
+  return { p50: at(0.5), p99: at(0.99) }
 }

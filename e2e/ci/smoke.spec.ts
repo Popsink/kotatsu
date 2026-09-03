@@ -784,7 +784,12 @@ test.describe('UI smoke', () => {
     await page.goto('/topics/orders');
     const parts = page.locator('table.parts').first();
     await expect(parts.getByText('size', { exact: true })).toBeVisible();
-    // `orders` holds three records, so its partition cannot be weightless.
-    await expect(parts.locator('tbody tr').first().locator('td').last()).not.toHaveText('0 B');
+    const size = parts.locator('tbody tr').first().locator('td').last();
+    // Two separate properties, because one does not imply the other. Without the
+    // column the last cell is `messages`, so a bare "not 0 B" would pass on it;
+    // and the format alone would accept `0 B`, which `orders` — three records —
+    // cannot be.
+    await expect(size).toHaveText(/^\d+(\.\d+)? (B|KiB|MiB|GiB|TiB)$/);
+    await expect(size).not.toHaveText('0 B');
   });
 });
