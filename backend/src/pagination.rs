@@ -30,6 +30,15 @@ impl Page {
         }
     }
 
+    /// The matching names, neither sorted nor paged.
+    ///
+    /// For a caller that has to rank the **whole** result set on something it can
+    /// only know after reading each item — consumer-group lag (#107) — so the
+    /// page cannot be sliced before the expensive work, only after it.
+    pub fn matching(&self, names: Vec<String>) -> Vec<String> {
+        names.into_iter().filter(|n| self.matches(n)).collect()
+    }
+
     /// Filters `names` by the search term, sorts them, and returns the requested
     /// page along with the total number of matches (before paging).
     pub fn select(&self, names: Vec<String>) -> (Vec<String>, usize) {

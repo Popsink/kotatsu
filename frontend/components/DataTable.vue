@@ -24,7 +24,10 @@ defineEmits<{ retry: [] }>()
   <table v-else-if="count" class="list">
     <thead>
       <tr>
-        <th v-for="(c, i) in columns" :key="i">{{ c }}</th>
+        <!-- One slot per column name, so a page can make a single header
+             interactive — sorting (#107) — without every other caller having to
+             pass anything. -->
+        <th v-for="(c, i) in columns" :key="i"><slot :name="`th-${c}`">{{ c }}</slot></th>
       </tr>
     </thead>
     <tbody>

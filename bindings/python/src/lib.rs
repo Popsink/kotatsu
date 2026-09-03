@@ -9,7 +9,7 @@ use kotatsu_core::{
     pagination::Page,
     query::{self, MessageParams, QueryError},
     schema::{SchemaError, SchemaRegistry},
-    storage::{StorageError, StorageSource},
+    storage::{LagMode, StorageError, StorageSource},
 };
 use pyo3::{create_exception, exceptions::PyException, prelude::*};
 use serde::Serialize;
@@ -177,18 +177,25 @@ impl Source {
     }
 
     /// List consumer groups (name, state, members), filtered + paged.
-    #[pyo3(signature = (search=None, limit=50, offset=0))]
+    ///
+    /// `lag=True` adds each group's lag figures and ranks the whole result set
+    /// worst-first; `sort="name"` keeps name order and computes lag for the
+    /// returned page only. Both cost more than the default listing (#107).
+    #[pyo3(signature = (search=None, limit=50, offset=0, lag=false, sort=None))]
     fn groups<'py>(
         &self,
         py: Python<'py>,
         search: Option<String>,
         limit: usize,
         offset: usize,
+        lag: bool,
+        sort: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let source = self.source.clone();
         let page = Page::new(search, limit, offset);
+        let mode = LagMode::from_request(lag, sort.as_deref());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let v = source.list_groups(&page).await.map_err(storage_err)?;
+            let v = source.list_groups(&page, mode).await.map_err(storage_err)?;
             to_py(&v)
         })
     }

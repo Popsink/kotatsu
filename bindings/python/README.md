@@ -44,6 +44,10 @@ async def main():
     print(await src.topic("orders"))
     print(await src.topic_groups("orders"))
     print(await src.groups())
+    # Lag is opt-in: it reads the high watermark behind every committed offset.
+    # With it, the whole result set is ranked worst-first — pass sort="name" to
+    # keep alphabetical order and compute lag for the returned page only.
+    print(await src.groups(lag=True))
     print(await src.group("my-consumer"))
     print(await src.schemas())
     print(await src.schema("orders-value"))
