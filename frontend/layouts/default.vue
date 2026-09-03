@@ -5,6 +5,26 @@ const palette = ref<{ show: () => void } | null>(null)
 const { theme } = useTheme()
 
 /**
+ * Whether the narrow-viewport menu is open (#111).
+ *
+ * A **disclosure**, not a modal: the panel drops below the bar and the page stays
+ * where it is, so there is nothing to trap focus in and no overlay to dismiss —
+ * unlike the quick-jump palette, which really is a dialog. That keeps this to an
+ * `aria-expanded` and an `aria-controls`, which is all a disclosure owes.
+ *
+ * Only the narrow layout reads it: above the breakpoint the panel is always
+ * shown and the button is `display: none`, so widening the window restores the
+ * sidebar whatever state this is left in.
+ */
+const menuOpen = ref(false)
+
+// Tapping a link must not leave the menu covering the page it just opened. The
+// route is captured once: `useRoute()` inside the getter would be re-invoked
+// outside the setup context on every change.
+const route = useRoute()
+watch(() => route.fullPath, () => (menuOpen.value = false))
+
+/**
  * The chord label, resolved after mount.
  *
  * `navigator` does not exist while rendering on the server, and guessing wrong
@@ -19,11 +39,26 @@ onMounted(() => {
 
 <template>
   <div class="app">
-    <aside class="sidebar">
-      <div class="brand">
-        <BrandWordmark class="logo" />
-        <span class="product">kotatsu</span>
+    <aside class="sidebar" :class="{ open: menuOpen }" @keydown.escape="menuOpen = false">
+      <div class="bar">
+        <div class="brand">
+          <BrandWordmark class="logo" />
+          <span class="product">kotatsu</span>
+        </div>
+        <!-- Only rendered under the breakpoint, by CSS rather than by a resize
+             listener: `display: none` takes it out of the accessibility tree
+             too, so there is no phantom control on a desktop tab order. -->
+        <button
+          type="button"
+          class="burger"
+          :aria-expanded="menuOpen"
+          aria-controls="sidebar-nav"
+          :aria-label="menuOpen ? 'Close menu' : 'Open menu'"
+          @click="menuOpen = !menuOpen"
+        >{{ menuOpen ? '✕' : '☰' }}</button>
       </div>
+
+      <div id="sidebar-nav" class="panel">
       <nav>
         <NuxtLink to="/">Overview</NuxtLink>
         <NuxtLink to="/topics">Topics</NuxtLink>
@@ -47,6 +82,7 @@ onMounted(() => {
           <option v-for="t in THEMES" :key="t" :value="t">{{ t }}</option>
         </select>
       </label>
+      </div>
     </aside>
     <main class="content">
       <slot />
@@ -160,6 +196,15 @@ code, pre, .mono { font-family: 'Geist Mono', ui-monospace, monospace; }
 .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 .sidebar { background: var(--panel); padding: 1.25rem 1rem; border-right: 1px solid var(--border); }
 .brand { display: flex; flex-direction: column; gap: 0.35rem; margin: 0 0 1.75rem; }
+/* Hidden above the breakpoint, and `display: none` is deliberate: it takes the
+   button out of the accessibility tree and the tab order as well as out of the
+   layout, so a desktop reader never tabs through a control that does nothing. */
+.burger {
+  display: none; background: none; border: 1px solid var(--border);
+  border-radius: 8px; color: var(--fg); font: inherit; font-size: 1rem;
+  line-height: 1; padding: 0.4rem 0.6rem; cursor: pointer;
+}
+.burger:hover { border-color: var(--accent); color: var(--accent); }
 /* The wordmark is inline SVG painted with `currentColor`, so its ink is a token
    like any other text. */
 .brand .logo { height: 22px; width: auto; align-self: flex-start; color: var(--brand-ink); }
@@ -191,22 +236,32 @@ nav .muted { color: var(--muted); cursor: not-allowed; }
 
 /*
  * The sidebar was a hard 220px column with no breakpoint, so under ~700px it ate
- * a third of the viewport (#111). It becomes a top bar instead — the same links,
- * laid out along the width that is actually there.
+ * a third of the viewport (#111). Under the breakpoint it collapses to a bar
+ * holding the brand and a burger, and the same nav drops out of it on demand —
+ * folding the links into a row was only a sidebar wearing a different shape, and
+ * it still spent a band of every screen on navigation nobody had asked for.
  */
 @media (max-width: 900px) {
   .content { padding: 1.5rem; }
 }
 @media (max-width: 700px) {
-  .app { grid-template-columns: 1fr; }
+  /* `auto 1fr`, not two implicit `auto` rows: the grid inherits `min-height:
+     100vh`, and `align-content: stretch` — the default — splits the leftover
+     height *equally* between auto-sized rows. One column therefore gave the bar
+     half of the empty space, ~150px of dead panel above every page. */
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .sidebar {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.9rem;
     padding: 0.75rem 1rem;
     border-right: 0; border-bottom: 1px solid var(--border);
   }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .brand { flex-direction: row; align-items: center; gap: 0.5rem; margin: 0; }
-  nav { flex-direction: row; flex-wrap: wrap; gap: 0.2rem; }
-  .jump, .theme { width: auto; margin-top: 0; }
+  .burger { display: block; }
+  /* Collapsed, not merely invisible: `display: none` keeps the links out of the
+     tab order while the menu is shut, which is what `aria-expanded="false"`
+     promises. */
+  .panel { display: none; }
+  .sidebar.open .panel { display: block; padding-top: 0.75rem; }
   .content { padding: 1rem; }
 }
 </style>

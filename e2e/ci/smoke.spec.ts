@@ -708,6 +708,50 @@ test.describe('UI smoke', () => {
     );
   });
 
+  test('the narrow layout keeps its nav behind a burger', async ({ page }) => {
+    await page.setViewportSize({ width: 600, height: 900 });
+    await page.goto('/topics');
+
+    const nav = page.getByRole('link', { name: 'Consumer groups' });
+    // Located by what it controls, not by its label: the label flips between
+    // `Open menu` and `Close menu`, so a name-based locator survives one click.
+    const burger = page.locator('button[aria-controls="sidebar-nav"]');
+
+    // Collapsed, not merely off-screen. `aria-expanded="false"` promises the
+    // links are out of the tab order, and `display: none` is what keeps it.
+    await expect(burger).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav).toBeHidden();
+
+    // And collapsed to its own height: the grid inherits `min-height: 100vh`, and
+    // two auto-sized rows split the leftover space equally, which handed the bar
+    // ~150px of empty panel above every page.
+    const bar = (await page.locator('aside.sidebar').boundingBox())!;
+    expect(bar.height).toBeLessThan(100);
+
+    await burger.click();
+    await expect(burger).toHaveAttribute('aria-expanded', 'true');
+    await expect(nav).toBeVisible();
+
+    // Escape closes it without a pointer — focus is still on the burger, which
+    // is inside the element carrying the handler.
+    await page.keyboard.press('Escape');
+    await expect(nav).toBeHidden();
+
+    // And following a link does not leave the menu covering the page it opened.
+    await burger.click();
+    await nav.click();
+    await expect(page).toHaveURL(/\/groups$/);
+    await expect(burger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  test('the burger is not in a desktop tab order', async ({ page }) => {
+    await page.goto('/topics');
+    // `display: none` above the breakpoint, so it is absent from the
+    // accessibility tree rather than merely invisible.
+    await expect(page.locator('button[aria-controls="sidebar-nav"]')).toBeHidden();
+    await expect(page.getByRole('link', { name: 'Consumer groups' })).toBeVisible();
+  });
+
   test('the layout holds at 600px with no horizontal page scroll', async ({ page }) => {
     await page.setViewportSize({ width: 600, height: 900 });
     await page.goto('/topics/orders');
