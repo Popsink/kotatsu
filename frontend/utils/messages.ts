@@ -154,3 +154,57 @@ export function nextCursor(res: {
       : []
   return points.length ? points.join(',') : null
 }
+
+/**
+ * The columns the message table can show, in the order it shows them (#108).
+ *
+ * The order is fixed and the visibility is not: a reader picks *what* to see, not
+ * where it sits, so two people looking at the same topic still recognise each
+ * other's screenshot.
+ */
+export const MESSAGE_COLUMNS = [
+  'offset',
+  'partition',
+  'timestamp',
+  'size',
+  'key',
+  'value',
+] as const
+export type MessageColumn = (typeof MESSAGE_COLUMNS)[number]
+
+/** What the table showed before it was configurable — `partition` joins on a fan-out. */
+export const DEFAULT_COLUMNS: MessageColumn[] = ['offset', 'timestamp', 'key', 'value']
+
+/**
+ * A stored column choice, or `null` for anything unusable.
+ *
+ * Rejects an **empty** selection as well as a malformed one: a table with no
+ * columns has no row to click, so a reader who emptied it could not get back to
+ * the picker without clearing storage. Unknown names are dropped rather than
+ * failing the whole entry, so a preference written by a build that had one more
+ * column still loads.
+ */
+export function coerceColumns(value: unknown): MessageColumn[] | null {
+  if (!Array.isArray(value)) return null
+  const known = value.filter((v): v is MessageColumn =>
+    (MESSAGE_COLUMNS as readonly string[]).includes(v as string),
+  )
+  const unique = MESSAGE_COLUMNS.filter((c) => known.includes(c))
+  return unique.length ? [...unique] : null
+}
+
+/**
+ * Median and p99 of the record sizes in **the page that was fetched** — the cheap
+ * version of a topic-analysis pane (#108).
+ *
+ * It describes the window, not the topic: a filtered search over 50 records says
+ * nothing about the other million, and the summary line says which it is. Nearest
+ * rank, so every figure returned is a size some record really has rather than an
+ * interpolation between two of them.
+ */
+export function sizeStats(sizes: number[]): { p50: number; p99: number; max: number } | null {
+  const usable = sizes.filter((n) => Number.isFinite(n) && n >= 0).sort((a, b) => a - b)
+  if (!usable.length) return null
+  const at = (q: number) => usable[Math.min(usable.length - 1, Math.ceil(q * usable.length) - 1)]
+  return { p50: at(0.5), p99: at(0.99), max: usable[usable.length - 1] }
+}

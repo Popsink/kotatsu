@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildMessagesQuery,
+  coerceColumns,
+  DEFAULT_COLUMNS,
   fromRouteQuery,
   nextCursor,
+  sizeStats,
   toRouteQuery,
   type MessageQuery,
 } from '~/utils/messages'
@@ -154,5 +157,57 @@ describe('nextCursor', () => {
 
   it('carries the single-partition shape too', () => {
     expect(nextCursor({ partition: 3, resume: 41190 })).toBe('3:41190')
+  })
+})
+
+describe('coerceColumns', () => {
+  it('keeps a stored choice in the table’s own order, not the stored one', () => {
+    // Two readers who picked the same columns in a different sequence must get
+    // the same table, otherwise a screenshot stops being comparable.
+    expect(coerceColumns(['value', 'offset'])).toEqual(['offset', 'value'])
+  })
+
+  it('drops a name it does not know instead of failing the whole entry', () => {
+    // A preference written by a build with one more column must still load.
+    expect(coerceColumns(['offset', 'partition', 'headers'])).toEqual(['offset', 'partition'])
+  })
+
+  it('refuses an empty selection, which would leave no row to click', () => {
+    expect(coerceColumns([])).toBeNull()
+    expect(coerceColumns(['nothing-real'])).toBeNull()
+  })
+
+  it('refuses anything that is not a list', () => {
+    expect(coerceColumns(null)).toBeNull()
+    expect(coerceColumns('offset')).toBeNull()
+    expect(coerceColumns({ offset: true })).toBeNull()
+  })
+
+  it('has a default that is what the table showed before it was configurable', () => {
+    expect(coerceColumns(DEFAULT_COLUMNS)).toEqual(DEFAULT_COLUMNS)
+  })
+})
+
+describe('sizeStats', () => {
+  it('reports figures a record really has, by nearest rank', () => {
+    const stats = sizeStats([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+    expect(stats).toEqual({ p50: 50, p99: 100, max: 100 })
+  })
+
+  it('does not interpolate between two records', () => {
+    // p50 of an even count could average to 15; it must name one of the sizes.
+    expect(sizeStats([10, 20])?.p50).toBe(10)
+  })
+
+  it('handles a single record without pretending to a distribution', () => {
+    expect(sizeStats([42])).toEqual({ p50: 42, p99: 42, max: 42 })
+  })
+
+  it('ignores what is not a size, and says nothing when none is left', () => {
+    // An older API serves records with no `size` at all: the summary must drop
+    // out rather than report 0 bytes as though it had measured them.
+    expect(sizeStats([undefined as unknown as number, 8])).toEqual({ p50: 8, p99: 8, max: 8 })
+    expect(sizeStats([])).toBeNull()
+    expect(sizeStats([NaN, -1])).toBeNull()
   })
 })
