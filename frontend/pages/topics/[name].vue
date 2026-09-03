@@ -583,12 +583,15 @@ async function copyMsg(r: Record) {
       <button type="button" class="sort" :aria-pressed="newestFirst" @click="flipOrder = !flipOrder">
         {{ orderLabel }} ⇅
       </button>{{ ' ' }}
-      <!-- The caveat belongs beside the order it qualifies, and only when the
-           read actually spanned partitions. The interpolated space above is the
-           same trap as the heading's: Vue drops a whitespace-only text node that
-           contains a newline, so `⇅(best effort)` came out glued. -->
+      <!-- The caveat belongs beside the order it qualifies, and only when more
+           than one partition actually contributed: `partition=all` on a
+           single-partition topic performs no cross-partition merge, so saying
+           the ordering is best-effort there is noise.
+           The interpolated space above is the same trap as the heading's: Vue
+           drops a whitespace-only text node that contains a newline, so
+           `⇅(best effort)` came out glued. -->
       <span
-        v-if="allPartitions"
+        v-if="(partitionSummary?.length ?? 0) > 1"
         class="hint"
         title="Timestamps are not ordered across partitions, so the merge across them is best-effort."
       >(best effort)</span>

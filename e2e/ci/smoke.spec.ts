@@ -786,6 +786,30 @@ test.describe('UI smoke', () => {
     await expect(header).toBeVisible();
   });
 
+  test('every cell sits under its own header', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: /Columns/ }).click();
+    await page.getByRole('checkbox', { name: 'size' }).check();
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
+
+    // The headers come from a loop over `MESSAGE_COLUMNS`; the cells are written
+    // out one by one in the template. Two sources for one order, so assert they
+    // agree — a column inserted in the wrong place would put its data under a
+    // neighbour's heading, silently and identically on every row.
+    const names = (loc: ReturnType<typeof page.locator>) =>
+      loc.evaluateAll((els) => els.map((e) => e.getAttribute('data-col')));
+
+    const headers = await names(page.locator('table.msgs thead th[data-col]'));
+    const cells = await names(
+      page.locator('table.msgs tbody tr.row').first().locator('td[data-col]'),
+    );
+    expect(cells).toEqual(headers);
+    // With `size` ticked and `partition` forced in by the default `partition=all`,
+    // that is every column, in the order the module declares them.
+    expect(headers).toEqual(['offset', 'partition', 'timestamp', 'size', 'key', 'value']);
+  });
+
   test('the topic heading keeps a space before the cluster it names', async ({ page }) => {
     await page.goto('/topics/orders');
     // The accessible name, not the pixels: Vue drops the whitespace-only text
