@@ -648,6 +648,81 @@ test.describe('UI smoke', () => {
     await expect(link).toHaveAttribute('href', /\/schemas\/avro-orders-value\?id=\d+/);
   });
 
+  /**
+   * #111: the tree's group rows were a `<tr>` with a click handler and nothing
+   * else — no focus, no Enter — so drilling into an org needed a mouse.
+   */
+  test('the topic tree opens from the keyboard', async ({ page }) => {
+    await page.goto('/topics');
+    const org = page.getByRole('link', { name: 'acme' });
+    await org.focus();
+    await expect(org).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/[?&]p=acme/);
+  });
+
+  test('a message expands from the keyboard, and says whether it is open', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+
+    const disclose = page.getByRole('button', { name: /^Expand offset/ }).first();
+    await expect(disclose).toHaveAttribute('aria-expanded', 'false');
+    await disclose.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(page.locator('tr.detail')).toBeVisible();
+    // Same control, now naming the other direction — which is what tells a
+    // screen reader the row opened.
+    await expect(page.getByRole('button', { name: /^Collapse offset/ }).first()).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
+  test('focus is visible on the first thing a keyboard reaches', async ({ page }) => {
+    await page.goto('/topics');
+    await page.keyboard.press('Tab');
+    // There was no focus styling at all, so a keyboard reader could not tell
+    // where they were. Read off the focused element rather than a chosen one, so
+    // this asserts the global ring and not one lucky selector.
+    const ring = await page.evaluate(() => {
+      const el = document.activeElement;
+      return el ? getComputedStyle(el).outlineWidth : '0px';
+    });
+    expect(ring).not.toBe('0px');
+  });
+
+  test('the theme choice persists, and system un-stamps it', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Theme').selectOption('light');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+    await page.reload();
+    // The inline boot script is what makes this survive a reload without a
+    // frame of the dark palette.
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+    await page.getByLabel('Theme').selectOption('system');
+    expect(await page.evaluate(() => document.documentElement.hasAttribute('data-theme'))).toBe(
+      false,
+    );
+  });
+
+  test('the layout holds at 600px with no horizontal page scroll', async ({ page }) => {
+    await page.setViewportSize({ width: 600, height: 900 });
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs')).toBeVisible();
+
+    // The sidebar was a hard 220px column and `.msgs` six monospace columns at
+    // `width: 100%`; together they pushed the page sideways. The table may
+    // scroll inside its own box — the document may not.
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+
   test('consumer group detail shows zero lag', async ({ page }) => {
     await page.goto('/groups/qa-group');
     await expect(page.getByRole('heading', { name: 'Group qa-group' })).toBeVisible();

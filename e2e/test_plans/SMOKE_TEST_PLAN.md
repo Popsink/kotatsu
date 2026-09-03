@@ -118,6 +118,12 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 22b | Cells under their headers | `/topics/orders`, tick `size`, Search | the `data-col` sequence of the row equals that of the header — no column renders under a neighbour's heading | #108 |
 | 23 | Topic heading spacing | `/topics/orders` | the heading reads `Topic orders on demo` — a space before `on`, in the text and not only in the layout | #108 |
 
+| 19 | Tree from the keyboard | focus the `acme` row's link on `/topics`, `Enter` | the row navigates to `?p=acme` — a `<tr>` alone took neither focus nor `Enter` | ACC-001 |
+| 20 | Message from the keyboard | focus a row's disclosure button, `Enter` | the detail row opens and the button flips from `Expand offset n` / `aria-expanded=false` to `Collapse` / `true` | ACC-001 |
+| 21 | Focus is visible | `Tab` once on `/topics` | the focused element has a non-zero `outline-width` | ACC-001 |
+| 22 | Theme persists | Theme → `light`, reload, then → `system` | `<html data-theme="light">` survives the reload; `system` removes the attribute | ACC-002 |
+| 23 | 600 px viewport | `/topics/orders`, Search, viewport 600×900 | the table scrolls inside its own box and `scrollWidth == clientWidth` on the document | ACC-003 |
+
 ## Pass/Fail
 
 - **Pass**: all 23 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
