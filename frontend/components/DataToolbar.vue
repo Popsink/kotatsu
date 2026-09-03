@@ -39,7 +39,7 @@ defineEmits<{ prev: []; next: [] }>()
 
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0 0.5rem; max-width: 560px; }
-.search { flex: 0 1 280px; background: var(--raised); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.6rem; }
+.search { flex: 0 1 280px; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.6rem; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); }
 .range { font-size: 0.8rem; white-space: nowrap; }

@@ -236,7 +236,7 @@ h2 code { color: var(--accent); }
 .meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }
 .meta dd { margin: 0.2rem 0 0; font-family: ui-monospace, monospace; }
-select { background: var(--raised); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.2rem 0.4rem; font-family: ui-monospace, monospace; }
+select { background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.2rem 0.4rem; font-family: ui-monospace, monospace; }
 select:disabled { opacity: 0.5; }
 .bar { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem; font-size: 0.85rem; }
 .toggle { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }

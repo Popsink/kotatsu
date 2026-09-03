@@ -724,7 +724,7 @@ h2 code { color: var(--accent); }
 .msgs { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
 .msgs th { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.4rem; }
 .row { cursor: pointer; border-bottom: 1px solid var(--hairline); }
-.row:hover { background: var(--raised); }
+.row:hover { background: var(--hover); }
 .row td { padding: 0.4rem; vertical-align: top; }
 .caret { color: var(--muted); width: 1.2rem; }
 .caret button { background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; }

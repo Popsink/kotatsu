@@ -57,7 +57,7 @@ defineEmits<{ retry: [] }>()
 .list :deep(th) { text-align: left; font-size: 0.75rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.5rem; }
 .list :deep(td) { padding: 0.5rem; border-bottom: 1px solid var(--hairline); }
 .list :deep(.row) { cursor: pointer; }
-.list :deep(.row):hover { background: var(--raised); }
+.list :deep(.row):hover { background: var(--hover); }
 .list :deep(.link) { color: var(--accent); text-decoration: none; }
 .list :deep(.row):hover .link, .list :deep(.link):hover { text-decoration: underline; }
 .list :deep(.mono) { font-family: ui-monospace, monospace; }

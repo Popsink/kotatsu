@@ -67,15 +67,18 @@ onMounted(() => {
  *
  * Every foreground token is measured against both of its backgrounds: the worst
  * text pair is 4.75 in dark (`--muted` on `--panel`) and 4.81 in light (`--ok`
- * on `--bg`), so both sets clear WCAG AA's 4.5 for normal text. `--border-strong`
- * exists because `--border` is a 1.4 separator — fine for a rule between rows,
- * far under the 3.0 that 1.4.11 asks of a control's own boundary.
+ * on `--bg`), so both sets clear WCAG AA's 4.5 for normal text.
+ *
+ * `--border` measures 1.39 against `--bg`, which is fine for a rule between rows
+ * and far under the 3.0 that SC 1.4.11 asks of a control's own boundary. That
+ * affects 13 declarations across 7 files and changes how every input and button
+ * looks in both themes, so it is reported rather than half-done here — see the
+ * PR body.
  */
 :root {
   --bg: #051522;        /* ink / navy */
   --panel: #0a1f30;     /* raised navy */
   --border: #14324a;
-  --border-strong: #4d7399;
   --fg: #e4e6e8;        /* grey-100 */
   --muted: #7c8a98;
   --accent: #c78ceb;    /* lavender */
@@ -83,12 +86,14 @@ onMounted(() => {
   --ok: #52d9b4;        /* green */
   --warn: #f7b862;      /* yellow */
   --err: #f37f77;       /* red */
-  /* `--raised` is a fill (a row on hover, a search field), `--hairline` a rule
-     between rows. They share one value in dark because the palette had one
-     hard-coded `#0e2a40` doing both jobs — kept identical so this branch
-     changes nothing about how dark looks — and part ways in light, where a fill
-     and a rule cannot be the same tone. */
-  --raised: #0e2a40;
+  /* Three jobs one hard-coded `#0e2a40` was doing: `--field` is a control's own
+     surface, `--hover` a row or link under the pointer, `--hairline` the rule
+     between rows. All three keep that value in dark, so this branch changes
+     nothing about how dark looks — and they part ways in light, where a field
+     must be *lighter* than the page it sits on and a hover *darker*. Merging the
+     first two is what made the search box grey on a near-white page. */
+  --field: #0e2a40;
+  --hover: #0e2a40;
   --hairline: #0e2a40;
   /* Text on an accent fill. Navy reads on the brand lavender (7.4) and would
      not on the light theme's deeper purple, where it becomes white (8.3). */
@@ -103,7 +108,6 @@ onMounted(() => {
     --bg: #f2f4f7;
     --panel: #ffffff;
     --border: #c8d2dd;
-    --border-strong: #798795;
     --fg: #0b1a27;
     --muted: #526271;
     --accent: #6d2f9c;
@@ -111,10 +115,11 @@ onMounted(() => {
     --ok: #0d7a5f;
     --warn: #8a5200;
     --err: #b3251e;
-    --raised: #eef1f5;
+    --field: #ffffff;
+    --hover: #eef1f5;
     --hairline: #e3e8ee;
     --accent-ink: #ffffff;
-  --brand-ink: #051522;
+    --brand-ink: #051522;
     color-scheme: light;
   }
 }
@@ -122,7 +127,6 @@ onMounted(() => {
   --bg: #f2f4f7;
   --panel: #ffffff;
   --border: #c8d2dd;
-  --border-strong: #798795;
   --fg: #0b1a27;
   --muted: #526271;
   --accent: #6d2f9c;
@@ -130,7 +134,8 @@ onMounted(() => {
   --ok: #0d7a5f;
   --warn: #8a5200;
   --err: #b3251e;
-  --raised: #eef1f5;
+  --field: #ffffff;
+  --hover: #eef1f5;
   --hairline: #e3e8ee;
   --accent-ink: #ffffff;
   --brand-ink: #051522;
@@ -161,7 +166,7 @@ code, pre, .mono { font-family: 'Geist Mono', ui-monospace, monospace; }
 .brand .product { font-size: 0.95rem; font-weight: 600; color: var(--accent); letter-spacing: 0.02em; }
 nav { display: flex; flex-direction: column; gap: 0.3rem; }
 nav a, nav span { color: var(--fg); text-decoration: none; padding: 0.45rem 0.6rem; border-radius: 8px; font-size: 0.92rem; }
-nav a:hover { background: var(--raised); }
+nav a:hover { background: var(--hover); }
 nav a.router-link-active { background: var(--accent-deep); color: var(--accent); }
 nav .muted { color: var(--muted); cursor: not-allowed; }
 .jump {
@@ -179,7 +184,7 @@ nav .muted { color: var(--muted); cursor: not-allowed; }
 }
 .theme select {
   margin-left: auto; background: var(--panel); color: var(--fg);
-  border: 1px solid var(--border-strong); border-radius: 6px;
+  border: 1px solid var(--border); border-radius: 6px;
   padding: 0.15rem 0.3rem; font: inherit; font-size: 0.78rem;
 }
 .content { padding: 2rem; }

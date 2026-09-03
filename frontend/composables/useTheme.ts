@@ -16,6 +16,11 @@ const STORAGE_KEY = 'kotatsu:theme'
  * Storage can throw (Safari private mode, a disabled origin) and can hold
  * anything, so both ends are guarded the way `useTopicFormat` guards the
  * per-topic preferences: an unusable entry falls back to `system`.
+ *
+ * **The layout is its single owner.** Each call gets its own `ref`, so a second
+ * call site would render a control that disagrees with the first one while both
+ * wrote to the same key. If the theme ever needs a second control, hoist the ref
+ * to module scope and guard the mount work — do not just call this again.
  */
 export function useTheme() {
   const theme = ref<Theme>('system')
