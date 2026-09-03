@@ -90,14 +90,21 @@ const matchCount = computed(() => hits.value.matches.size)
 
 <style scoped>
 .field { margin: 0.5rem 0; }
-.head { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.2rem; }
+/* Wraps rather than overflows: the row holds a label, a badge, a schema link, a
+   search box with a 10rem floor and a match count, which do not fit a narrow
+   pane on one line. */
+.head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 0.2rem; }
 .lbl { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 .tag {
   font-style: normal; font-size: 0.65rem; color: var(--accent);
   border: 1px solid var(--border); border-radius: 3px; padding: 0 0.25rem;
 }
+/* In the flow after the badge and the schema link, not pushed to the far edge by
+   `margin-left: auto`. The search is the section's third affordance and belongs
+   beside the other two: on a wide pane, right-aligning it left the box a thousand
+   pixels from the `VALUE` it searches (#108). */
 .find {
-  margin-left: auto; background: var(--bg); color: var(--fg);
+  background: var(--bg); color: var(--fg);
   border: 1px solid var(--border); border-radius: 3px; padding: 0.1rem 0.3rem;
   font-size: 0.72rem; min-width: 10rem;
 }
