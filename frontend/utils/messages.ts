@@ -125,6 +125,14 @@ export function fromRouteQuery(r: RouteQuery): MessageQuery {
   }
 }
 
+/** Low and high offsets of a partition, as the API reports them. */
+export interface Watermark {
+  low: number
+  high: number
+  /** Set when retention destroyed `[served_end, high)` — see #95. */
+  served_end?: number
+}
+
 /** One partition's contribution to a `partition=all` read. */
 export interface PartitionSummary {
   partition: number
@@ -132,6 +140,44 @@ export interface PartitionSummary {
   exhausted: boolean
   /** Where this partition's next page starts; `null` once it has nothing left. */
   resume: number | null
+  /** Served for every partition read, quiet ones included — see `liveEdgeCursor`. */
+  watermark: Watermark
+}
+
+/**
+ * The forward cursor that resumes at a topic's live edge (#106).
+ *
+ * Per partition, and **neither field alone is right**:
+ *
+ * - `resume`, where this page stopped, when it stopped short. A page is capped at
+ *   `limit`, so a burst bigger than one page leaves records unread — resuming at
+ *   the log end would step over them and lose them silently.
+ * - `high`, the next offset to be written, when the partition was read to the
+ *   end. `resume` is `null` there, and `nextCursor` drops such partitions
+ *   entirely; a cursor missing a partition stops polling it, because the API
+ *   narrows a read to the partitions the cursor names. A partition that was quiet
+ *   when Follow was armed would then never be looked at again.
+ *
+ * So: resume where there is more, the log end where there is not, and never drop
+ * a partition. `high` is exclusive, so it already *is* the first offset that does
+ * not exist yet — no `+1`. `null` when the response carries neither shape, which
+ * is a response nothing can be followed from.
+ */
+export function liveEdgeCursor(res: {
+  partition?: number | null
+  watermark?: Watermark | null
+  resume?: number | null
+  partitions?: PartitionSummary[] | null
+}): string | null {
+  if (res.partitions?.length) {
+    return res.partitions
+      .map((p) => `${p.partition}:${p.resume ?? p.watermark.high}`)
+      .join(',')
+  }
+  if (res.partition != null && res.watermark) {
+    return `${res.partition}:${res.resume ?? res.watermark.high}`
+  }
+  return null
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   DEFAULT_COLUMNS,
   visibleColumns,
   fromRouteQuery,
+  liveEdgeCursor,
   nextCursor,
   sizeStats,
   toRouteQuery,
@@ -237,5 +238,54 @@ describe('visibleColumns', () => {
   it('leaves an explicit choice of partition alone either way', () => {
     expect(visibleColumns(['partition'], false)).toEqual(['partition'])
     expect(visibleColumns(['partition'], true)).toEqual(['partition'])
+  })
+})
+
+describe('liveEdgeCursor', () => {
+  const wm = (high: number) => ({ low: 0, high })
+  const part = (partition: number, high: number, resume: number | null = null) => ({
+    partition,
+    scanned: 0,
+    exhausted: resume == null,
+    resume,
+    watermark: wm(high),
+  })
+
+  it('resumes at the log end when a partition was read to the end', () => {
+    expect(liveEdgeCursor({ partitions: [part(0, 12), part(1, 4)] })).toBe('0:12,1:4')
+  })
+
+  it('resumes where the page stopped when it stopped short', () => {
+    // A page is capped at `limit`, so a burst bigger than one page leaves records
+    // unread. Resuming at the log end (`99`) would step over them and lose them
+    // with nothing to show that it had.
+    expect(liveEdgeCursor({ partitions: [part(0, 99, 57)] })).toBe('0:57')
+  })
+
+  it('keeps a caught-up partition in the cursor beside a resuming one', () => {
+    // The other half of the rule: `nextCursor` drops partitions with no `resume`,
+    // and a cursor missing a partition stops polling it — the API narrows a read
+    // to the partitions its cursor names. Partition 1 would go blind.
+    expect(liveEdgeCursor({ partitions: [part(0, 99, 57), part(1, 4)] })).toBe('0:57,1:4')
+  })
+
+  it('includes a partition that produced nothing at all', () => {
+    // Quiet when Follow was armed, so no record on screen carries its offset.
+    expect(liveEdgeCursor({ partitions: [part(0, 9), part(1, 0)] })).toContain('1:0')
+  })
+
+  it('handles the single-partition shape, both ways round', () => {
+    expect(liveEdgeCursor({ partition: 3, watermark: wm(41) })).toBe('3:41')
+    expect(liveEdgeCursor({ partition: 3, watermark: wm(41), resume: 20 })).toBe('3:20')
+  })
+
+  it('prefers the fan-out shape when a response carries both', () => {
+    expect(liveEdgeCursor({ partition: 0, watermark: wm(1), partitions: [part(0, 7)] })).toBe('0:7')
+  })
+
+  it('says nothing when there is no edge to follow', () => {
+    expect(liveEdgeCursor({})).toBeNull()
+    expect(liveEdgeCursor({ partitions: [] })).toBeNull()
+    expect(liveEdgeCursor({ partition: 0, watermark: null })).toBeNull()
   })
 })
