@@ -374,7 +374,12 @@ async function copyMsg(r: Record) {
   <section>
     <NuxtLink to="/" class="back">← overview</NuxtLink>
     <h2>
-      Topic <code>{{ topic }}</code>
+      <!-- The interpolated space is load-bearing: Vue's default `condense`
+           whitespace handling drops a whitespace-only text node that contains a
+           newline, so `</code>` and the span below it would render glued
+           (`dbz_configon demo`). A CSS margin would only look right — the
+           heading's accessible name would still carry no space. -->
+      Topic <code>{{ topic }}</code>{{ ' ' }}
       <span v-if="cluster" class="muted">on {{ cluster }}</span>
     </h2>
 

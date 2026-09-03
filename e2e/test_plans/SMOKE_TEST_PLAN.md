@@ -115,10 +115,11 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 20 | Unambiguous timestamps | open the first `orders` record row | the timestamp ends in a zone offset; switching `Time` to `utc` ends it in `UTC` | MSG-014 |
 | 21 | Column choice persists | `/topics/orders`, Columns ▾, tick `size`, reload | the `size` header is still there after the reload | MSG-014 |
 | 22 | Per-partition size | `/topics/orders` partition table | a `size` column, non-zero for a partition holding records | #76 |
+| 23 | Topic heading spacing | `/topics/orders` | the heading reads `Topic orders on demo` — a space before `on`, in the text and not only in the layout | #108 |
 
 ## Pass/Fail
 
-- **Pass**: all 22 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
+- **Pass**: all 23 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
 - **Fail**: any step deviates → open the corresponding per-module ISTQB case to isolate.
 
 ## Tear down

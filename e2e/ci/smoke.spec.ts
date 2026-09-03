@@ -779,6 +779,14 @@ test.describe('UI smoke', () => {
     await expect(header).toBeVisible();
   });
 
+  test('the topic heading keeps a space before the cluster it names', async ({ page }) => {
+    await page.goto('/topics/orders');
+    // The accessible name, not the pixels: Vue drops the whitespace-only text
+    // node between `</code>` and the span, so this read `Topic orderson demo`.
+    // Asserted by role so a CSS-only fix cannot make it pass.
+    await expect(page.getByRole('heading', { name: `Topic orders on ${CLUSTER}` })).toBeVisible();
+  });
+
   test('the partition table shows the size the API has always reported', async ({ page }) => {
     // Served per partition since #76, dropped by the frontend interface until #108.
     await page.goto('/topics/orders');
