@@ -19,6 +19,15 @@ describe('canonical', () => {
     expect(canonical(a)).not.toBe(canonical(b))
   })
 
+  it('sorts nested keys too, which is where real schemas differ', () => {
+    // The flat case above passes even if `sortKeys` stops recursing. A field's
+    // own keys are the ones registries actually emit in a different order.
+    const a = record([{ name: 'id', type: 'int' }])
+    const b = record([{ type: 'int', name: 'id' }])
+    expect(canonical(a)).toBe(canonical(b))
+    expect(hasChanges(diffLines(canonical(a), canonical(b)))).toBe(false)
+  })
+
   it('hands back a payload it cannot parse rather than dropping it', () => {
     expect(canonical('not json at all')).toBe('not json at all')
   })
@@ -84,7 +93,42 @@ describe('fieldChanges', () => {
     const a = record([{ name: 'tags', type: 'string' }])
     const b = record([{ name: 'tags', type: { type: 'array', items: 'string' } }])
     expect(fieldChanges(a, b)).toEqual([
-      { name: 'tags', kind: 'type', from: 'string', to: 'array' },
+      { name: 'tags', kind: 'type', from: 'string', to: 'array<string>' },
+    ])
+  })
+
+  it('sees through a collection to its element type', () => {
+    // `array` on both sides would compare equal and report nothing, while the
+    // change breaks every reader of the field.
+    const a = record([{ name: 'tags', type: { type: 'array', items: 'string' } }])
+    const b = record([{ name: 'tags', type: { type: 'array', items: 'int' } }])
+    expect(fieldChanges(a, b)).toEqual([
+      { name: 'tags', kind: 'type', from: 'array<string>', to: 'array<int>' },
+    ])
+  })
+
+  it('sees a map by its value type', () => {
+    const a = record([{ name: 'meta', type: { type: 'map', values: 'string' } }])
+    const b = record([{ name: 'meta', type: { type: 'map', values: 'int' } }])
+    expect(fieldChanges(a, b).map((c) => `${c.from} → ${c.to}`)).toEqual([
+      'map<string> → map<int>',
+    ])
+  })
+
+  it('distinguishes a logical type from the primitive carrying it', () => {
+    // A `long` becoming a timestamp is a change of meaning, not of storage.
+    const a = record([{ name: 'at', type: 'long' }])
+    const b = record([{ name: 'at', type: { type: 'long', logicalType: 'timestamp-millis' } }])
+    expect(fieldChanges(a, b)).toEqual([
+      { name: 'at', kind: 'type', from: 'long', to: 'long (timestamp-millis)' },
+    ])
+  })
+
+  it('compares a named type by its name', () => {
+    const a = record([{ name: 'addr', type: { type: 'record', name: 'Address', fields: [] } }])
+    const b = record([{ name: 'addr', type: { type: 'record', name: 'Location', fields: [] } }])
+    expect(fieldChanges(a, b)).toEqual([
+      { name: 'addr', kind: 'type', from: 'Address', to: 'Location' },
     ])
   })
 

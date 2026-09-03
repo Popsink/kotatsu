@@ -89,7 +89,11 @@ const { data: current, pending: loadingVersion } = await useFetch<SchemaVersion>
   { watch: [selected] },
 )
 
-const { data: other, pending: loadingBase } = await useFetch<SchemaVersion>(
+const {
+  data: other,
+  pending: loadingBase,
+  error: baseError,
+} = await useFetch<SchemaVersion>(
   () =>
     compare.value && base.value != null
       ? `/api/schemas/${encodeURIComponent(subject)}/versions/${base.value}`
@@ -100,15 +104,25 @@ const { data: other, pending: loadingBase } = await useFetch<SchemaVersion>(
 const pretty = computed(() => canonical(current.value?.schema ?? ''))
 const prettyBase = computed(() => canonical(other.value?.schema ?? ''))
 
+/**
+ * Both sides are in hand.
+ *
+ * Needed because `changed` is `false` for a comparison that has not loaded, and
+ * for one whose base version failed to fetch — and "no diff yet" must not render
+ * as "these two versions are identical". Only the first comparison of a visit
+ * hits the loading case: after that `other` still holds the previous version.
+ */
+const ready = computed(() => compare.value && !!other.value && !!current.value)
+
 const lines = computed<DiffLine[]>(() =>
-  compare.value && other.value && current.value ? diffLines(prettyBase.value, pretty.value) : [],
+  ready.value ? diffLines(prettyBase.value, pretty.value) : [],
 )
 const changed = computed(() => hasChanges(lines.value))
-const fields = computed<FieldChange[]>(() =>
-  compare.value && other.value && current.value
-    ? fieldChanges(other.value.schema, current.value.schema)
-    : [],
-)
+const fields = computed<FieldChange[]>(() => {
+  const from = other.value
+  const to = current.value
+  return ready.value && from && to ? fieldChanges(from.schema, to.schema) : []
+})
 
 /** The `+` / `-` column, kept out of the template so the row can stay on one line. */
 function mark(line: DiffLine): string {
@@ -171,7 +185,8 @@ const CHANGE_LABEL: Record<FieldChange['kind'], string> = {
         <p class="summary">
           <code>v{{ base }}</code> → <code>v{{ selected }}</code>
           <span class="sep">·</span>
-          <span :class="changed ? 'warn' : 'ok'">{{ changed ? 'changed' : 'identical' }}</span>
+          <span v-if="ready" :class="changed ? 'warn' : 'ok'">{{ changed ? 'changed' : 'identical' }}</span>
+          <span v-else class="muted">—</span>
           <span class="sep">·</span>
           compatibility <strong>{{ data.compatibility ?? '—' }}</strong>
         </p>
@@ -186,7 +201,11 @@ const CHANGE_LABEL: Record<FieldChange['kind'], string> = {
           </li>
         </ul>
 
-        <p v-if="!changed" class="muted small">
+        <p v-if="baseError" class="err small">
+          Could not load v{{ base }} — nothing to compare against.
+        </p>
+        <p v-else-if="!ready" class="muted small">Loading v{{ base }}…</p>
+        <p v-else-if="!changed" class="muted small">
           The two versions are identical once their keys are sorted.
         </p>
         <!-- The row is one unbroken line on purpose: under `white-space: pre` any
@@ -212,6 +231,7 @@ h2 code { color: var(--accent); }
 .small { font-size: 0.82rem; }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
+.err { color: var(--err); }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 1rem 0 1.5rem; max-width: 640px; }
 .meta div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; }
 .meta dt { color: var(--muted); font-size: 0.72rem; }

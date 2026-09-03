@@ -168,13 +168,35 @@ function fieldsOf(raw: string): Map<string, AvroField> | null {
   return byName
 }
 
-/** A field type as one readable string: `string`, `null | string`, `array`. */
+/**
+ * A field type as one readable string: `string`, `null | string`, `array<int>`,
+ * `long (timestamp-millis)`.
+ *
+ * The parameter is part of the type, not decoration. `array<string>` widening to
+ * `array<int>`, or a `long` gaining a `timestamp-millis`, are changes that decide
+ * compatibility; labelling either by its bare kind would compare `array` with
+ * `array` and report no change at all.
+ *
+ * A named type compares by **name**, which is its identity in Avro. What changed
+ * inside it is the nested case this module deliberately does not walk into.
+ */
 function typeLabel(type: unknown): string {
   if (typeof type === 'string') return type
   if (Array.isArray(type)) return type.map(typeLabel).join(' | ')
   if (type && typeof type === 'object') {
-    const inner = (type as { type?: unknown }).type
-    return typeof inner === 'string' ? inner : JSON.stringify(type)
+    const t = type as {
+      type?: unknown
+      items?: unknown
+      values?: unknown
+      logicalType?: unknown
+      name?: unknown
+    }
+    if (typeof t.type !== 'string') return JSON.stringify(type)
+    if (t.type === 'array') return `array<${typeLabel(t.items)}>`
+    if (t.type === 'map') return `map<${typeLabel(t.values)}>`
+    if (typeof t.logicalType === 'string') return `${t.type} (${t.logicalType})`
+    if (typeof t.name === 'string') return t.name
+    return t.type
   }
   return String(type)
 }
