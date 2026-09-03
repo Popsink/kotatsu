@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { errorStatus } from '~/utils/errors'
 
+const route = useRoute()
+
 const { search, q, data, pending, error, refresh, pager, prev, next } = await usePagedList<{
   registry: string
   items: string[]
   total: number
-}>(({ q, limit, offset }) =>
-  `/api/schemas?search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`,
+}>(
+  ({ q, limit, offset }) =>
+    `/api/schemas?search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`,
+  // The quick-jump palette's "see all" link arrives with its term (#105).
+  (route.query.q as string) || '',
 )
 
 const items = computed(() => data.value?.items ?? [])

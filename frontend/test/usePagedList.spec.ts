@@ -23,9 +23,11 @@ function build({ q, limit, offset }: { q: string; limit: number; offset: number 
   return `/api/things?search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`
 }
 
-async function makeList() {
+async function makeList(initialSearch?: string) {
   const scope = effectScope()
-  const list = (await scope.run(() => usePagedList<{ items: unknown[]; total: number }>(build)))!
+  const list = (await scope.run(() =>
+    usePagedList<{ items: unknown[]; total: number }>(build, initialSearch),
+  ))!
   return { scope, list }
 }
 
@@ -124,5 +126,31 @@ describe('usePagedList', () => {
     scope.stop()
     vi.advanceTimersByTime(300)
     expect(list.q.value).toBe('')
+  })
+
+  it('starts from a seeded term, in the first fetch rather than a debounce later', async () => {
+    const { list } = await makeList('ord')
+    expect(list.search.value).toBe('ord')
+    expect(list.q.value).toBe('ord')
+    expect(fetchState.url!.value).toBe('/api/things?search=ord&limit=50&offset=0')
+  })
+
+  it('leaves a seeded term editable like any other', async () => {
+    const { list } = await makeList('ord')
+    list.search.value = 'gizmo'
+    vi.advanceTimersByTime(300)
+    expect(list.q.value).toBe('gizmo')
+    expect(fetchState.url!.value).toBe('/api/things?search=gizmo&limit=50&offset=0')
+  })
+
+  it('first() returns to page one and keeps the search', async () => {
+    const { list } = await makeList('ord')
+    list.next()
+    list.next()
+    expect(list.pager.value.from).toBe(101)
+    list.first()
+    expect(list.pager.value.from).toBe(1)
+    expect(list.q.value).toBe('ord') // the term is the point of first() over reset()
+    expect(fetchState.url!.value).toBe('/api/things?search=ord&limit=50&offset=0')
   })
 })

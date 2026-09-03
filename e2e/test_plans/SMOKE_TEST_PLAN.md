@@ -106,10 +106,12 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 14 | Headers table | open the first `headers` record | **two** rows, `trace`/`abc123` and `span`/`d4e5f6` — one per header, not a joined block | MSG-013 |
 | 15 | Headers absent | open the second `headers` record | no headers table at all | MSG-013 |
 | 16 | Nested Avro folds | open the `avro-nested` record | a `{…} 2 keys` fold at depth 2, and `find in payload` = `paris` opens through it | MSG-013 |
+| 17 | Flat topic search | open `/topics`, search `dbz_config` at the root | no organizations match, and taking the offer lists `acme.prod.db2 / dbz_config` under `?all=1` | NAV-002 |
+| 18 | Quick-jump palette | `Ctrl-K` on `/groups`, type `avro-orders` | Topics and Schemas sections; `Enter` opens the first, `Esc` closes without touching the page | NAV-003 |
 
 ## Pass/Fail
 
-- **Pass**: all 16 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
+- **Pass**: all 18 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
 - **Fail**: any step deviates → open the corresponding per-module ISTQB case to isolate.
 
 ## Tear down

@@ -5,15 +5,19 @@ interface GroupSummary {
   members: number
 }
 
+const route = useRoute()
 const { cluster, configured } = await useCluster()
 
 const { search, q, data, pending, error, refresh, pager, prev, next } = await usePagedList<{
   items: GroupSummary[]
   total: number
-}>(({ q, limit, offset }) =>
-  cluster.value
-    ? `/api/clusters/${cluster.value}/groups?search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`
-    : '',
+}>(
+  ({ q, limit, offset }) =>
+    cluster.value
+      ? `/api/clusters/${cluster.value}/groups?search=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}`
+      : '',
+  // The quick-jump palette's "see all" link arrives with its term (#105).
+  (route.query.q as string) || '',
 )
 
 const items = computed(() => data.value?.items ?? [])

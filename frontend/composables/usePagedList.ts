@@ -19,11 +19,18 @@ const DEBOUNCE_MS = 300
  */
 export async function usePagedList<T extends PagedResponse>(
   buildUrl: (params: { q: string; limit: number; offset: number }) => string,
+  /**
+   * A term to start from, when the page was opened on a search rather than
+   * navigated to — the quick-jump palette's "see all" link carries one (#105).
+   * Seeded into both refs so the first fetch already includes it instead of
+   * arriving a debounce later.
+   */
+  initialSearch = '',
 ) {
   /** What the user is typing. */
-  const search = ref('')
+  const search = ref(initialSearch)
   /** What is actually queried — `search` after the debounce. */
-  const q = ref('')
+  const q = ref(initialSearch)
   const limit = ref(PAGE_SIZE)
   const offset = ref(0)
 
@@ -57,6 +64,10 @@ export async function usePagedList<T extends PagedResponse>(
   function next() {
     if (pager.value.canNext) offset.value += limit.value
   }
+  /** Back to page one, keeping the search — for when the list's shape changes. */
+  function first() {
+    offset.value = 0
+  }
   /** Back to an empty search on page one — used when the list's scope changes. */
   function reset() {
     search.value = ''
@@ -65,5 +76,5 @@ export async function usePagedList<T extends PagedResponse>(
     offset.value = 0
   }
 
-  return { search, q, data, pending, error, refresh, pager, prev, next, reset }
+  return { search, q, data, pending, error, refresh, pager, prev, next, first, reset }
 }
