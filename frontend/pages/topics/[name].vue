@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { fieldBadge, fieldPreview, fieldText, type FieldValue } from '~/utils/field'
+import { fieldPreview, type FieldValue } from '~/utils/field'
 import { fmtTime } from '~/utils/format'
 import {
   buildMessagesQuery,
@@ -82,7 +82,7 @@ const limit = ref(initial.limit)
 
 // Serializer choice, remembered per topic (#32) — unless the link says otherwise:
 // whoever shared it chose a format deliberately, and it must render what they saw.
-const { keyFormat, valueFormat } = useTopicFormat(topic)
+const { keyFormat, valueFormat, rawJson } = useTopicFormat(topic)
 if (route.query.key_format) keyFormat.value = initial.keyFormat
 if (route.query.value_format) valueFormat.value = initial.valueFormat
 watch([keyFormat, valueFormat], () => {
@@ -422,6 +422,11 @@ async function copyMsg(r: Record) {
           <option value="raw">raw</option>
         </select>
       </label>
+      <!-- A rendering choice, like the two formats above, and remembered with
+           them — not a per-record one, so it lives once and not in every row. -->
+      <label class="rawtoggle">
+        <input type="checkbox" v-model="rawJson" /> raw JSON
+      </label>
       <button type="button" class="ghost" @click="showFilters = !showFilters">
         {{ showFilters ? 'Filters ▴' : 'Filters ▾' }}
       </button>
@@ -508,26 +513,19 @@ async function copyMsg(r: Record) {
           <tr v-if="expanded.has(rowKey(r))" class="detail">
             <td></td>
             <td :colspan="allPartitions ? 5 : 4">
-              <div class="kv">
-                <span class="lbl">key
-                  <em v-if="r.key" class="tag">{{ fieldBadge(r.key) }}</em>
+              <JsonTree :field="r.key" label="key" :raw="rawJson">
+                <template #links>
                   <NuxtLink v-if="r.key?.schemaId != null && keySubject" :to="`/schemas/${encodeURIComponent(keySubject)}`" class="schemalink">↗ schema</NuxtLink>
-                </span>
-                <pre>{{ fieldText(r.key) }}</pre>
-                <span v-if="r.key?.error" class="ferr">⚠ {{ r.key.error }}</span>
-              </div>
-              <div class="kv">
-                <span class="lbl">value
-                  <em v-if="r.value" class="tag">{{ fieldBadge(r.value) }}</em>
+                </template>
+              </JsonTree>
+              <JsonTree :field="r.value" label="value" :raw="rawJson">
+                <template #links>
                   <NuxtLink v-if="r.value?.schemaId != null && valueSubject" :to="`/schemas/${encodeURIComponent(valueSubject)}`" class="schemalink">↗ schema</NuxtLink>
-                </span>
-                <pre>{{ fieldText(r.value) }}</pre>
-                <span v-if="r.value?.error" class="ferr">⚠ {{ r.value.error }}</span>
-              </div>
-              <div class="kv" v-if="r.headers.length">
-                <span class="lbl">headers</span>
-                <pre>{{ r.headers.map(h => `${fieldText(h.key)}: ${fieldText(h.value)}`).join('\n') }}</pre>
-              </div>
+                </template>
+              </JsonTree>
+
+              <HeadersTable :headers="r.headers" />
+
               <button type="button" class="ghost copy" :class="{ copyfail: copyFailed === rowKey(r) }" @click="copyMsg(r)">
                 {{ copied === rowKey(r) ? 'Copied ✓' : copyFailed === rowKey(r) ? 'Copy failed' : 'Copy JSON' }}
               </button>
@@ -596,11 +594,7 @@ h2 code { color: var(--accent); }
 .caret { color: var(--muted); width: 1.2rem; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
 .detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
-.kv { display: grid; grid-template-columns: 70px 1fr; gap: 0.5rem; margin-bottom: 0.4rem; }
-.kv .lbl { color: var(--muted); font-size: 0.75rem; }
-.kv .tag { font-style: normal; color: var(--accent); font-size: 0.7rem; margin-left: 0.3rem; }
-.kv .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; margin-left: 0.4rem; }
-.kv .schemalink:hover { text-decoration: underline; }
-.kv .ferr { grid-column: 2; color: var(--err); font-size: 0.75rem; }
-.kv pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; font-size: 0.82rem; }
+.rawtoggle { flex-direction: row; align-items: center; gap: 0.3rem; }
+.schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; }
+.schemalink:hover { text-decoration: underline; }
 </style>

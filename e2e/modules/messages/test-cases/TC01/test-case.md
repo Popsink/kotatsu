@@ -59,7 +59,7 @@ the read path.
 | 4 | Verify cluster discovery | `GET /api/clusters` | Response `clusters` contains `"demo"` |
 | 5 | Verify topic listing | `GET /api/clusters/demo/topics` | `items` contains `orders` with `messages: 3`, `partitions: 1`, `storage_bytes > 0` |
 | 6 | Read messages via API | `GET /api/clusters/demo/topics/orders/messages` | `count: 3`, `records` array of 3, `watermark: {low:0, high:3}`, `exhausted: true` |
-| 7 | Assert record fidelity | inspect `records` | Offsets 0,1,2; keys `key-1..3` (`kind:"utf8"`); values equal the produced JSON strings |
+| 7 | Assert record fidelity | inspect `records` | Offsets 0,1,2; keys `key-1..3` (`kind:"utf8"` — a bare key is text, not JSON); values `kind:"json"` with `data` the parsed object (#103) |
 | 8 | Open the UI | navigate to `http://localhost:8080` | Kotatsu loads; cluster `demo` visible |
 | 9 | Open topic in UI | click cluster `demo` → topic `orders` | Topic detail shows 1 partition, 3 messages, low/high offsets 0/3 |
 | 10 | Browse messages in UI | open the messages/events view for `orders` | The 3 records render with their keys, values and offsets matching step 7 |

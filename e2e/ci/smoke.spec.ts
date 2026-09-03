@@ -51,8 +51,11 @@ test.describe('API smoke', () => {
         'orders',
         'events',
         'spread',
+        'nested',
+        'headers',
         'empty-topic',
         'avro-orders',
+        'avro-nested',
         'truncated',
         'acme.prod.db2.dbz_config',
       ]),
@@ -70,7 +73,10 @@ test.describe('API smoke', () => {
     expect(body.watermark).toMatchObject({ low: 0, high: 3 });
     expect(body.records.map((r: { offset: number }) => r.offset)).toEqual([0, 1, 2]);
     expect(body.records[0].key.data).toBe('key-1');
-    expect(body.records[0].value.data).toContain('widget');
+    // `auto` recognises a JSON object, so the browser has a structure to open
+    // instead of one long string (#103). A bare key is text, and stays text.
+    expect(body.records[0].value).toMatchObject({ kind: 'json', data: { id: 1, item: 'widget' } });
+    expect(body.records[0].key.kind).toBe('utf8');
   });
 
   test('empty-topic returns no records', async ({ request }) => {
@@ -454,6 +460,94 @@ test.describe('UI smoke', () => {
     await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
     await page.getByRole('button', { name: 'Search' }).click();
     await expect(page.getByText('{"id":1,"item":"widget"}')).toBeVisible();
+  });
+
+  /**
+   * #103: a decoded payload was a flat `<pre>` of `JSON.stringify`. For a CDC
+   * envelope that is a wall of text; `nested` is the seed's topic with one.
+   */
+  test('a nested payload opens as a tree, and searches inside itself', async ({ page }) => {
+    await page.goto('/topics/nested');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    const value = page.locator('[data-field="value"]');
+    // Depth 0 and 1 are open, so the folds are at depth 2: `after.tags` holds three
+    // items and `after.meta` two keys, and each says so rather than just showing a
+    // caret. Named exactly, so the assertion cannot pass on some other node.
+    await expect(value.getByRole('button', { name: '[…] 3 items' })).toBeVisible();
+    await expect(value.getByRole('button', { name: '{…} 2 keys' })).toBeVisible();
+
+    // The server found the record; the tree finds the field.
+    await value.getByRole('searchbox').fill('ops');
+    await expect(value.getByText('1 match')).toBeVisible();
+    // `after.meta.by` is at depth 3, behind the fold above — the search opened it.
+    await expect(value.getByText('"ops"')).toBeVisible();
+  });
+
+  /**
+   * The seed cannot carry a header value with a newline or a non-UTF-8 byte — the
+   * only producer that reaches this broker is line-oriented and text-only. Those
+   * two cases live in `HeadersTable.spec.ts`; this proves the table renders at all,
+   * against a real broker, where there used to be a joined `<pre>`.
+   */
+  test('headers render as a table, one row each', async ({ page }) => {
+    await page.goto('/topics/headers');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    const headers = page.locator('table.hdrs');
+    await expect(headers).toBeVisible();
+    await expect(headers.locator('tbody tr')).toHaveCount(2);
+    await expect(headers.getByText('trace')).toBeVisible();
+    await expect(headers.getByText('abc123')).toBeVisible();
+  });
+
+  /**
+   * The acceptance criterion says *Avro*, and `avro-orders` is two flat fields.
+   * `avro_to_json` flattens a union and nests a record, so what the tree folds is
+   * not only hand-written JSON.
+   */
+  test('a nested Avro record folds like any other payload', async ({ page }) => {
+    await page.goto('/topics/avro-nested');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+
+    const value = page.locator('[data-field="value"]');
+    await expect(value.getByText(/avro #\d+/)).toBeVisible();
+    // `customer.address` is a nested Avro record at depth 2, so it is folded.
+    await expect(value.getByRole('button', { name: '{…} 2 keys' })).toBeVisible();
+
+    // And a value inside it is reachable by search, through the fold.
+    await value.getByRole('searchbox').fill('paris');
+    await expect(value.getByText('"paris"')).toBeVisible();
+  });
+
+  test('a record without headers gets no headers table', async ({ page }) => {
+    await page.goto('/topics/headers');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').nth(1).click();
+    await expect(page.locator('table.hdrs')).toHaveCount(0);
+  });
+
+  test('raw JSON is a toggle, and it survives a reload', async ({ page }) => {
+    await page.goto('/topics/nested');
+    await page.getByRole('combobox', { name: 'From' }).selectOption('earliest');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.locator('table.msgs tbody tr.row').first().click();
+    // The tree is what an expanded record shows by default.
+    await expect(page.locator('[data-field="value"] pre')).toHaveCount(0);
+
+    await page.getByLabel('raw JSON').check();
+    await expect(page.locator('[data-field="value"] pre')).toBeVisible();
+
+    // Remembered with the two format choices, under the same per-topic key (#32).
+    await page.reload();
+    await expect(page.getByLabel('raw JSON')).toBeChecked();
   });
 
   test('schemas page lists the subject', async ({ page }) => {
