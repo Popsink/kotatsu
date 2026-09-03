@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmtBytes, fmtTime, splitTopicPath } from '~/utils/format'
+import { fmtBytes, fmtRelative, fmtTime, splitTopicPath } from '~/utils/format'
 
 describe('fmtBytes', () => {
   it('shows nothing stored as 0 B', () => {
@@ -22,9 +22,53 @@ describe('fmtBytes', () => {
 })
 
 describe('fmtTime', () => {
-  it('renders unix ms as a UTC timestamp without the T/Z noise', () => {
-    expect(fmtTime(0)).toBe('1970-01-01 00:00:00.000')
-    expect(fmtTime(1700000000123)).toBe('2023-11-14 22:13:20.123')
+  it('names the zone when asked for UTC, instead of leaving it to be guessed', () => {
+    expect(fmtTime(0, 'utc')).toBe('1970-01-01 00:00:00.000 UTC')
+    expect(fmtTime(1700000000123, 'utc')).toBe('2023-11-14 22:13:20.123 UTC')
+  })
+
+  it('renders a local time that parses back to the same instant', () => {
+    // The strongest property available without pinning the runtime's zone, and
+    // the one that matters: if the offset carried the sign `getTimezoneOffset`
+    // reports rather than the opposite, this round trip lands hours away.
+    for (const ms of [0, 1700000000123, 1770000000000]) {
+      const rendered = fmtTime(ms, 'local') // `2023-11-14 23:13:20.123 +01:00`
+      const iso = rendered.replace(' ', 'T').replace(' ', '')
+      expect(new Date(iso).getTime()).toBe(ms)
+    }
+  })
+
+  it('always carries a marker, whichever rendering is chosen', () => {
+    expect(fmtTime(1700000000123, 'local')).toMatch(/ [+-]\d{2}:\d{2}$/)
+    expect(fmtTime(1700000000123, 'utc')).toMatch(/ UTC$/)
+  })
+
+  it('hands back the raw epoch untouched, for correlating with a log', () => {
+    expect(fmtTime(1700000000123, 'epoch')).toBe('1700000000123')
+    expect(fmtTime(0, 'epoch')).toBe('0')
+  })
+
+  it('renders local by default, because that is what the reader’s clock says', () => {
+    expect(fmtTime(1700000000123)).toBe(fmtTime(1700000000123, 'local'))
+  })
+})
+
+describe('fmtRelative', () => {
+  const now = 1700000000000
+
+  it('coarsens the age to the unit a reader actually asks about', () => {
+    expect(fmtRelative(now - 3_000, now)).toBe('just now')
+    expect(fmtRelative(now - 42_000, now)).toBe('42 s ago')
+    expect(fmtRelative(now - 3 * 60_000, now)).toBe('3 min ago')
+    expect(fmtRelative(now - 5 * 3_600_000, now)).toBe('5 h ago')
+    expect(fmtRelative(now - 9 * 86_400_000, now)).toBe('9 d ago')
+  })
+
+  it('says a record is ahead of the clock rather than hiding the skew', () => {
+    // A producer whose clock runs fast is a real condition worth seeing, not one
+    // to clamp to `just now`.
+    expect(fmtRelative(now + 2 * 60_000, now)).toBe('in 2 min')
+    expect(fmtRelative(now + 1_000, now)).toBe('in a moment')
   })
 })
 
