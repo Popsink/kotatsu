@@ -10,8 +10,13 @@ import { describe, expect, it } from 'vitest'
  * who chose light got a navy search field with navy placeholder text in it. The
  * failure is invisible in review — every block *looks* complete — and it costs
  * nothing to assert, so it is asserted rather than re-checked by eye.
+ *
+ * Read relative to the Vitest root, not from `import.meta.url`: under the Nuxt
+ * environment that is a URL in Vite's module graph rather than a `file://` one,
+ * and `readFileSync` rejects it with `ERR_INVALID_URL_SCHEME` before a single
+ * assertion runs. `npm test` is `vitest run` from `frontend/`.
  */
-const LAYOUT = new URL('../layouts/default.vue', import.meta.url)
+const LAYOUT = 'layouts/default.vue'
 
 const BLOCKS: Record<string, RegExp> = {
   'dark :root': /\n:root \{(.*?)\n\}/s,
@@ -19,12 +24,21 @@ const BLOCKS: Record<string, RegExp> = {
   'light [data-theme]': /:root\[data-theme="light"\] \{(.*?)\n\}/s,
 }
 
+function read(): string {
+  try {
+    return readFileSync(LAYOUT, 'utf8')
+  } catch {
+    // A path problem must not read as a palette problem.
+    throw new Error(`${LAYOUT} not readable from ${process.cwd()}`)
+  }
+}
+
 function names(body: string): string[] {
   return [...body.matchAll(/(--[a-z-]+):/g)].map((m) => m[1]).sort()
 }
 
 describe('theme tokens', () => {
-  const css = readFileSync(LAYOUT, 'utf8')
+  const css = read()
   const parsed = Object.fromEntries(
     Object.entries(BLOCKS).map(([label, re]) => {
       const m = css.match(re)
