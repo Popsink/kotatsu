@@ -77,7 +77,7 @@ const reason = computed(() =>
 .card h3 { margin-top: 0; }
 .card h3 code { color: var(--accent); }
 dl { margin: 0; }
-dl div { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #0e2a40; }
+dl div { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid var(--hairline); }
 dt { color: var(--muted); font-size: 0.85rem; }
 dd { margin: 0; font-family: ui-monospace, monospace; }
 .recheck { margin-top: 0.75rem; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.8rem; cursor: pointer; }
