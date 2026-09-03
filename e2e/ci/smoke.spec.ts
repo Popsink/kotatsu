@@ -473,10 +473,13 @@ test.describe('UI smoke', () => {
     // before the search lands, so an unscoped locator asserts the wrong table.
     const results = page.locator('table.msgs');
     await expect(results.getByRole('columnheader', { name: 'partition' })).toBeVisible();
-    // Populated, not merely present: the cell after the caret, on the first row.
-    await expect(results.locator('tbody tr.row').first().locator('td').nth(1)).toHaveText(/^[0-2]$/);
-    // `earliest` reads towards newer records, and the label must not claim otherwise.
-    await expect(page.getByText('3 partitions, oldest first')).toBeVisible();
+    // Populated, not merely present. Columns are caret · offset · partition since
+    // #108 made them configurable in a fixed order, so partition is the third cell.
+    await expect(results.locator('tbody tr.row').first().locator('td').nth(2)).toHaveText(/^[0-2]$/);
+    // `earliest` reads towards newer records, and the label must not claim
+    // otherwise. The order moved onto the button that flips it (#108).
+    await expect(page.getByText('3 partitions read')).toBeVisible();
+    await expect(page.getByRole('button', { name: /oldest first/ })).toBeVisible();
     await expect(page.getByText('k-12')).toBeVisible();
   });
 
@@ -754,14 +757,17 @@ test.describe('UI smoke', () => {
     await page.goto('/topics/orders');
     await page.getByRole('button', { name: 'Search' }).click();
 
-    // caret · offset · timestamp, with the default columns.
-    const cell = page.locator('table.msgs tbody tr.row').first().locator('td').nth(2);
+    const row = page.locator('table.msgs tbody tr.row').first();
+    // Located by its content, not by a column index: `partition` is forced in
+    // whenever the read spans partitions — which the default `partition=all`
+    // means it always does — so an index here would assert the wrong cell.
+    //
     // An unmarked UTC string is what #108 calls out: a reader in any other zone
     // mis-reads it by their whole offset with no cue that they have.
-    await expect(cell).toHaveText(/ [+-]\d{2}:\d{2}$/);
+    await expect(row.getByRole('cell', { name: / [+-]\d{2}:\d{2}$/ })).toBeVisible();
 
     await page.getByRole('combobox', { name: 'Time' }).selectOption('utc');
-    await expect(cell).toHaveText(/ UTC$/);
+    await expect(row.getByRole('cell', { name: / UTC$/ })).toBeVisible();
   });
 
   test('a chosen column survives a reload', async ({ page }) => {

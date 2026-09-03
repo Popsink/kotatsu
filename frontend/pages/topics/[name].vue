@@ -501,7 +501,7 @@ async function copyMsg(r: Record) {
       </button>
     </form>
 
-    <div v-if="showColumns" class="controls cols">
+    <div v-if="showColumns" class="controls">
       <label v-for="c in MESSAGE_COLUMNS" :key="c" class="rawtoggle">
         <input
           type="checkbox"
@@ -511,7 +511,7 @@ async function copyMsg(r: Record) {
         />
         {{ c }}
       </label>
-      <span class="muted hint">remembered for this topic; partition joins on an all-partition search</span>
+      <span class="muted colnote">remembered for this topic; partition joins on an all-partition search</span>
     </div>
 
     <form v-if="showFilters" class="controls filters" @submit.prevent="search">
@@ -547,9 +547,7 @@ async function copyMsg(r: Record) {
 
     <template v-if="partitionSummary">
       <p class="muted wm">
-        {{ partitionSummary.length }} partition{{ partitionSummary.length === 1 ? '' : 's' }},
-        {{ orderLabel }}
-        <span class="hint" title="Timestamps are not ordered across partitions, so the merge across them is best-effort.">(best effort)</span>
+        {{ partitionSummary.length }} partition{{ partitionSummary.length === 1 ? '' : 's' }} read
       </p>
       <!-- What the query read, per partition. Low/high live in the topic's own
            partition table above; repeating them here would be noise. -->
@@ -585,6 +583,13 @@ async function copyMsg(r: Record) {
       <button type="button" class="sort" :aria-pressed="newestFirst" @click="flipOrder = !flipOrder">
         {{ orderLabel }} ⇅
       </button>
+      <!-- The caveat belongs beside the order it qualifies, and only when the
+           read actually spanned partitions. -->
+      <span
+        v-if="allPartitions"
+        class="hint"
+        title="Timestamps are not ordered across partitions, so the merge across them is best-effort."
+      >(best effort)</span>
       <template v-if="sizes">
         <span class="sep">·</span>
         size p50 {{ fmtBytes(sizes.p50) }} / p99 {{ fmtBytes(sizes.p99) }}
@@ -699,8 +704,14 @@ h2 code { color: var(--accent); }
 .caret { color: var(--muted); width: 1.2rem; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
 .detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
-.rawtoggle { flex-direction: row; align-items: center; gap: 0.3rem; }
-.cols { flex-wrap: wrap; }
+/* Two classes on purpose: `.controls label` above sets `column`, and a single
+   class loses to it on specificity — which is why the checkbox used to sit above
+   its own label instead of beside it. */
+.controls .rawtoggle { flex-direction: row; align-items: center; gap: 0.3rem; }
+/* A note, not a tooltip trigger: `.hint` would underline it and offer a help
+   cursor leading nowhere. Sized like the labels it sits among, which a bare span
+   in `.controls` does not inherit. */
+.colnote { font-size: 0.8rem; }
 .sep { margin: 0 0.4rem; }
 /* A control that has to sit inside a sentence, so it borrows the text's own font
    and colour rather than looking like the buttons in the toolbar. */
