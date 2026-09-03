@@ -582,9 +582,11 @@ async function copyMsg(r: Record) {
       <span class="sep">·</span>
       <button type="button" class="sort" :aria-pressed="newestFirst" @click="flipOrder = !flipOrder">
         {{ orderLabel }} ⇅
-      </button>
+      </button>{{ ' ' }}
       <!-- The caveat belongs beside the order it qualifies, and only when the
-           read actually spanned partitions. -->
+           read actually spanned partitions. The interpolated space above is the
+           same trap as the heading's: Vue drops a whitespace-only text node that
+           contains a newline, so `⇅(best effort)` came out glued. -->
       <span
         v-if="allPartitions"
         class="hint"
