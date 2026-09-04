@@ -363,6 +363,7 @@ async fn scan_partition(
             "offset": record.offset,
             "partition": record.partition,
             "timestamp": record.timestamp,
+            "size": record_size(record),
             "key": key,
             "value": value,
             "headers": record.headers.iter().map(|h| json!({
@@ -382,6 +383,27 @@ async fn scan_partition(
         frontier,
         rendered,
     })
+}
+
+/// The record's **serialized** size: the bytes of its key, value and headers as
+/// they sit in the batch (#108).
+///
+/// Not its share of the topic's `storage_bytes`, which is compressed segment
+/// space and a property of the segment, not of one record — there is no honest
+/// way to attribute it per record. The two numbers differ by the compression
+/// ratio, so the UI labels this one for what it is.
+///
+/// A field absent from the record contributes nothing, which is what `null` on
+/// the wire costs: Kafka encodes it as a length of -1, not as an empty payload.
+fn record_size(record: &DecodedRecord) -> usize {
+    let len = |b: &Option<bytes::Bytes>| b.as_ref().map_or(0, |v| v.len());
+    len(&record.key)
+        + len(&record.value)
+        + record
+            .headers
+            .iter()
+            .map(|h| len(&h.key) + len(&h.value))
+            .sum::<usize>()
 }
 
 /// How many records each partition of a fan-out may read.
@@ -700,6 +722,40 @@ mod tests {
             Direction::of(OffsetSpec::Timestamp(1700)),
             Direction::Forward
         );
+    }
+
+    /// #108: the number that explains a partition's size, per record.
+    #[test]
+    fn a_record_size_is_its_key_value_and_header_bytes() {
+        use crate::storage::RecordHeader;
+
+        let record =
+            |key: Option<&str>, value: Option<&str>, headers: Vec<(&str, &str)>| DecodedRecord {
+                offset: 0,
+                partition: 0,
+                timestamp: 0,
+                key: key.map(|s| bytes::Bytes::from(s.to_string())),
+                value: value.map(|s| bytes::Bytes::from(s.to_string())),
+                headers: headers
+                    .into_iter()
+                    .map(|(k, v)| RecordHeader {
+                        key: Some(bytes::Bytes::from(k.to_string())),
+                        value: Some(bytes::Bytes::from(v.to_string())),
+                    })
+                    .collect(),
+            };
+
+        assert_eq!(record_size(&record(Some("k"), Some("val"), vec![])), 4);
+        // Headers count: they are bytes on the wire like any other field, and a
+        // topic whose records carry tracing headers pays for them.
+        assert_eq!(
+            record_size(&record(Some("k"), Some("val"), vec![("trace", "abc")])),
+            12
+        );
+        // A missing field costs nothing — Kafka writes a length of -1, not an
+        // empty payload — and must not read as a zero-length one either.
+        assert_eq!(record_size(&record(None, Some("val"), vec![])), 3);
+        assert_eq!(record_size(&record(None, None, vec![])), 0);
     }
 
     #[test]

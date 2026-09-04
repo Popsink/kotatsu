@@ -110,19 +110,25 @@ async function copy(what: 'path' | 'subtree') {
       </span>
     </div>
 
-    <div v-if="isContainer && open && entries.length" class="children">
-      <JsonNode
-        v-for="[k, child] in entries"
-        :key="String(k)"
-        :label="k"
-        :value="child"
-        :path="jsonPathStep(path, k)"
-        :depth="depth + 1"
-        :open-to="openTo"
-        :hits="hits"
-      />
+    <template v-if="isContainer && open && entries.length">
+      <div class="children">
+        <JsonNode
+          v-for="[k, child] in entries"
+          :key="String(k)"
+          :label="k"
+          :value="child"
+          :path="jsonPathStep(path, k)"
+          :depth="depth + 1"
+          :open-to="openTo"
+          :hits="hits"
+        />
+      </div>
+      <!-- Outside `.children`, and that is the whole point: the closing brace
+           belongs to this node, not to its children. Inside, it inherited their
+           indent and sat one level too deep — level with the last key instead of
+           with the `{` it closes. -->
       <div class="line closer"><span class="caret" /><span class="punc">{{ Array.isArray(value) ? ']' : '}' }}</span></div>
-    </div>
+    </template>
   </div>
 </template>
 

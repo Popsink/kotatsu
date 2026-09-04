@@ -110,10 +110,17 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 16 | Nested Avro folds | open the `avro-nested` record | a `{…} 2 keys` fold at depth 2, and `find in payload` = `paris` opens through it | MSG-013 |
 | 17 | Flat topic search | open `/topics`, search `dbz_config` at the root | no organizations match, and taking the offer lists `acme.prod.db2 / dbz_config` under `?all=1` | NAV-002 |
 | 18 | Quick-jump palette | `Ctrl-K` on `/groups`, type `avro-orders` | Topics and Schemas sections; `Enter` opens the first, `Esc` closes without touching the page | NAV-003 |
+| 18b | Record size | `GET .../topics/orders/messages?partition=0&offset=earliest` | offset 0 carries `size: 29` — `key-1` plus its 24-byte value | MSG-014 |
+| 19 | Newest first, and flipped | `/topics/spread`, `From: latest`, Search | the highest offset is the first row; the order button turns the loaded window around without re-reading | MSG-014 |
+| 20 | Unambiguous timestamps | open the first `orders` record row | the timestamp ends in a zone offset; switching `Time` to `utc` ends it in `UTC` | MSG-014 |
+| 21 | Column choice persists | `/topics/orders`, Columns ▾, tick `size`, reload | the `size` header is still there after the reload | MSG-014 |
+| 22 | Per-partition size | `/topics/orders` partition table | a `size` column, non-zero for a partition holding records | #76 |
+| 22b | Cells under their headers | `/topics/orders`, tick `size`, Search | the `data-col` sequence of the row equals that of the header — no column renders under a neighbour's heading | #108 |
+| 23 | Topic heading spacing | `/topics/orders` | the heading reads `Topic orders on demo` — a space before `on`, in the text and not only in the layout | #108 |
 
 ## Pass/Fail
 
-- **Pass**: all 18 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
+- **Pass**: all 23 steps meet their expected result; no 5xx; UI at `http://localhost:8080` loads and shows the topics.
 - **Fail**: any step deviates → open the corresponding per-module ISTQB case to isolate.
 
 ## Tear down

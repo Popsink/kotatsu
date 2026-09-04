@@ -112,4 +112,24 @@ describe('JsonNode', () => {
     await w.setProps({ hits: { matches: new Set(['$.after.item']), ancestors: new Set(['$', '$.after']) } })
     expect(w.text()).toContain('widget')
   })
+
+  /**
+   * The closing brace used to be rendered inside `.children`, so it inherited
+   * their indent and sat level with the last key rather than with the `{` it
+   * closes.
+   */
+  it('closes a container outside the children it wraps', async () => {
+    const w = await mount({ id: 2, item: 'gadget' })
+
+    expect(w.find('.closer').text()).toBe('}')
+    // Structural, not a pixel measurement: sitting inside `.children` is exactly
+    // what pushed the brace one level too deep, and jsdom computes no layout.
+    expect(w.find('.children .closer').exists()).toBe(false)
+  })
+
+  it('closes an array with the matching bracket', async () => {
+    const w = await mount([1, 2])
+    expect(w.find('.closer').text()).toBe(']')
+    expect(w.find('.children .closer').exists()).toBe(false)
+  })
 })

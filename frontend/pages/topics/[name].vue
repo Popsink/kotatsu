@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { fieldPreview, type FieldValue } from '~/utils/field'
-import { fmtTime } from '~/utils/format'
+import { fmtBytes, fmtRelative, fmtTime, TIME_MODES } from '~/utils/format'
 import {
   buildMessagesQuery,
   fromRouteQuery,
+  MESSAGE_COLUMNS,
   nextCursor,
+  sizeStats,
   toRouteQuery,
+  visibleColumns,
+  type MessageColumn,
   type MessageQuery,
   type OffsetMode,
   type PartitionSpec,
@@ -17,6 +21,12 @@ interface Record {
   offset: number
   partition: number
   timestamp: number
+  /**
+   * Serialized key + value + header bytes (#108). Optional because a response
+   * from a build without it must not read as a record of zero bytes — `0` is a
+   * real size, the one a tombstone with no key has.
+   */
+  size?: number
   key: FieldValue
   value: FieldValue
   headers: Header[]
@@ -29,9 +39,11 @@ const topic = route.params.name as string
 // Cluster comes from the configured source (single source for now).
 const { cluster } = await useCluster()
 
-interface PartitionInfo { partition: number; low: number; high: number; messages: number }
+// `storage_bytes` has been served per partition since #76; the interface omitted
+// it, so the figure was fetched and thrown away on every visit (#108).
+interface PartitionInfo { partition: number; low: number; high: number; messages: number; storage_bytes: number }
 interface ConfigEntry { name: string; value: string | null }
-const { data: detail } = await useFetch<{ partitions: PartitionInfo[]; messages: number; replication_factor: number; configs: ConfigEntry[] }>(
+const { data: detail } = await useFetch<{ partitions: PartitionInfo[]; messages: number; storage_bytes: number; replication_factor: number; configs: ConfigEntry[] }>(
   () => cluster.value ? `/api/clusters/${cluster.value}/topics/${encodeURIComponent(topic)}` : '',
   { watch: [cluster] },
 )
@@ -82,7 +94,7 @@ const limit = ref(initial.limit)
 
 // Serializer choice, remembered per topic (#32) — unless the link says otherwise:
 // whoever shared it chose a format deliberately, and it must render what they saw.
-const { keyFormat, valueFormat, rawJson } = useTopicFormat(topic)
+const { keyFormat, valueFormat, rawJson, timeMode, columns } = useTopicFormat(topic)
 if (route.query.key_format) keyFormat.value = initial.keyFormat
 if (route.query.value_format) valueFormat.value = initial.valueFormat
 watch([keyFormat, valueFormat], () => {
@@ -153,7 +165,40 @@ const canLoadMore = computed(() => last.value?.next != null && !queryChanged.val
 const canGoBack = computed(() => pages.value.length > 1)
 // The merge follows the read: `latest` walks towards older records, everything
 // else towards newer, and the label must not claim the opposite (#104).
-const orderLabel = computed(() => (last.value?.order === 'timestamp_asc' ? 'oldest first' : 'newest first'))
+const readNewestFirst = computed(() => last.value?.order !== 'timestamp_asc')
+
+/**
+ * Whether the reader has flipped the order the read came back in (#108).
+ *
+ * A **display** flip over the records already fetched, not a different query:
+ * the window is the one `From` selected, and reversing rows cannot reach a record
+ * outside it. So `Load more` still continues in the read's own direction, and the
+ * flip re-applies to the longer set — which is why it resets on a new search
+ * rather than outliving the query it was chosen for.
+ */
+const flipOrder = ref(false)
+const newestFirst = computed(() =>
+  flipOrder.value ? !readNewestFirst.value : readNewestFirst.value,
+)
+const orderLabel = computed(() => (newestFirst.value ? 'newest first' : 'oldest first'))
+const rows = computed(() => (flipOrder.value ? [...records.value].reverse() : records.value))
+
+const shownColumns = computed(() => visibleColumns(columns.value, allPartitions.value))
+const shows = (c: MessageColumn) => shownColumns.value.includes(c)
+
+function toggleColumn(c: MessageColumn) {
+  const next = columns.value.includes(c)
+    ? columns.value.filter((x) => x !== c)
+    : [...columns.value, c]
+  // Never empty: a table with no columns has no row to click and no header to
+  // click back, so the picker that would undo it is out of reach. Reassigned
+  // rather than mutated, because that is what the persistence watches.
+  if (next.length) columns.value = next
+}
+
+/** Over the pages fetched, never over the topic — see the summary line's note. */
+const sizes = computed(() => sizeStats(records.value.map((r) => r.size)))
+const showColumns = ref(false)
 
 /**
  * Per-partition totals across every page loaded so far.
@@ -207,6 +252,7 @@ async function search() {
   loading.value = true
   error.value = null
   expanded.value = new Set()
+  flipOrder.value = false
   // Snapshot before awaiting: the controls can move while the request is in
   // flight, and the stack must remember what was actually asked.
   const asked: MessageQuery = { ...query.value }
@@ -288,13 +334,15 @@ function download(name: string, content: string, type: string) {
 function exportName(ext: string) {
   return `${topic}-${partition.value === 'all' ? 'all' : `p${partition.value}`}.${ext}`
 }
+// Both exports follow the table, not the fetch: the file is what the reader is
+// looking at, so flipping the order flips the download with it (#108).
 function exportJson() {
-  download(exportName('json'), JSON.stringify(records.value, null, 2), 'application/json')
+  download(exportName('json'), JSON.stringify(rows.value, null, 2), 'application/json')
 }
 function exportNdjson() {
   download(
     exportName('ndjson'),
-    records.value.map((r) => JSON.stringify(r)).join('\n'),
+    rows.value.map((r) => JSON.stringify(r)).join('\n'),
     'application/x-ndjson',
   )
 }
@@ -326,13 +374,18 @@ async function copyMsg(r: Record) {
   <section>
     <NuxtLink to="/" class="back">← overview</NuxtLink>
     <h2>
-      Topic <code>{{ topic }}</code>
+      <!-- The interpolated space is load-bearing: Vue's default `condense`
+           whitespace handling drops a whitespace-only text node that contains a
+           newline, so `</code>` and the span below it would render glued
+           (`dbz_configon demo`). A CSS margin would only look right — the
+           heading's accessible name would still carry no space. -->
+      Topic <code>{{ topic }}</code>{{ ' ' }}
       <span v-if="cluster" class="muted">on {{ cluster }}</span>
     </h2>
 
     <table v-if="partitions.length" class="parts">
       <thead>
-        <tr><th>partition</th><th>low</th><th>high</th><th>messages</th></tr>
+        <tr><th>partition</th><th>low</th><th>high</th><th>messages</th><th>size</th></tr>
       </thead>
       <tbody>
         <tr v-for="p in partitions" :key="p.partition">
@@ -340,10 +393,13 @@ async function copyMsg(r: Record) {
           <td class="mono">{{ p.low }}</td>
           <td class="mono">{{ p.high }}</td>
           <td class="mono">{{ p.messages }}</td>
+          <!-- Compressed S3 segment bytes, unlike the per-record size in the
+               message table above — the two are not the same number (#76). -->
+          <td class="mono muted">{{ fmtBytes(p.storage_bytes) }}</td>
         </tr>
       </tbody>
       <tfoot v-if="detail">
-        <tr><td colspan="3" class="muted">total</td><td class="mono">{{ detail.messages }}</td></tr>
+        <tr><td colspan="3" class="muted">total</td><td class="mono">{{ detail.messages }}</td><td class="mono muted">{{ fmtBytes(detail.storage_bytes) }}</td></tr>
       </tfoot>
     </table>
 
@@ -427,6 +483,16 @@ async function copyMsg(r: Record) {
       <label class="rawtoggle">
         <input type="checkbox" v-model="rawJson" /> raw JSON
       </label>
+      <!-- Local by default, because that is what the reader's clock says; the
+           other two are for correlating with a log or an upstream system. -->
+      <label>Time
+        <select v-model="timeMode">
+          <option v-for="m in TIME_MODES" :key="m" :value="m">{{ m }}</option>
+        </select>
+      </label>
+      <button type="button" class="ghost" @click="showColumns = !showColumns">
+        {{ showColumns ? 'Columns ▴' : 'Columns ▾' }}
+      </button>
       <button type="button" class="ghost" @click="showFilters = !showFilters">
         {{ showFilters ? 'Filters ▴' : 'Filters ▾' }}
       </button>
@@ -434,6 +500,19 @@ async function copyMsg(r: Record) {
         <Spinner v-if="loading" size="14px" /> Search
       </button>
     </form>
+
+    <div v-if="showColumns" class="controls">
+      <label v-for="c in MESSAGE_COLUMNS" :key="c" class="rawtoggle">
+        <input
+          type="checkbox"
+          :checked="shownColumns.includes(c)"
+          :disabled="c === 'partition' && allPartitions"
+          @change="toggleColumn(c)"
+        />
+        {{ c }}
+      </label>
+      <span class="muted colnote">remembered for this topic; partition joins on an all-partition search</span>
+    </div>
 
     <form v-if="showFilters" class="controls filters" @submit.prevent="search">
       <label>Key contains
@@ -468,9 +547,7 @@ async function copyMsg(r: Record) {
 
     <template v-if="partitionSummary">
       <p class="muted wm">
-        {{ partitionSummary.length }} partition{{ partitionSummary.length === 1 ? '' : 's' }},
-        {{ orderLabel }}
-        <span class="hint" title="Timestamps are not ordered across partitions, so the merge across them is best-effort.">(best effort)</span>
+        {{ partitionSummary.length }} partition{{ partitionSummary.length === 1 ? '' : 's' }} read
       </p>
       <!-- What the query read, per partition. Low/high live in the topic's own
            partition table above; repeating them here would be noise. -->
@@ -496,23 +573,61 @@ async function copyMsg(r: Record) {
       <button type="button" class="ghost" @click="copyLink">{{ linkCopied ? 'Link copied ✓' : 'Copy link' }}</button>
     </div>
 
+    <!-- What the loaded window is, and the two things a reader asks of it: which
+         end is on top, and how big these records run. Both describe the pages
+         fetched so far, never the topic — a filtered scan of 50 says nothing
+         about the other million (#108). -->
+    <p v-if="records.length" class="muted wm">
+      {{ records.length }} record{{ records.length === 1 ? '' : 's' }} loaded
+      <span class="sep">·</span>
+      <button type="button" class="sort" :aria-pressed="newestFirst" @click="flipOrder = !flipOrder">
+        {{ orderLabel }} ⇅
+      </button>{{ ' ' }}
+      <!-- The caveat belongs beside the order it qualifies, and only when more
+           than one partition actually contributed: `partition=all` on a
+           single-partition topic performs no cross-partition merge, so saying
+           the ordering is best-effort there is noise.
+           The interpolated space above is the same trap as the heading's: Vue
+           drops a whitespace-only text node that contains a newline, so
+           `⇅(best effort)` came out glued. -->
+      <span
+        v-if="(partitionSummary?.length ?? 0) > 1"
+        class="hint"
+        title="Timestamps are not ordered across partitions, so the merge across them is best-effort."
+      >(best effort)</span>
+      <template v-if="sizes">
+        <span class="sep">·</span>
+        size p50 {{ fmtBytes(sizes.p50) }} / p99 {{ fmtBytes(sizes.p99) }}
+        <span class="hint" title="Serialized key + value + header bytes, over the records loaded — not their compressed share of the topic's on-disk size.">(serialized)</span>
+      </template>
+    </p>
+
     <table v-if="records.length" class="msgs">
       <thead>
-        <tr><th></th><th v-if="allPartitions">partition</th><th>offset</th><th>timestamp</th><th>key</th><th>value</th></tr>
+        <tr>
+          <th></th>
+          <!-- `data-col` names each column in the DOM, the same reason
+               `JsonTree` carries `data-field`: which cell is third depends on
+               what the reader ticked, so a positional selector is a coin flip. -->
+          <th v-for="c in shownColumns" :key="c" :data-col="c">{{ c }}</th>
+        </tr>
       </thead>
       <tbody>
-        <template v-for="r in records" :key="rowKey(r)">
+        <template v-for="r in rows" :key="rowKey(r)">
           <tr class="row" @click="toggle(rowKey(r))">
             <td class="caret">{{ expanded.has(rowKey(r)) ? '▾' : '▸' }}</td>
-            <td v-if="allPartitions" class="mono">{{ r.partition }}</td>
-            <td class="mono">{{ r.offset }}</td>
-            <td class="mono muted">{{ fmtTime(r.timestamp) }}</td>
-            <td class="mono">{{ fieldPreview(r.key, 40) }}</td>
-            <td class="mono">{{ fieldPreview(r.value) }}</td>
+            <td v-if="shows('offset')" data-col="offset" class="mono">{{ r.offset }}</td>
+            <td v-if="shows('partition')" data-col="partition" class="mono">{{ r.partition }}</td>
+            <td v-if="shows('timestamp')" data-col="timestamp" class="mono muted" :title="fmtRelative(r.timestamp)">{{ fmtTime(r.timestamp, timeMode) }}</td>
+            <!-- `—`, not `0 B`, for a record the API did not size: the same
+                 distinction the lag cells draw between absent and zero. -->
+            <td v-if="shows('size')" data-col="size" class="mono muted">{{ r.size == null ? '—' : fmtBytes(r.size) }}</td>
+            <td v-if="shows('key')" data-col="key" class="mono">{{ fieldPreview(r.key, 40) }}</td>
+            <td v-if="shows('value')" data-col="value" class="mono">{{ fieldPreview(r.value) }}</td>
           </tr>
           <tr v-if="expanded.has(rowKey(r))" class="detail">
             <td></td>
-            <td :colspan="allPartitions ? 5 : 4">
+            <td :colspan="shownColumns.length">
               <JsonTree :field="r.key" label="key" :raw="rawJson">
                 <template #links>
                   <!-- Carries the record's schema id so the subject page can land on
@@ -597,7 +712,19 @@ h2 code { color: var(--accent); }
 .caret { color: var(--muted); width: 1.2rem; }
 .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
 .detail td { padding: 0.5rem 0.4rem 1rem; background: #0a1f30; }
-.rawtoggle { flex-direction: row; align-items: center; gap: 0.3rem; }
+/* Two classes on purpose: `.controls label` above sets `column`, and a single
+   class loses to it on specificity — which is why the checkbox used to sit above
+   its own label instead of beside it. */
+.controls .rawtoggle { flex-direction: row; align-items: center; gap: 0.3rem; }
+/* A note, not a tooltip trigger: `.hint` would underline it and offer a help
+   cursor leading nowhere. Sized like the labels it sits among, which a bare span
+   in `.controls` does not inherit. */
+.colnote { font-size: 0.8rem; }
+.sep { margin: 0 0.4rem; }
+/* A control that has to sit inside a sentence, so it borrows the text's own font
+   and colour rather than looking like the buttons in the toolbar. */
+.sort { background: none; border: none; padding: 0; color: inherit; font: inherit; cursor: pointer; }
+.sort:hover, .sort:focus-visible { color: var(--accent); }
 .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; }
 .schemalink:hover { text-decoration: underline; }
 </style>
