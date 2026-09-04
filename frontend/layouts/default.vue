@@ -198,7 +198,14 @@ body {
   color: var(--fg);
 }
 code, pre, .mono { font-family: 'Geist Mono', ui-monospace, monospace; }
-.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+/* `minmax(0, …)`, not a bare `1fr`: `1fr` means `minmax(auto, 1fr)`, and an
+   `auto` minimum refuses to shrink below the track's min-content width. The
+   message table is 438px of monospace at its narrowest, so the track grew to fit
+   it, took `.content` and the sidebar with it, and pushed the burger off the
+   screen — while `.scroll` sat there at full width with nothing left to scroll
+   (#111). A zero floor lets the track match the viewport and hands the overflow
+   back to the box built to absorb it. */
+.app { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { background: var(--panel); padding: 1.25rem 1rem; border-right: 1px solid var(--border); }
 .brand { display: flex; flex-direction: column; gap: 0.35rem; margin: 0 0 1.75rem; }
 /* Hidden above the breakpoint, and `display: none` is deliberate: it takes the
@@ -263,7 +270,7 @@ nav .muted { color: var(--muted); cursor: not-allowed; }
      100vh`, and `align-content: stretch` — the default — splits the leftover
      height *equally* between auto-sized rows. One column therefore gave the bar
      half of the empty space, ~150px of dead panel above every page. */
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .sidebar {
     padding: 0.75rem 1rem;
     border-right: 0; border-bottom: 1px solid var(--border);

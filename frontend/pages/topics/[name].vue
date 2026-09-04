@@ -20,7 +20,7 @@ import {
 } from '~/utils/messages'
 
 interface Header { key: FieldValue; value: FieldValue }
-interface Record {
+interface MessageRecord {
   offset: number
   partition: number
   timestamp: number
@@ -131,7 +131,7 @@ const query = computed<MessageQuery>(() => ({
 // Results. `Load more` appends a window rather than replacing the table, so the
 // results are a stack of pages: `Back` pops one, with no refetch (#104).
 interface Page {
-  rows: Record[]
+  rows: MessageRecord[]
   /** The cursor that fetches the page after this one; `null` when nothing is left. */
   next: string | null
   /** One row per partition for a fan-out; `null` when one partition was read. */
@@ -165,7 +165,7 @@ const queryChanged = computed(
  * following must not grow the tab, but nothing should silently drop a page
  * somebody fetched (#106).
  */
-const tailed = ref<Record[]>([])
+const tailed = ref<MessageRecord[]>([])
 /** Records the tail holds before the oldest of them are dropped. */
 const TAIL_CAP = 1000
 /**
@@ -267,7 +267,7 @@ const error = ref<string | null>(null)
 // An offset only identifies a record within its partition, so rows are keyed by
 // both once a result set can span partitions (#102).
 const expanded = ref<Set<string>>(new Set())
-const rowKey = (r: Record) => `${r.partition}:${r.offset}`
+const rowKey = (r: MessageRecord) => `${r.partition}:${r.offset}`
 const searched = ref(false)
 
 /**
@@ -479,7 +479,7 @@ function exportNdjson() {
 }
 const copied = ref<string | null>(null)
 const copyFailed = ref<string | null>(null)
-async function copyMsg(r: Record) {
+async function copyMsg(r: MessageRecord) {
   const key = rowKey(r)
   try {
     await navigator.clipboard.writeText(JSON.stringify(r, null, 2))
@@ -910,4 +910,11 @@ h2 code { color: var(--accent); }
 .sort:hover, .sort:focus-visible { color: var(--accent); }
 .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; }
 .schemalink:hover { text-decoration: underline; }
+/* The 320px floor keeps the read's partition table from looking cramped beside a
+   full-width page, but on a phone it is 320px the viewport does not have — the
+   last thing still pushing the document sideways once the grid track can shrink.
+   The columns hold three short numbers; they can have whatever is left (#111). */
+@media (max-width: 700px) {
+  .parts { min-width: 0; }
+}
 </style>
