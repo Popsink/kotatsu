@@ -16,6 +16,7 @@ import {
   type OffsetMode,
   type PartitionSpec,
   type PartitionSummary,
+  type Watermark,
 } from '~/utils/messages'
 
 interface Header { key: FieldValue; value: FieldValue }
@@ -129,10 +130,6 @@ const query = computed<MessageQuery>(() => ({
 
 // Results. `Load more` appends a window rather than replacing the table, so the
 // results are a stack of pages: `Back` pops one, with no refetch (#104).
-// `served_end` is present only when a segment expiry certified that the offsets
-// from it up to `high` were destroyed (Popsink/tansu#290) — a gap no fetch can
-// ever return, so it is not part of the message count.
-type Watermark = { low: number; high: number; served_end?: number }
 interface Page {
   rows: Record[]
   /** The cursor that fetches the page after this one; `null` when nothing is left. */
@@ -256,8 +253,9 @@ const searched = ref(false)
  * names only the *direction* of travel (`backend/src/query.rs:174`), and a
  * `latest` read travels towards older records — its resume points walk backwards
  * into what has already been read. So the issue's plan of reusing the pagination
- * cursor cannot work: this synthesises a forward one from every partition's
- * `high` instead.
+ * cursor cannot work: `liveEdgeCursor` synthesises a forward one instead, from
+ * the log end of the search that armed this and from each poll's own resume
+ * points thereafter.
  *
  * The response comes back oldest-first, as any forward read does, so it is
  * reversed before going on top of a newest-first table.

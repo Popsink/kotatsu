@@ -812,9 +812,14 @@ test.describe('UI smoke', () => {
       if (r.url().includes('/messages?')) reads += 1;
     });
 
-    await page.goto('/topics/orders');
-    await page.getByRole('button', { name: 'Search' }).click();
-    await expect(page.locator('table.msgs tbody tr.row').first()).toBeVisible();
+    // A link carrying a query runs it on arrival, so this is the search — and
+    // `limit=2` on a 3-record topic is the point of it: the page then stops short
+    // of the start of the log, the one shape whose response carries a backward
+    // `resume`. Seeding the tail with that re-reads the rows already on screen,
+    // and the row count below is what says it did not.
+    await page.goto('/topics/orders?limit=2');
+    const rows = page.locator('table.msgs tbody tr.row');
+    await expect(rows).toHaveCount(2);
     const afterSearch = reads;
 
     await page.getByRole('combobox', { name: 'Every' }).selectOption('2');
@@ -828,6 +833,8 @@ test.describe('UI smoke', () => {
     // `orders` is not being written to, so three quiet polls end it — and the
     // page says why rather than going silently still.
     await expect(page.getByText(/nothing new/)).toBeVisible({ timeout: 15000 });
+    // Nothing was written, so nothing was added: no record came back a second time.
+    await expect(rows).toHaveCount(2);
     const afterDisarm = reads;
     await page.waitForTimeout(5000);
     expect(reads).toBe(afterDisarm);

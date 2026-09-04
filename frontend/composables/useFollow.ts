@@ -11,9 +11,9 @@ export const QUIET_POLLS = 3
 export type DisarmReason = 'expired' | 'hidden' | 'quiet' | 'error' | 'off'
 
 const WHY: Record<DisarmReason, string> = {
-  expired: 'stopped after 5 minutes',
+  expired: `stopped after ${WALL_CLOCK_MS / 60_000} minutes`,
   hidden: 'stopped when the tab went to the background',
-  quiet: 'stopped after 3 polls with nothing new',
+  quiet: `stopped after ${QUIET_POLLS} polls with nothing new`,
   error: 'stopped on a failed read',
   off: 'stopped',
 }
