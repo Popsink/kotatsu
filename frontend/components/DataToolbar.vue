@@ -30,7 +30,8 @@ defineEmits<{ prev: []; next: [] }>()
     <input v-model="model" class="search" :placeholder="placeholder" :aria-label="label" />
     <Spinner v-if="pending" />
     <span class="spacer" />
-    <span class="range muted">{{ from }}–{{ to }} of {{ total }}</span>
+    <!-- Announced politely: the count is how a reader knows a search landed. -->
+    <span class="range muted" aria-live="polite">{{ from }}–{{ to }} of {{ total }}</span>
     <button type="button" :disabled="!canPrev" aria-label="Previous page" @click="$emit('prev')">‹</button>
     <button type="button" :disabled="!canNext" aria-label="Next page" @click="$emit('next')">›</button>
   </div>
@@ -38,7 +39,7 @@ defineEmits<{ prev: []; next: [] }>()
 
 <style scoped>
 .toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 0.75rem 0 0.5rem; max-width: 560px; }
-.search { flex: 0 1 280px; background: #0e2a40; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.6rem; }
+.search { flex: 0 1 280px; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.6rem; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); }
 .range { font-size: 0.8rem; white-space: nowrap; }

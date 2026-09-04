@@ -3,7 +3,10 @@ defineProps<{ text: string }>()
 </script>
 
 <template>
-  <p class="empty-state">{{ text }}</p>
+  <!-- `role="status"` (a polite live region): after a search that matched
+       nothing, "No topics match." is the answer, and a screen reader has no
+       other way to learn that the table went away (#111). -->
+  <p class="empty-state" role="status">{{ text }}</p>
 </template>
 
 <style scoped>

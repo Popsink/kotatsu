@@ -103,9 +103,22 @@ function crumbTo(n: number) {
   const p = parts.value.slice(0, n).join('.')
   router.push({ path: '/topics', query: p ? { p } : {} })
 }
+/**
+ * Where a group row leads: one level deeper, or straight to the topic when the
+ * node is itself a complete one.
+ *
+ * Split out from `open` so the row's click handler and the link inside its first
+ * cell cannot drift apart — the link is what makes the tree reachable without a
+ * mouse, and a second copy of this expression is how it would end up going
+ * somewhere else (#111).
+ */
+function nodeTo(node: TreeNode) {
+  return node.topic
+    ? `/topics/${encodeURIComponent(node.topic)}`
+    : { path: '/topics', query: { p: node.path } }
+}
 function open(node: TreeNode) {
-  if (node.topic) router.push(`/topics/${encodeURIComponent(node.topic)}`)
-  else router.push({ path: '/topics', query: { p: node.path } })
+  router.push(nodeTo(node))
 }
 // At the leaf level org.env.conn is already in the breadcrumb, so show only the
 // part of the topic name below the prefix.
@@ -167,9 +180,13 @@ function suffix(name: string) {
         @retry="refresh"
       >
         <!-- Group levels: orgs, envs, connectors. -->
+        <!-- A real link in the first cell, and the row click stays a
+             convenience: a `<tr>` takes no focus and no Enter, so the tree was
+             unreachable without a mouse (#111). `.stop` because the row handler
+             would otherwise push the same route a second time. -->
         <tr v-for="n in nodes" :key="n.path" class="row" @click="open(n)">
           <td>
-            <span class="link">{{ n.segment }}</span>
+            <NuxtLink :to="nodeTo(n)" class="link" @click.stop>{{ n.segment }}</NuxtLink>
             <span v-if="!n.group" class="tag">topic</span>
           </td>
           <td class="mono">{{ n.topics }}</td>

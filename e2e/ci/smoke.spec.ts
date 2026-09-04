@@ -648,6 +648,131 @@ test.describe('UI smoke', () => {
     await expect(link).toHaveAttribute('href', /\/schemas\/avro-orders-value\?id=\d+/);
   });
 
+  /**
+   * #111: the tree's group rows were a `<tr>` with a click handler and nothing
+   * else — no focus, no Enter — so drilling into an org needed a mouse.
+   */
+  test('the topic tree opens from the keyboard', async ({ page }) => {
+    await page.goto('/topics');
+    const org = page.getByRole('link', { name: 'acme' });
+    await org.focus();
+    await expect(org).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/[?&]p=acme/);
+  });
+
+  test('a message expands from the keyboard, and says whether it is open', async ({ page }) => {
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+
+    const disclose = page.getByRole('button', { name: /^Expand offset/ }).first();
+    await expect(disclose).toHaveAttribute('aria-expanded', 'false');
+    await disclose.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(page.locator('tr.detail')).toBeVisible();
+    // Same control, now naming the other direction — which is what tells a
+    // screen reader the row opened.
+    await expect(page.getByRole('button', { name: /^Collapse offset/ }).first()).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
+  test('focus is visible on the first thing a keyboard reaches', async ({ page }) => {
+    await page.goto('/topics');
+    await page.keyboard.press('Tab');
+    // There was no focus styling at all, so a keyboard reader could not tell
+    // where they were. Read off the focused element rather than a chosen one, so
+    // this asserts the global ring and not one lucky selector.
+    const ring = await page.evaluate(() => {
+      const el = document.activeElement;
+      return el ? getComputedStyle(el).outlineWidth : '0px';
+    });
+    expect(ring).not.toBe('0px');
+  });
+
+  test('the theme choice persists, and system un-stamps it', async ({ page }) => {
+    await page.goto('/');
+    // Three radios rather than a select, so all three states are on screen and
+    // there is no platform popup to position.
+    const choose = (name: string) => page.getByRole('radio', { name, exact: true });
+    await expect(choose('system')).toBeChecked();
+
+    await choose('light').check();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+    await page.reload();
+    // The inline boot script is what makes this survive a reload without a
+    // frame of the dark palette.
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await expect(choose('light')).toBeChecked();
+
+    await choose('system').check();
+    expect(await page.evaluate(() => document.documentElement.hasAttribute('data-theme'))).toBe(
+      false,
+    );
+  });
+
+  test('the narrow layout keeps its nav behind a burger', async ({ page }) => {
+    await page.setViewportSize({ width: 600, height: 900 });
+    await page.goto('/topics');
+
+    const nav = page.getByRole('link', { name: 'Consumer groups' });
+    // Located by what it controls, not by its label: the label flips between
+    // `Open menu` and `Close menu`, so a name-based locator survives one click.
+    const burger = page.locator('button[aria-controls="sidebar-nav"]');
+
+    // Collapsed, not merely off-screen. `aria-expanded="false"` promises the
+    // links are out of the tab order, and `display: none` is what keeps it.
+    await expect(burger).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav).toBeHidden();
+
+    // And collapsed to its own height: the grid inherits `min-height: 100vh`, and
+    // two auto-sized rows split the leftover space equally, which handed the bar
+    // ~150px of empty panel above every page.
+    const bar = (await page.locator('aside.sidebar').boundingBox())!;
+    expect(bar.height).toBeLessThan(100);
+
+    await burger.click();
+    await expect(burger).toHaveAttribute('aria-expanded', 'true');
+    await expect(nav).toBeVisible();
+
+    // Escape closes it without a pointer — focus is still on the burger, which
+    // is inside the element carrying the handler.
+    await page.keyboard.press('Escape');
+    await expect(nav).toBeHidden();
+
+    // And following a link does not leave the menu covering the page it opened.
+    await burger.click();
+    await nav.click();
+    await expect(page).toHaveURL(/\/groups$/);
+    await expect(burger).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  test('the burger is not in a desktop tab order', async ({ page }) => {
+    await page.goto('/topics');
+    // `display: none` above the breakpoint, so it is absent from the
+    // accessibility tree rather than merely invisible.
+    await expect(page.locator('button[aria-controls="sidebar-nav"]')).toBeHidden();
+    await expect(page.getByRole('link', { name: 'Consumer groups' })).toBeVisible();
+  });
+
+  test('the layout holds at 600px with no horizontal page scroll', async ({ page }) => {
+    await page.setViewportSize({ width: 600, height: 900 });
+    await page.goto('/topics/orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await expect(page.locator('table.msgs')).toBeVisible();
+
+    // The sidebar was a hard 220px column and `.msgs` six monospace columns at
+    // `width: 100%`; together they pushed the page sideways. The table may
+    // scroll inside its own box — the document may not.
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+
   test('consumer group detail shows zero lag', async ({ page }) => {
     await page.goto('/groups/qa-group');
     await expect(page.getByRole('heading', { name: 'Group qa-group' })).toBeVisible();
@@ -702,7 +827,14 @@ test.describe('UI smoke', () => {
     await page.getByRole('combobox', { name: /Search topics/ }).fill('avro-orders');
 
     // Enter opens whatever the arrow keys left active — no pointer involved.
-    await expect(page.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
+    // Scoped to the palette's own listbox, where it always belonged. `option` is
+    // also the implicit role of a native `<option>`, and #111 briefly put a
+    // `<select>` in the sidebar — which the DOM reaches first — so an unscoped
+    // `.first()` resolved to `<option value="system">`. That select is now three
+    // radios and the collision is gone; the scoping stays, because the next
+    // `option` anywhere on the page would break this again.
+    const results = page.getByRole('listbox', { name: 'Results' });
+    await expect(results.getByRole('option').first()).toHaveAttribute('aria-selected', 'true');
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/topics\/avro-orders/);
 

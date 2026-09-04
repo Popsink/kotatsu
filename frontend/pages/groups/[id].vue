@@ -97,6 +97,6 @@ h2 code { color: var(--accent); }
 .meta dd { margin: 0.2rem 0 0; font-family: ui-monospace, monospace; }
 .offsets { width: 100%; max-width: 640px; border-collapse: collapse; margin-top: 0.5rem; }
 .offsets th { text-align: left; font-size: 0.72rem; color: var(--muted); border-bottom: 1px solid var(--border); padding: 0.4rem; }
-.offsets td { padding: 0.4rem; border-bottom: 1px solid #0e2a40; }
+.offsets td { padding: 0.4rem; border-bottom: 1px solid var(--hairline); }
 .mono { font-family: ui-monospace, monospace; }
 </style>

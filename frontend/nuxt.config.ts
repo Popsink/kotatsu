@@ -16,6 +16,16 @@ export default defineNuxtConfig({
           href: 'https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
         },
       ],
+      script: [
+        {
+          // Stamps a stored light/dark choice on the root before Vue boots, so a
+          // light-theme reader never gets a frame of the dark palette (#111).
+          // Inline and tiny on purpose: anything the app itself could do here
+          // happens after the first paint, which is too late to help.
+          innerHTML:
+            "try{var t=localStorage.getItem('kotatsu:theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}",
+        },
+      ],
     },
   },
 
