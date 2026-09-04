@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope } from 'vue'
 import { useFollow, QUIET_POLLS, WALL_CLOCK_MS } from '~/composables/useFollow'
 
-type Follow = ReturnType<typeof useFollow>
-
 /**
  * Run the composable in an effect scope rather than a mounted component: it needs
  * one for `onScopeDispose` and `watch`, and a scope can be stopped on demand,

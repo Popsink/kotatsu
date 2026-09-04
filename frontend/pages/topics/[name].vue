@@ -183,10 +183,12 @@ const TAIL_CAP = 1000
 const tailScanned = ref<Record<number, number>>({})
 /** Forward cursor at the topic's live edge — where the next poll starts. */
 const liveEdge = ref<string | null>(null)
+/** The freshest watermark a poll has seen; `null` until one has. */
+const tailWatermark = ref<Watermark | null>(null)
 
 const records = computed(() => [...tailed.value, ...pages.value.flatMap((p) => p.rows)])
 const allPartitions = computed(() => last.value?.partitions != null)
-const watermark = computed(() => last.value?.watermark ?? null)
+const watermark = computed(() => tailWatermark.value ?? last.value?.watermark ?? null)
 const scanned = computed(
   () =>
     pages.value.reduce((n, p) => n + p.scanned, 0) +
@@ -289,9 +291,20 @@ async function pollTail(): Promise<number> {
   if (!asked || !cursor || !cluster.value) return 0
 
   const page = await fetchPage({ ...asked, offsetMode: 'earliest' }, cursor)
+  // A poll outliving the search it belongs to must write nothing: `Search` stays
+  // clickable while one is open, and a forward scan is the slow read where the
+  // `latest` search is the cheap one, so finishing last is the ordinary case. Its
+  // rows would land on top of a result they are not from, and its edge would
+  // overwrite the one the new search just seeded (#106).
+  if (pagedQuery.value !== asked) return 0
   // Advance the edge even on an empty poll: the watermark moves when records are
   // written and filtered out, and re-reading them every time would be waste.
   liveEdge.value = page.liveEdge ?? cursor
+  // Same reasoning as the edge, and for the same reason it is not gated on rows:
+  // a poll is a read, and the topic's offsets are what it went to find out. Left
+  // to the search alone, the line under a moving tail keeps quoting a `high` the
+  // rows above it have already passed.
+  if (page.watermark) tailWatermark.value = page.watermark
   const spent = { ...tailScanned.value }
   for (const s of page.partitions ?? []) spent[s.partition] = (spent[s.partition] ?? 0) + s.scanned
   if (!page.partitions && page.partition != null) {
@@ -376,6 +389,7 @@ async function search() {
     stopFollow()
     tailed.value = []
     tailScanned.value = {}
+    tailWatermark.value = null
     liveEdge.value = page.liveEdge
     // The URL is the query's home once a search has run: back/forward, bookmarks
     // and Copy link all work off it. `replace`, so paging does not fill history.
