@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { fieldPreview, type FieldValue } from '~/utils/field'
 import { fmtBytes, fmtRelative, fmtTime, TIME_MODES } from '~/utils/format'
+import { FOLLOW_INTERVALS, useFollow } from '~/composables/useFollow'
 import {
   buildMessagesQuery,
   fromRouteQuery,
+  liveEdgeCursor,
   MESSAGE_COLUMNS,
   nextCursor,
   sizeStats,
@@ -14,10 +16,11 @@ import {
   type OffsetMode,
   type PartitionSpec,
   type PartitionSummary,
+  type Watermark,
 } from '~/utils/messages'
 
 interface Header { key: FieldValue; value: FieldValue }
-interface Record {
+interface MessageRecord {
   offset: number
   partition: number
   timestamp: number
@@ -127,12 +130,8 @@ const query = computed<MessageQuery>(() => ({
 
 // Results. `Load more` appends a window rather than replacing the table, so the
 // results are a stack of pages: `Back` pops one, with no refetch (#104).
-// `served_end` is present only when a segment expiry certified that the offsets
-// from it up to `high` were destroyed (Popsink/tansu#290) — a gap no fetch can
-// ever return, so it is not part of the message count.
-type Watermark = { low: number; high: number; served_end?: number }
 interface Page {
-  rows: Record[]
+  rows: MessageRecord[]
   /** The cursor that fetches the page after this one; `null` when nothing is left. */
   next: string | null
   /** One row per partition for a fan-out; `null` when one partition was read. */
@@ -143,6 +142,8 @@ interface Page {
   scanned: number
   filtered: boolean
   order: string
+  /** Where a Follow poll would resume; `null` when there is no edge to follow. */
+  liveEdge: string | null
 }
 const pages = ref<Page[]>([])
 const last = computed(() => pages.value.at(-1) ?? null)
@@ -155,10 +156,44 @@ const asParams = (q: MessageQuery) => buildMessagesQuery(q).toString()
 const queryChanged = computed(
   () => pagedQuery.value != null && asParams(pagedQuery.value) !== asParams(query.value),
 )
-const records = computed(() => pages.value.flatMap((p) => p.rows))
+/**
+ * Records the Follow poll brought in, newest first, above the fetched pages.
+ *
+ * Kept apart from `pages` on purpose: that stack is what `Load more` and `Back`
+ * push and pop, and a live record is neither a page the reader asked for nor one
+ * they can pop. The cap is on this buffer alone for the same reason — an hour of
+ * following must not grow the tab, but nothing should silently drop a page
+ * somebody fetched (#106).
+ */
+const tailed = ref<MessageRecord[]>([])
+/** Records the tail holds before the oldest of them are dropped. */
+const TAIL_CAP = 1000
+/**
+ * What the Follow polls have scanned since the search, per partition.
+ *
+ * A poll is a read like any other and it is not free, so what it scanned belongs
+ * in the figures that say what this investigation cost. Leaving it out puts a
+ * live numerator over a frozen denominator — the filtered line counts the
+ * records the tail brought and would go on quoting the search's `scanned`.
+ *
+ * `scanned` only. A poll's `resume`/`exhausted` describe a **forward** read,
+ * while the `left` column asks whether `Load more` has more to walk *backwards*
+ * through; folding one into the other would answer the wrong question (#106).
+ */
+const tailScanned = ref<Record<number, number>>({})
+/** Forward cursor at the topic's live edge — where the next poll starts. */
+const liveEdge = ref<string | null>(null)
+/** The freshest watermark a poll has seen; `null` until one has. */
+const tailWatermark = ref<Watermark | null>(null)
+
+const records = computed(() => [...tailed.value, ...pages.value.flatMap((p) => p.rows)])
 const allPartitions = computed(() => last.value?.partitions != null)
-const watermark = computed(() => last.value?.watermark ?? null)
-const scanned = computed(() => pages.value.reduce((n, p) => n + p.scanned, 0))
+const watermark = computed(() => tailWatermark.value ?? last.value?.watermark ?? null)
+const scanned = computed(
+  () =>
+    pages.value.reduce((n, p) => n + p.scanned, 0) +
+    Object.values(tailScanned.value).reduce((n, cost) => n + cost, 0),
+)
 const filtered = computed(() => last.value?.filtered ?? false)
 const exhausted = computed(() => last.value?.next == null)
 const canLoadMore = computed(() => last.value?.next != null && !queryChanged.value)
@@ -214,6 +249,12 @@ const partitionSummary = computed<PartitionSummary[] | null>(() => {
       seen.set(s.partition, { ...s, scanned: (seen.get(s.partition)?.scanned ?? 0) + s.scanned })
     }
   }
+  // A partition can only be in the tail if the search saw it — the poll's cursor
+  // names the partitions it reads — so there is never a row to invent here.
+  for (const [p, cost] of Object.entries(tailScanned.value)) {
+    const row = seen.get(Number(p))
+    if (row) row.scanned += cost
+  }
   return seen.size ? [...seen.values()].sort((a, b) => a.partition - b.partition) : null
 })
 const messageCount = computed(() => {
@@ -226,8 +267,88 @@ const error = ref<string | null>(null)
 // An offset only identifies a record within its partition, so rows are keyed by
 // both once a result set can span partitions (#102).
 const expanded = ref<Set<string>>(new Set())
-const rowKey = (r: Record) => `${r.partition}:${r.offset}`
+const rowKey = (r: MessageRecord) => `${r.partition}:${r.offset}`
 const searched = ref(false)
+
+/**
+ * One Follow poll: what has been written since the last one (#106).
+ *
+ * The read goes **forward** from the live edge, which is why it sends
+ * `earliest` rather than the query's own `latest`. With a cursor set, `offset`
+ * names only the *direction* of travel (`backend/src/query.rs:174`), and a
+ * `latest` read travels towards older records — its resume points walk backwards
+ * into what has already been read. So the issue's plan of reusing the pagination
+ * cursor cannot work: `liveEdgeCursor` synthesises a forward one instead, from
+ * the log end of the search that armed this and from each poll's own resume
+ * points thereafter.
+ *
+ * The response comes back oldest-first, as any forward read does, so it is
+ * reversed before going on top of a newest-first table.
+ */
+async function pollTail(): Promise<number> {
+  const asked = pagedQuery.value
+  const cursor = liveEdge.value
+  if (!asked || !cursor || !cluster.value) return 0
+
+  const page = await fetchPage({ ...asked, offsetMode: 'earliest' }, cursor)
+  // A poll outliving the search it belongs to must write nothing: `Search` stays
+  // clickable while one is open, and a forward scan is the slow read where the
+  // `latest` search is the cheap one, so finishing last is the ordinary case. Its
+  // rows would land on top of a result they are not from, and its edge would
+  // overwrite the one the new search just seeded (#106).
+  if (pagedQuery.value !== asked) return 0
+  // Advance the edge even on an empty poll: the watermark moves when records are
+  // written and filtered out, and re-reading them every time would be waste.
+  liveEdge.value = page.liveEdge ?? cursor
+  // Same reasoning as the edge, and for the same reason it is not gated on rows:
+  // a poll is a read, and the topic's offsets are what it went to find out. Left
+  // to the search alone, the line under a moving tail keeps quoting a `high` the
+  // rows above it have already passed.
+  if (page.watermark) tailWatermark.value = page.watermark
+  const spent = { ...tailScanned.value }
+  for (const s of page.partitions ?? []) spent[s.partition] = (spent[s.partition] ?? 0) + s.scanned
+  if (!page.partitions && page.partition != null) {
+    spent[page.partition] = (spent[page.partition] ?? 0) + page.scanned
+  }
+  tailScanned.value = spent
+  if (!page.rows.length) return 0
+
+  tailed.value = [...[...page.rows].reverse(), ...tailed.value].slice(0, TAIL_CAP)
+  return page.rows.length
+}
+
+// Destructured, so the template reads `following` rather than
+// `follow.armed.value`: a ref nested in a plain object is not unwrapped there.
+const {
+  armed: following,
+  interval: followEvery,
+  polls,
+  received,
+  countdown,
+  why: followWhy,
+  arm: startFollow,
+  disarm: stopFollow,
+} = useFollow(pollTail)
+
+/**
+ * Follow is offered only on a live-edge query.
+ *
+ * `latest` is the only seek whose window ends at the log's head, so it is the
+ * only one where "what is new" is the thing below the last row. Following a
+ * historical window would poll for records that are not next to what is shown.
+ * It also stands down when the controls have moved away from what was fetched,
+ * for the same reason `Load more` does.
+ */
+const canFollow = computed(
+  () =>
+    searched.value &&
+    pagedQuery.value?.offsetMode === 'latest' &&
+    liveEdge.value != null &&
+    !queryChanged.value,
+)
+watch(canFollow, (ok) => {
+  if (!ok) stopFollow()
+})
 
 // Messages are fetched only on user action — never automatically.
 async function fetchPage(q: MessageQuery, cursor?: string): Promise<Page> {
@@ -244,6 +365,9 @@ async function fetchPage(q: MessageQuery, cursor?: string): Promise<Page> {
     scanned: res.scanned ?? res.records.length,
     filtered: res.filtered ?? false,
     order: res.order ?? 'timestamp_desc',
+    // Computed here because only this function sees the raw response, which
+    // carries the per-partition `resume` the joined `next` cursor drops (#106).
+    liveEdge: liveEdgeCursor(res),
   }
 }
 
@@ -257,9 +381,16 @@ async function search() {
   // flight, and the stack must remember what was actually asked.
   const asked: MessageQuery = { ...query.value }
   try {
-    pages.value = [await fetchPage(asked)]
+    const page = await fetchPage(asked)
+    pages.value = [page]
     pagedQuery.value = asked
     searched.value = true
+    // A new search is a new edge, and the previous tail belonged to the old one.
+    stopFollow()
+    tailed.value = []
+    tailScanned.value = {}
+    tailWatermark.value = null
+    liveEdge.value = page.liveEdge
     // The URL is the query's home once a search has run: back/forward, bookmarks
     // and Copy link all work off it. `replace`, so paging does not fill history.
     router.replace({ query: toRouteQuery(asked) })
@@ -348,7 +479,7 @@ function exportNdjson() {
 }
 const copied = ref<string | null>(null)
 const copyFailed = ref<string | null>(null)
-async function copyMsg(r: Record) {
+async function copyMsg(r: MessageRecord) {
   const key = rowKey(r)
   try {
     await navigator.clipboard.writeText(JSON.stringify(r, null, 2))
@@ -499,6 +630,24 @@ async function copyMsg(r: Record) {
       <button type="submit" :disabled="loading || !cluster">
         <Spinner v-if="loading" size="14px" /> Search
       </button>
+
+      <!-- Offered only on a live-edge query, and armed by nothing but this click:
+           the read contract is that no request leaves without a user action, and a
+           poll the reader started, that shows its spend and stops itself, keeps
+           that in substance rather than in letter (#106). -->
+      <template v-if="canFollow">
+        <button
+          type="button"
+          class="ghost"
+          :aria-pressed="following"
+          @click="following ? stopFollow() : startFollow()"
+        >{{ following ? '■ Following' : '▶ Follow' }}</button>
+        <label>Every
+          <select v-model.number="followEvery">
+            <option v-for="s in FOLLOW_INTERVALS" :key="s" :value="s">{{ s }}s</option>
+          </select>
+        </label>
+      </template>
     </form>
 
     <div v-if="showColumns" class="controls">
@@ -601,6 +750,21 @@ async function copyMsg(r: Record) {
         <span class="sep">·</span>
         size p50 {{ fmtBytes(sizes.p50) }} / p99 {{ fmtBytes(sizes.p99) }}
         <span class="hint" title="Serialized key + value + header bytes, over the records loaded — not their compressed share of the topic's on-disk size.">(serialized)</span>
+      </template>
+    </p>
+
+    <!-- What following is costing, while it costs it, and why it stopped when it
+         does. A tail that goes quiet without saying so is worse than none: the
+         screen still looks live. Announced politely, because the reason arrives
+         without anyone clicking anything. -->
+    <p v-if="following || followWhy" class="muted wm" aria-live="polite">
+      <template v-if="following">
+        following · {{ polls }} poll{{ polls === 1 ? '' : 's' }} ·
+        {{ received }} record{{ received === 1 ? '' : 's' }} · next in {{ countdown }}s
+      </template>
+      <template v-else>
+        Follow {{ followWhy }} — {{ polls }} poll{{ polls === 1 ? '' : 's' }},
+        {{ received }} record{{ received === 1 ? '' : 's' }}
       </template>
     </p>
 
@@ -746,4 +910,11 @@ h2 code { color: var(--accent); }
 .sort:hover, .sort:focus-visible { color: var(--accent); }
 .schemalink { color: var(--accent); text-decoration: none; font-size: 0.7rem; }
 .schemalink:hover { text-decoration: underline; }
+/* The 320px floor keeps the read's partition table from looking cramped beside a
+   full-width page, but on a phone it is 320px the viewport does not have — the
+   last thing still pushing the document sideways once the grid track can shrink.
+   The columns hold three short numbers; they can have whatever is left (#111). */
+@media (max-width: 700px) {
+  .parts { min-width: 0; }
+}
 </style>

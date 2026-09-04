@@ -125,6 +125,18 @@ export function fromRouteQuery(r: RouteQuery): MessageQuery {
   }
 }
 
+/** Low and high offsets of a partition, as the API reports them. */
+export interface Watermark {
+  low: number
+  high: number
+  /**
+   * Present only when a segment expiry certified that the offsets from it up to
+   * `high` were destroyed (#95, Popsink/tansu#290) — a gap no fetch can ever
+   * return, so it is not part of the message count.
+   */
+  served_end?: number
+}
+
 /** One partition's contribution to a `partition=all` read. */
 export interface PartitionSummary {
   partition: number
@@ -132,6 +144,56 @@ export interface PartitionSummary {
   exhausted: boolean
   /** Where this partition's next page starts; `null` once it has nothing left. */
   resume: number | null
+  /** Served for every partition read, quiet ones included — see `liveEdgeCursor`. */
+  watermark: Watermark
+}
+
+/**
+ * The forward cursor that resumes at a topic's live edge (#106).
+ *
+ * Per partition, and **which field is right depends on the way the response was
+ * read**. `order` carries that, so this cannot be handed the wrong one:
+ *
+ * - Read forwards (`timestamp_asc`, a Follow poll): `resume`, where the page
+ *   stopped, when it stopped short. A page is capped at `limit`, so a burst
+ *   bigger than one page leaves records unread — resuming at the log end would
+ *   step over them and lose them silently. Where the partition was read to the
+ *   end `resume` is `null` and the log end is the answer.
+ * - Read backwards (`timestamp_desc`, the `latest` search Follow is armed on):
+ *   the log end, always. A backward `resume` is the offset *below* the oldest
+ *   record on screen (`backend/src/query.rs:455`), so following from it re-reads
+ *   the whole page and stacks it on top of itself.
+ *
+ * Either way, no partition is dropped. `nextCursor` omits the ones with nothing
+ * left; a cursor missing a partition stops polling it, because the API narrows a
+ * read to the partitions the cursor names, and a partition that was quiet when
+ * Follow was armed would then never be looked at again.
+ *
+ * `high` is exclusive, so it already *is* the first offset that does not exist
+ * yet — no `+1`. `null` when the response carries neither shape, which is a
+ * response nothing can be followed from.
+ */
+export function liveEdgeCursor(res: {
+  order?: string
+  partition?: number | null
+  watermark?: Watermark | null
+  resume?: number | null
+  partitions?: PartitionSummary[] | null
+}): string | null {
+  // A response with no `order` is read as backward, like `fetchPage`'s own
+  // default: the log end is never wrong about where new records will land, it
+  // only risks missing a burst, whereas a backward resume re-serves the screen.
+  const forward = res.order === 'timestamp_asc'
+  const edge = (resume: number | null | undefined, wm: Watermark) =>
+    forward && resume != null ? resume : wm.high
+
+  if (res.partitions?.length) {
+    return res.partitions.map((p) => `${p.partition}:${edge(p.resume, p.watermark)}`).join(',')
+  }
+  if (res.partition != null && res.watermark) {
+    return `${res.partition}:${edge(res.resume, res.watermark)}`
+  }
+  return null
 }
 
 /**
