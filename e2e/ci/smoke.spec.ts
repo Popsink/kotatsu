@@ -144,6 +144,30 @@ test.describe('API smoke', () => {
     expect(body.items).toContain('avro-orders-value');
   });
 
+  test('a schema id resolves to the subject and version carrying it', async ({ request }) => {
+    // A decoded record is tagged with a schema *id*; the subject page is
+    // addressed by *version*. This is what maps one to the other (#112).
+    const subject = await (await request.get('/api/schemas/avro-orders-value')).json();
+    const id = subject.latest.id;
+
+    const body = await (await request.get(`/api/schemas/ids/${id}/versions`)).json();
+    expect(body.versions).toContainEqual({
+      subject: 'avro-orders-value',
+      version: subject.latest.version,
+    });
+  });
+
+  test('an unknown schema id is a 404, not an empty answer', async ({ request }) => {
+    const resp = await request.get('/api/schemas/ids/999999/versions');
+    expect(resp.status()).toBe(404);
+  });
+
+  test('diff-demo-value carries the two versions the diff needs', async ({ request }) => {
+    const body = await (await request.get('/api/schemas/diff-demo-value')).json();
+    expect(body.versions).toEqual([1, 2]);
+    expect(body.latest.version).toBe(2);
+  });
+
   test('qa-group reports committed offsets and lag', async ({ request }) => {
     const body = await (await request.get(`/api/clusters/${CLUSTER}/groups/qa-group`)).json();
     expect(body.name).toBe('qa-group');
@@ -581,6 +605,27 @@ test.describe('UI smoke', () => {
   test('schemas page lists the subject', async ({ page }) => {
     await page.goto('/schemas');
     await expect(page.getByRole('link', { name: 'avro-orders-value' })).toBeVisible();
+  });
+
+  test('schema versions can be compared on one screen', async ({ page }) => {
+    await page.goto('/schemas/diff-demo-value');
+    await page.getByRole('checkbox', { name: 'Compare with' }).check();
+
+    // v1 → v2 widens `item` to a union and adds `note`. The two versions also
+    // declare their keys in a different order, which must not read as a change.
+    await expect(page.getByText('v1 → v2')).toBeVisible();
+    await expect(page.getByText('type changed')).toBeVisible();
+    await expect(page.getByText('added', { exact: true })).toBeVisible();
+    await expect(page.getByText('string → null | string')).toBeVisible();
+  });
+
+  test('a decoded record links to the version it was written with', async ({ page }) => {
+    await page.goto('/topics/avro-orders');
+    await page.getByRole('button', { name: 'Search' }).click();
+    await page.getByRole('row').filter({ hasText: 'widget' }).first().click();
+
+    const link = page.getByRole('link', { name: '↗ schema' }).first();
+    await expect(link).toHaveAttribute('href', /\/schemas\/avro-orders-value\?id=\d+/);
   });
 
   test('consumer group detail shows zero lag', async ({ page }) => {

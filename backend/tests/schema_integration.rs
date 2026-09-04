@@ -60,6 +60,30 @@ async fn registers_lists_and_reads_schema() {
     Schema::parse_str(&latest.schema).expect("schema parses");
 }
 
+/// The link from a decoded record to its schema version (#112): a record carries
+/// a schema **id**, the subject page is addressed by **version**, and only the
+/// registry's index maps one to the other.
+#[tokio::test]
+#[ignore = "requires local Kora"]
+async fn resolves_a_schema_id_to_its_subject_and_version() {
+    let id = register_schema().await;
+    let registry = SchemaRegistry::new(kora_url());
+
+    let found = registry.id_versions(id as i64).await.expect("id versions");
+    let entry = found
+        .iter()
+        .find(|v| v.subject == SUBJECT)
+        .expect("registered under our subject");
+
+    // The version it names must be the one that actually carries this id, which
+    // is the whole point of the lookup.
+    let version = registry
+        .version(SUBJECT, &entry.version.to_string())
+        .await
+        .expect("that version");
+    assert_eq!(version.id as u32, id);
+}
+
 #[tokio::test]
 #[ignore = "requires local Kora"]
 async fn decodes_confluent_framed_avro() {

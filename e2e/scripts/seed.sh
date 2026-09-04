@@ -21,6 +21,9 @@ set -euo pipefail
 NETWORK="${NETWORK:-kotatsu_default}"
 BOOTSTRAP="${BOOTSTRAP:-tansu:9092}"
 KORA_URL="${KORA_URL:-http://kora:8080}"
+# Kora as reached from the host, for the registrations below (the variable above
+# is the URL a container on NETWORK uses).
+KORA_HTTP="${KORA_HTTP:-http://localhost:8085}"
 KAFKA_IMG="apache/kafka:latest"
 AVRO_IMG="confluentinc/cp-schema-registry:7.6.0"
 
@@ -147,5 +150,24 @@ docker run --rm --network "$NETWORK" -v "$DR_DIR:/dr" "$KAFKA_IMG" \
 echo "→ creating consumer group qa-group (consume orders from beginning)…"
 kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server "$BOOTSTRAP" \
   --topic orders --from-beginning --group qa-group --max-messages 3 --timeout-ms 10000 || true
+
+# A subject with two versions, so the version diff (#112) has something to show.
+# Registered straight against the registry: schemas exist independently of any
+# topic, and producing records here would only add noise to the message cases.
+echo "→ registering diff-demo-value v1 and v2 (added field, widened type)…"
+# The registry takes the schema as a *string* inside the request body, so these
+# are pre-escaped rather than escaped at run time — a seed script should not need
+# a JSON encoder on the box that runs it.
+#
+# v1 → v2 carries one of each labelled change: `item` widens to a union and gains
+# a default, `note` is added. The two versions also declare their top-level keys
+# in a **different order**, on purpose: that must diff as no change at all, and it
+# is the only thing that proves the canonicalisation runs.
+register_schema() {
+  curl -fsS -X POST "$KORA_HTTP/subjects/diff-demo-value/versions" \
+    -H 'content-type: application/vnd.schemaregistry.v1+json' -d "$1" >/dev/null
+}
+register_schema '{"schemaType":"AVRO","schema":"{\"type\":\"record\",\"name\":\"Demo\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"item\",\"type\":\"string\"}]}"}'
+register_schema '{"schemaType":"AVRO","schema":"{\"name\":\"Demo\",\"type\":\"record\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"item\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"note\",\"type\":\"string\",\"default\":\"\"}]}"}'
 
 echo "✓ seed complete"

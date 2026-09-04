@@ -58,6 +58,17 @@ fn default_type() -> String {
     "AVRO".to_string()
 }
 
+/// Where a schema id is registered: Confluent's `/schemas/ids/{id}/versions`.
+///
+/// A decoded record carries a schema **id**, but a subject page is addressed by
+/// **version**, and the two are different key spaces — an id is global to the
+/// registry and one id can be registered under several subjects (#112).
+#[derive(Deserialize, serde::Serialize)]
+pub struct SubjectVersion {
+    pub subject: String,
+    pub version: i32,
+}
+
 /// Confluent `/config` response (compatibility level).
 #[derive(Deserialize)]
 struct ConfigResponse {
@@ -129,6 +140,15 @@ impl SchemaRegistry {
     ) -> Result<SchemaVersion, SchemaError> {
         self.get_json(&format!("/subjects/{subject}/versions/{version}"))
             .await
+    }
+
+    /// The `(subject, version)` pairs a schema id is registered under.
+    ///
+    /// One request, answered by the registry's own index. The alternative — the
+    /// client fetching versions until one matches the id — is a scan whose length
+    /// is the subject's history.
+    pub async fn id_versions(&self, id: i64) -> Result<Vec<SubjectVersion>, SchemaError> {
+        self.get_json(&format!("/schemas/ids/{id}/versions")).await
     }
 
     /// The subject's compatibility level, falling back to the global config.

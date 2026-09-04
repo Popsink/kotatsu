@@ -40,6 +40,7 @@ pub fn router(config: &Config, state: AppState) -> Router {
         .route("/clusters/{cluster}/groups", get(api::groups))
         .route("/clusters/{cluster}/groups/{group}", get(api::group_detail))
         .route("/schemas", get(api::schemas))
+        .route("/schemas/ids/{id}/versions", get(api::schema_id_versions))
         .route("/schemas/{subject}", get(api::schema_subject))
         .route(
             "/schemas/{subject}/versions/{version}",
