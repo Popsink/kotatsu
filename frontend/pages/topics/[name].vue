@@ -168,13 +168,30 @@ const queryChanged = computed(
 const tailed = ref<Record[]>([])
 /** Records the tail holds before the oldest of them are dropped. */
 const TAIL_CAP = 1000
+/**
+ * What the Follow polls have scanned since the search, per partition.
+ *
+ * A poll is a read like any other and it is not free, so what it scanned belongs
+ * in the figures that say what this investigation cost. Leaving it out puts a
+ * live numerator over a frozen denominator — the filtered line counts the
+ * records the tail brought and would go on quoting the search's `scanned`.
+ *
+ * `scanned` only. A poll's `resume`/`exhausted` describe a **forward** read,
+ * while the `left` column asks whether `Load more` has more to walk *backwards*
+ * through; folding one into the other would answer the wrong question (#106).
+ */
+const tailScanned = ref<Record<number, number>>({})
 /** Forward cursor at the topic's live edge — where the next poll starts. */
 const liveEdge = ref<string | null>(null)
 
 const records = computed(() => [...tailed.value, ...pages.value.flatMap((p) => p.rows)])
 const allPartitions = computed(() => last.value?.partitions != null)
 const watermark = computed(() => last.value?.watermark ?? null)
-const scanned = computed(() => pages.value.reduce((n, p) => n + p.scanned, 0))
+const scanned = computed(
+  () =>
+    pages.value.reduce((n, p) => n + p.scanned, 0) +
+    Object.values(tailScanned.value).reduce((n, cost) => n + cost, 0),
+)
 const filtered = computed(() => last.value?.filtered ?? false)
 const exhausted = computed(() => last.value?.next == null)
 const canLoadMore = computed(() => last.value?.next != null && !queryChanged.value)
@@ -230,6 +247,12 @@ const partitionSummary = computed<PartitionSummary[] | null>(() => {
       seen.set(s.partition, { ...s, scanned: (seen.get(s.partition)?.scanned ?? 0) + s.scanned })
     }
   }
+  // A partition can only be in the tail if the search saw it — the poll's cursor
+  // names the partitions it reads — so there is never a row to invent here.
+  for (const [p, cost] of Object.entries(tailScanned.value)) {
+    const row = seen.get(Number(p))
+    if (row) row.scanned += cost
+  }
   return seen.size ? [...seen.values()].sort((a, b) => a.partition - b.partition) : null
 })
 const messageCount = computed(() => {
@@ -269,6 +292,12 @@ async function pollTail(): Promise<number> {
   // Advance the edge even on an empty poll: the watermark moves when records are
   // written and filtered out, and re-reading them every time would be waste.
   liveEdge.value = page.liveEdge ?? cursor
+  const spent = { ...tailScanned.value }
+  for (const s of page.partitions ?? []) spent[s.partition] = (spent[s.partition] ?? 0) + s.scanned
+  if (!page.partitions && page.partition != null) {
+    spent[page.partition] = (spent[page.partition] ?? 0) + page.scanned
+  }
+  tailScanned.value = spent
   if (!page.rows.length) return 0
 
   tailed.value = [...[...page.rows].reverse(), ...tailed.value].slice(0, TAIL_CAP)
@@ -346,6 +375,7 @@ async function search() {
     // A new search is a new edge, and the previous tail belonged to the old one.
     stopFollow()
     tailed.value = []
+    tailScanned.value = {}
     liveEdge.value = page.liveEdge
     // The URL is the query's home once a search has run: back/forward, bookmarks
     // and Copy link all work off it. `replace`, so paging does not fill history.

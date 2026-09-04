@@ -127,7 +127,7 @@ docker run --rm --network kotatsu_default apache/kafka:latest \
 | 29 | Follow is gated | `/topics/orders`, `From: earliest` then `latest` | the Follow button is absent on the historical read and present on the live-edge one | #106 |
 | 30 | Nothing polls when off | search, then idle 6 s | no further `/messages` request leaves the page | #106 |
 | 31 | Follow spends visibly, then stops | `/topics/orders?limit=2`, arm Follow at 2 s | `following · n polls · …` appears, requests increase, and after three quiet polls it disarms saying `nothing new`; no request after that, and the table still holds **2** rows — a tail that re-read the page on screen would have doubled it | #106 |
-| 32 | Follow shows what lands | `/topics/orders`, arm Follow at 10 s, then run the producer below within 30 s (three quiet polls end it) | the new record appears at the top of the table with nothing clicked, and `records` in the status line goes up | #106 |
+| 32 | Follow shows what lands, and bills it | `/topics/orders`, arm Follow at 10 s, then run the producer below within 30 s (three quiet polls end it) | the new record appears at the top of the table with nothing clicked, `records` in the status line goes up, and `scanned` in the partition table grows past what the search alone read | #106 |
 
 Step 32's producer. It leaves `orders` at 4 records, which is why it is the last
 step — steps 6 and 10 pin the count at 3.
