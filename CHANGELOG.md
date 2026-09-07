@@ -4,7 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-09-07
+
+The frontend UX epic (#101 — PRs #114–#128) and segment footer v4 (#118). 0.10.0
+made the reader agree with the storage contract; this release makes the result
+usable by whoever is holding the pager. A topic is findable by name from
+anywhere, a partition pages instead of ending after one screenful, a query is a
+URL you can paste into a ticket, a payload opens as a tree you can fold and
+search, the consumer-groups list shows the one number that page exists for, two
+schema versions diff on one screen, the event browser tails the live edge when
+asked, and all of it can be driven from a keyboard, read on a phone and looked
+at in a bright room. On the storage side, footer v4 keys a sub-stream by topic
+id rather than by name — the change that lets a deleted topic's slices be
+reclaimed and stops a topic recreated under an old name inheriting its
+predecessor's watermarks and bytes.
 
 ### Added
 - **Segment footer v4: sub-streams resolve by topic id, not by name** (#118) —
@@ -25,6 +38,143 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it. v1/v2/v3 segments decode exactly as before: the 16 bytes are not on the wire
   below v4 and are not read. Version 5 is still rejected.
 
+- **A search covers every partition of a topic, in one query** (#117) —
+  `partition=all` is the default for
+  `GET /api/clusters/{c}/topics/{t}/messages`: the read fans out over the
+  topic's partitions concurrently, merges them, and each record carries the
+  partition it came from; a partition number still narrows to one, with the
+  same behaviour and response shape as before. "Find the event for order 4711"
+  on a 12-partition topic used to be twelve manual searches with nothing to say
+  which ones had been covered — every comparable viewer searches the whole
+  topic by default and treats per-partition as the *narrowing* option. The scan
+  budget is shared across the fan-out rather than multiplied by it, so a wide
+  topic does not quietly cost 12× a narrow one.
+- **Pages that continue a read, and a query that lives in its URL** (#120) — a
+  response hands back per-partition resume points, and passing them back as
+  `cursor` (`0:412,3:998`) continues the read instead of restarting it; with a
+  cursor set, `offset` names only the direction of travel. Every control —
+  partition, seek, formats, filters, regex, scan budget — is in the address
+  bar, so an investigation can be bookmarked, pasted into a ticket and
+  recovered with the back button, as the topic list already could with `?p=`.
+  Two defects that were survivable without paging and are not with it are fixed
+  here: a filtered read from `earliest` truncated to the *newest* matches and
+  dropped the oldest — exactly the ones asked for, so page two could hold
+  records older than page one — and `limit` was divided across partitions as
+  well as `max_scan`, so asking for 50 records on a 12-partition topic returned
+  4.
+- **An opt-in live tail: `Follow`** (#128) — off by default, offered only on a
+  `From: latest` query, since that is the only seek whose window ends at the
+  log's head. It polls forward from a cursor synthesised at the live edge —
+  `resume` where a forward read has more, `high` everywhere else, never
+  dropping a partition — which works with `partition=all` and needed no backend
+  change: the API already documented that with a cursor set, `offset` names
+  only the direction. It reports its spend while spending it (`following · 12
+  polls · 340 records · next in 3s`) and disarms itself five ways: five minutes
+  of wall clock, the tab going to the background (and returning does *not*
+  resume), three polls with nothing new, any failed read, and leaving the page.
+  Each stop says why, in a polite live region. Nothing polls without a click,
+  which the smoke asserts.
+- **A payload opens as a foldable, searchable tree, and headers are a table**
+  (#121) — a decoded key or value renders as a JSON tree instead of one
+  `<pre>`: objects and arrays fold, collapsed past depth 2, a closed node
+  states what is behind the fold (`{…} 12 keys`), values are coloured by JSON
+  type, and above 256 KB the field stays collapsed behind an **Expand anyway**
+  so a 2 MB record does not lock the tab. A `find in payload` box matches by
+  key or scalar, opens every node on the way to a match and highlights it — the
+  server-side filters find the *record*, this finds the *field* — and every
+  node offers **Copy path** (JSONPath) and **Copy subtree**. Headers become one
+  row per header, so a value containing a newline is no longer
+  indistinguishable from two headers, and a binary value says `hex` instead of
+  rendering as mojibake. `auto` now recognises a JSON object or array, so a
+  plain JSON topic — the commonest shape there is — arrives with structure to
+  open rather than as one `utf8` string; a bare `42` or `"text"` still does
+  not count. A **raw JSON** toggle brings back the flat rendering, remembered
+  per topic beside the format selectors.
+- **Timestamps that name their zone, a record's size, and a column picker**
+  (#126) — the API reports each record's serialized size (its key, value and
+  header bytes as they sit in the batch — computed where the raw `Bytes` are
+  still in hand, since a decoded payload's length says nothing about the wire),
+  and the table gains a `size` column plus `size p50 480 B / p99 2.1 KiB` over
+  the window loaded, labelled as being about the pages fetched and not the
+  topic. A timestamp reads `2026-08-25 16:03:11.221 +02:00` with the age on
+  hover, switchable between `local` / `utc` / `epoch` and built from the date's
+  own components rather than `toLocaleString`, so the column does not change
+  shape between machines. The columns
+  (`offset · partition · timestamp · size · key · value`) are ticked
+  individually and remembered per topic, in a fixed order so two people
+  recognise each other's screenshot; `partition` switches itself on for an
+  all-partition search, because across partitions an offset does not identify a
+  record. One click turns the loaded window around with no request — a
+  rendering flip, not an `order=` parameter, because `Direction` also decides
+  where a page resumes and which end of the merge survives truncation, so
+  "ascending" over a `latest` read would be a different window rather than the
+  same records upside down.
+- **Flat topic search, and a `⌘K` quick-jump palette** (#122) — the topic tree
+  matched only the level you were standing on, so `orders` was unfindable
+  without first guessing its organization and environment; a flat search now
+  matches the full dotted name across the cluster, which `list_topics` and
+  `Page::matches` already did — only the surface was missing. The palette jumps
+  across kinds, reaching any topic, consumer group or schema subject from any
+  page in one keystroke, instead of three clicks and two page loads through the
+  sidebar.
+- **Lag in the consumer-groups list, worst first** (#124) — `?lag=true` adds a
+  `lag` object per row: `total` (Σ over every committed partition), `topics`,
+  and `max_partition`, because a group can sit at a low total with one
+  partition stuck. It orders worst-first over **every match**, not over the
+  page, so the most-behind group in the cluster reaches page one; ties break by
+  name, and a group that has committed nothing ranks below one that is caught
+  up (`—` and `0` are different answers). Lag means reading the high watermark
+  behind every committed offset, which is why it is opt-in: without the flag
+  the endpoint returns exactly its previous payload at its previous cost. The
+  expensive part rides #84's catalog cache, so a burst — or a search still
+  being typed — pays for those reads once. `?sort=name` keeps alphabetical
+  order and computes lag for the returned page only.
+- **A diff between two versions of a schema subject** (#125) — a Compare mode
+  on the subject page, defaulting to `latest-1 → latest`, renders a unified
+  line diff with a summary line (`v1 → v2 · changed · compatibility BACKWARD`)
+  and per-field annotations for the four changes that decide Avro
+  compatibility: added, removed, type changed, default changed — with gaining a
+  default of `null` reported separately from changing one, since only the first
+  makes a field optional. The diff is over canonicalised JSON (keys sorted), so
+  two versions that declare the same fields in a different key order diff as
+  `identical`; arrays keep their order deliberately, because a record's
+  `fields` array is the wire layout and sorting it would hide a real change.
+  The `↗ schema` link on a decoded record now carries that record's schema id
+  and pre-arms the comparison against the version in force — an Avro decode
+  error is very often "the writer used a version this reader does not accept",
+  and the link used to drop you at the latest version, the one that is not the
+  problem.
+- **A UI that takes the keyboard, folds onto a phone, and has a light palette**
+  (#127) — the interactive rows take focus and `Enter` (the tree's group rows
+  get a real link, the message row's caret a real `<button>` with
+  `aria-expanded`), `scope="col"` and horizontal overflow are added once in
+  `DataTable` so every list page gets both, the empty and filtered-result lines
+  become live regions, and there is one `:focus-visible` ring for the whole app
+  on the only token clearing 3.0 against both grounds in both palettes. Under
+  700 px the sidebar collapses behind a burger — a disclosure, not a dialog —
+  and the document never scrolls sideways, asserted at 600 px. The light set is
+  declared twice on purpose: behind `prefers-color-scheme` for a reader who has
+  expressed no preference, and behind `data-theme` for one who has, chosen from
+  three radios (`system` / `light` / `dark`) rather than a native popup that a
+  phone renders as a tiny list over the nav. Every contrast pair is computed,
+  not estimated, and nothing about the dark theme's appearance changes.
+- **Shared list components, a working Retry, and the frontend's first tests**
+  (#114) — the three list screens (topics, groups, schemas) shared one
+  component between them (`Spinner`) and each carried its own copy of the same
+  search box, 300 ms debounce, offset/limit window and pager — which had
+  already diverged. They now sit on a `usePagedList()` composable plus
+  `<DataToolbar>`, `<DataTable>`, `<ErrorState>` and `<EmptyState>`, supplying
+  only a URL builder and their rows. A failed fetch rendered a bare red line
+  whose only remedy was a page reload; it now shows the backend's own message
+  with a **Retry** that refetches, on all five pages and the event browser.
+  Vitest and `@vue/test-utils` are wired into `ci.yml`'s `check` job with 61
+  tests over the paging boundaries, the debounce and reset behaviour, the
+  message query builder, key/value rendering for every field kind including the
+  decode-error case, and the four components.
+- **A k6 read-path load harness** (#100) — `loadtest/`, a scaffold plus load
+  profiles for the read endpoints, so the cost of a change to the read path can
+  be measured rather than argued about.
+
 ### Changed
 - **Every topic's routing pin is read, including a topic that is its own prefix**
   (#118) — `routed_prefix_of`'s shortcut for a name with fewer than three dotted
@@ -34,6 +184,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never written under — which renders as an empty topic, not as an error. The
   broker removed the same shortcut for the same reason. The cost is one GET per
   topic per process, memoized permanently alongside the prefix.
+- **`GET /api/source` answers from configuration; the S3 probe moved to
+  `/api/source/status`** (#115) — six pages each ran their own
+  `useFetch('/api/source')`, Nuxt refetches on client-side navigation, and the
+  handler ran a live `HEAD` on `clusters/{cluster}/meta.json`. So an
+  Overview → Topics → Groups → Schemas walk cost four object-store round-trips
+  to render a `connected` dot that only Overview displays — and because the
+  fetch was a top-level `await`, every page blocked on store latency, measured
+  at 2.8 s with the store stopped. `/api/source` now returns
+  `bucket` / `cluster` / `endpoint` / `region` and performs no I/O; the probe is
+  a separate `GET /api/source/status` returning `{ configured, connected,
+  error? }`, fetched lazily by Overview alone and re-run only from an explicit
+  **Re-check** button, which is the contract every other read in Kotatsu
+  follows. The card now has three states rather than two: "the store said no"
+  and "we could not ask" are different facts (#66). Breaking for API consumers:
+  `/api/source` no longer carries `connected` or `status`.
+- **The README documents the repo that exists** (#123) — it described Kotatsu
+  roughly as it stood at 0.2, twelve releases back: no mention anywhere of the
+  Python bindings, the e2e suite or the k6 harness, a project layout listing
+  four of seven top-level directories, a setup paragraph still saying the
+  `KOTATSU_S3_*` variables were not consumed yet (issue #2 closed ten releases
+  ago), a dev env-var table missing `KOTATSU_KORA_URL`, and no feature list or
+  API reference at all.
 
 ## [0.10.0] - 2026-08-08
 
