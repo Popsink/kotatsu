@@ -32,6 +32,12 @@ use serde::de::DeserializeOwned;
 
 use crate::config::{S3Config, StorageProvider};
 
+/// How many independent object-store reads a listing keeps in flight at once —
+/// consumer groups for lag (#107), topic rows and segment footers (#130). Enough
+/// to hide S3 round-trip latency, not so much that a cluster with thousands of
+/// items opens thousands of concurrent reads.
+const FANOUT: usize = 8;
+
 /// A configured, ready-to-read S3 source bound to a single Tansu cluster.
 #[derive(Clone)]
 pub struct StorageSource {

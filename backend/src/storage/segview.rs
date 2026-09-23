@@ -24,13 +24,8 @@ use super::{
     segment::{
         decode_segment_footer, FooterOutcome, SegmentFooter, SubstreamId, SEGMENT_FOOTER_OVER_READ,
     },
-    StorageError, StorageSource,
+    StorageError, StorageSource, FANOUT,
 };
-
-/// How many footers a prefix listing reads at once — the same bound as the
-/// message reader's and the lag listing's fan-out. Footers are cached, so this
-/// only matters on a cold pass, which is exactly the pass that used to be slow.
-const FOOTER_FANOUT: usize = 8;
 
 /// A prefix's live multi-topic segments, `(seq, footer)`, in listing order.
 pub(super) type PrefixFooters = Vec<(u64, SegmentFooter)>;
@@ -204,7 +199,8 @@ impl StorageSource {
     }
 
     /// Lists a prefix's segments once and reads every footer (cached, immutable),
-    /// `FOOTER_FANOUT` at a time. The one listing a topic's count *and* size are
+    /// `FANOUT` at a time — footers are cached, so that only matters on a cold pass,
+    /// which is exactly the pass that used to be slow. The one listing a topic's count *and* size are
     /// both folded from, for every partition — and, in a topic listing, for every
     /// row under the same prefix (#130).
     pub(super) async fn prefix_footers(&self, prefix: &str) -> Result<PrefixFooters, StorageError> {
@@ -220,7 +216,7 @@ impl StorageSource {
 
         futures::stream::iter(seqs)
             .map(|seq| async move { Ok(self.segment_footer(prefix, seq).await?.map(|f| (seq, f))) })
-            .buffered(FOOTER_FANOUT)
+            .buffered(FANOUT)
             .try_collect::<Vec<_>>()
             .await
             .map(|footers| footers.into_iter().flatten().collect())

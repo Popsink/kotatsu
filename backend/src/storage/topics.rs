@@ -15,7 +15,7 @@ use super::{
     catalog,
     model::Watermark,
     segview::{substream_segments, PrefixFooters, SegView, SubstreamSegments},
-    StorageError, StorageSource,
+    StorageError, StorageSource, FANOUT,
 };
 use crate::pagination::{Page, Paged};
 
@@ -71,11 +71,6 @@ pub struct TopicSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_bytes: Option<i64>,
 }
-
-/// How many list rows — and how many distinct prefixes — a topic listing reads
-/// at once. The lag listing's bound (`LAG_FANOUT`): enough to hide S3
-/// round-trip latency, not so much that a page opens hundreds of reads.
-const ROW_FANOUT: usize = 8;
 
 /// One node in the prefix tree (an org, env, or connector level), or a terminal
 /// topic surfaced directly at a group level.
@@ -347,7 +342,7 @@ impl StorageSource {
     }
 
     /// Row summaries for one page of names, in name order: from the catalog
-    /// where it can answer, computed `ROW_FANOUT` rows at a time otherwise.
+    /// where it can answer, computed `FANOUT` rows at a time otherwise.
     ///
     /// With `stats`, each prefix the uncached rows are routed under is listed
     /// **once**, up front, and every row under it is folded from that one
@@ -393,17 +388,18 @@ impl StorageSource {
                 .map(
                     |name| async move { Ok::<_, StorageError>(self.route_of(&name).await?.prefix) },
                 )
-                .buffered(ROW_FANOUT)
+                .buffered(FANOUT)
                 .try_collect()
                 .await?;
-            futures::stream::iter(prefixes)
-                .map(|prefix| async move {
-                    let footers = self.prefix_footers(&prefix).await?;
-                    Ok::<_, StorageError>((prefix, footers))
-                })
-                .buffered(ROW_FANOUT)
-                .try_collect()
-                .await?
+            // One prefix at a time: each already reads its footers `FANOUT` at
+            // a time, and running prefixes side by side would multiply the two
+            // bounds. A leaf page has a single prefix anyway.
+            let mut footers = HashMap::with_capacity(prefixes.len());
+            for prefix in prefixes {
+                let listed = self.prefix_footers(&prefix).await?;
+                footers.insert(prefix, listed);
+            }
+            footers
         } else {
             HashMap::new()
         };
@@ -424,7 +420,7 @@ impl StorageSource {
                     Ok(summary)
                 }
             })
-            .buffered(ROW_FANOUT)
+            .buffered(FANOUT)
             .try_collect()
             .await
     }
@@ -926,6 +922,84 @@ mod tests {
         let again = src.list_topics(&page, false).await.unwrap();
         assert_eq!(segment_lists(&store), 1, "served from the catalog");
         assert!(again.items[0].messages.is_none());
+    }
+
+    /// #130: topic detail folds its partitions from the same single listing,
+    /// and agrees with the listing row for the same topic.
+    #[tokio::test]
+    async fn detail_agrees_with_the_listing_from_one_listing() {
+        let (store, src) = counting_source();
+        let topics = seed_connector(&store, &src).await;
+
+        let detail = src.topic_detail(topics[2]).await.unwrap();
+        assert_eq!(segment_lists(&store), 1, "was P + 1 = 3");
+        let parts: Vec<(i64, i64)> = detail
+            .partitions
+            .iter()
+            .map(|p| (p.messages, p.storage_bytes))
+            .collect();
+        assert_eq!(parts, [(3, 30), (1, 7)]);
+
+        let row = src
+            .list_topics(&Page::new(Some(topics[2].into()), 50, 0), true)
+            .await
+            .unwrap();
+        assert_eq!(row.items[0].messages, Some(detail.messages));
+        assert_eq!(row.items[0].storage_bytes, Some(detail.storage_bytes));
+    }
+
+    /// #130: a flat page spans prefixes, and each row is folded from its
+    /// *routed* prefix — a pinned one included — never from the one its name
+    /// derives, where it would silently read as empty.
+    #[tokio::test]
+    async fn a_flat_page_folds_each_row_from_its_routed_prefix() {
+        use object_store::{ObjectStore, PutPayload};
+        let (store, src) = counting_source();
+        seed_connector(&store, &src).await;
+
+        let pinned = "globex.prod.oracle.audit";
+        for (path, body) in [
+            (
+                src.keys().topic_metadata(pinned),
+                r#"{"topic":{"num_partitions":1}}"#,
+            ),
+            (
+                src.keys().topic_routing(pinned),
+                r#"{"prefix":"pinned.somewhere.else"}"#,
+            ),
+        ] {
+            store
+                .put(&path, PutPayload::from(body.as_bytes().to_vec()))
+                .await
+                .unwrap();
+        }
+        let segment = super::super::segment::build_test_segment(
+            3,
+            1,
+            &[(pinned, 0, 0, 4, &[0u8; 12], 1, None)],
+        );
+        store
+            .put(
+                &src.keys().segment("pinned.somewhere.else", 0),
+                PutPayload::from(segment.to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let page = src
+            .list_topics(&Page::new(None, 50, 0), true)
+            .await
+            .unwrap();
+        assert_eq!(page.total, 4);
+        assert_eq!(segment_lists(&store), 2, "one listing per prefix");
+        let audit = page.items.iter().find(|r| r.name == pinned).unwrap();
+        assert_eq!((audit.messages, audit.storage_bytes), (Some(4), Some(12)));
+        let a = page
+            .items
+            .iter()
+            .find(|r| r.name == "acme.prod.db2.a")
+            .unwrap();
+        assert_eq!((a.messages, a.storage_bytes), (Some(2), Some(17)));
     }
 
     #[test]
