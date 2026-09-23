@@ -5,17 +5,30 @@ import { usePagedList } from '~/composables/usePagedList'
 
 // The composable owns the query state; the fetch itself is not under test, so
 // `useFetch` is replaced by a stub that records the URL it was handed.
-const fetchState = vi.hoisted(() => ({ url: null as null | { value: string }, total: 120 }))
+const fetchState = vi.hoisted(() => ({
+  url: null as null | { value: string },
+  opts: null as null | { key?: string; lazy?: boolean },
+  awaited: false,
+  total: 120,
+}))
 
 mockNuxtImport('useFetch', () => {
-  return (url: unknown) => {
+  return (url: unknown, opts: { key?: string; lazy?: boolean }) => {
     fetchState.url = url as { value: string }
-    return Object.assign(Promise.resolve(), {
+    fetchState.opts = opts
+    fetchState.awaited = false
+    // A plain thenable, not a Promise: `await` on a real one skips an own `then`,
+    // and that `then` is how the stub sees whether the composable waited.
+    return {
+      then: (resolve: () => void) => {
+        fetchState.awaited = true
+        resolve()
+      },
       data: ref({ items: [], total: fetchState.total }),
       pending: ref(false),
       error: ref(null),
       refresh: vi.fn(),
-    })
+    }
   }
 })
 
@@ -126,6 +139,32 @@ describe('usePagedList', () => {
     scope.stop()
     vi.advanceTimersByTime(300)
     expect(list.q.value).toBe('')
+  })
+
+  it('keeps one fetch key for the life of the list, so a new url aborts the old request', async () => {
+    const { list } = await makeList()
+    const key = fetchState.opts!.key
+    list.search.value = 'ord'
+    vi.advanceTimersByTime(300)
+    expect(fetchState.url!.value).toContain('search=ord')
+    // The key is not derived from the url: `useFetch` is called once and keeps it.
+    expect(key).toMatch(/^paged-list:\d+$/)
+    expect(fetchState.opts!.key).toBe(key)
+
+    const other = await makeList()
+    expect(fetchState.opts!.key).not.toBe(key)
+    other.scope.stop()
+  })
+
+  it('waits for the first page by default, and not when lazy', async () => {
+    await makeList()
+    expect(fetchState.awaited).toBe(true)
+    expect(fetchState.opts!.lazy).toBe(false)
+
+    const scope = effectScope()
+    await scope.run(() => usePagedList<{ total: number }>(build, '', { lazy: true }))
+    expect(fetchState.awaited).toBe(false)
+    expect(fetchState.opts!.lazy).toBe(true)
   })
 
   it('starts from a seeded term, in the first fetch rather than a debounce later', async () => {
