@@ -78,7 +78,7 @@ describe('useQuickJump', () => {
     const { jump } = await makeJump()
     await type(jump, 'ord')
     expect(state.calls).toEqual([
-      '/api/clusters/demo/topics?search=ord&limit=5',
+      '/api/clusters/demo/topics?search=ord&limit=5&stats=false',
       '/api/clusters/demo/groups?search=ord&limit=5',
       '/api/schemas?search=ord&limit=5',
     ])
