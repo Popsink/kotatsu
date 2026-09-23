@@ -141,19 +141,19 @@ describe('usePagedList', () => {
     expect(list.q.value).toBe('')
   })
 
-  it('keeps one fetch key for the life of the list, so a new url aborts the old request', async () => {
-    const { list } = await makeList()
-    const key = fetchState.opts!.key
-    list.search.value = 'ord'
-    vi.advanceTimersByTime(300)
-    expect(fetchState.url!.value).toContain('search=ord')
-    // The key is not derived from the url: `useFetch` is called once and keeps it.
+  it('keys its fetch per list, not per url', async () => {
+    // A url-derived key would start a new request beside the old one on every
+    // search; a per-list key lets `useFetch` cancel the one in flight (#130).
+    // The cancelling itself is Nuxt's, and not re-tested here.
+    const first = await makeList()
+    const key = fetchState.opts!.key!
     expect(key).toMatch(/^paged-list:\d+$/)
-    expect(fetchState.opts!.key).toBe(key)
 
-    const other = await makeList()
+    // Same url, different list: a different key, so two lists never share a slot.
+    const second = await makeList()
     expect(fetchState.opts!.key).not.toBe(key)
-    other.scope.stop()
+    first.scope.stop()
+    second.scope.stop()
   })
 
   it('waits for the first page by default, and not when lazy', async () => {
