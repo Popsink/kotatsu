@@ -16,8 +16,9 @@ use crate::{api, config::Config, state::AppState};
 /// How long an API request may take before it is answered `504 Gateway
 /// Timeout` (#130). Every endpoint reads the object store on demand, and nothing
 /// else bounds that: a pathological cluster must degrade into an error the UI can
-/// render, not a request that never returns. Generous next to a normal page —
-/// the widest message scan is capped at `MAX_SCAN_CAP` records.
+/// render, not a request that never returns. A chosen bound, not a measured
+/// one: far above a normal page, and a read that needs longer is already one
+/// the UI cannot usefully wait for.
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the application router.

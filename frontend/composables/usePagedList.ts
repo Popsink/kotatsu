@@ -8,7 +8,6 @@ export interface PagedResponse {
 const PAGE_SIZE = 50
 const DEBOUNCE_MS = 300
 
-/** Tells each list its own `useFetch` key — see where it is used. */
 let lists = 0
 
 /**
