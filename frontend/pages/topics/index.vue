@@ -47,7 +47,7 @@ const searchLabel = computed(() =>
 )
 
 // Lazy, and without the stats: on a large cluster those are what took the page
-// seconds to answer, and the whole page stayed blank until they had (#130). The
+// seconds to answer, and the whole page stayed blank until they had. The
 // rows render first; `useTopicStats` fills the two columns in behind them.
 const { search, q, url, data, pending, error, refresh, pager, prev, next, first, reset } = await usePagedList<{
   level?: 'group' | 'topic'
@@ -68,11 +68,11 @@ const { search, q, url, data, pending, error, refresh, pager, prev, next, first,
   (route.query.q as string) || '',
   { lazy: true },
 )
-const { stats, failed: statsFailed } = useTopicStats(data, url)
+const { stats, status: statsStatus } = useTopicStats(data, url)
 /** A stat cell: the figure once it is in, `…` while it is coming, `—` if it will not. */
 function stat(name: string, render: (s: TopicStats) => string) {
   const s = stats.value.get(name)
-  return s ? render(s) : statsFailed.value ? '—' : '…'
+  return s ? render(s) : statsStatus.value === 'pending' ? '…' : '—'
 }
 
 // Moving to a different level resets the search box and paging.

@@ -12,18 +12,12 @@ interface Listing {
   items?: unknown[]
 }
 
-/**
- * The same listing url with the stats asked for.
- *
- * The page lists with `stats=false`; dropping the flag falls back to the
- * backend's default, which computes them.
- */
+/** The same listing url with the stats asked for. */
 export function withStats(url: string): string {
   const [path, query = ''] = url.split('?')
   const params = new URLSearchParams(query)
-  params.delete('stats')
-  const rest = params.toString()
-  return rest ? `${path}?${rest}` : path
+  params.set('stats', 'true')
+  return `${path}?${params}`
 }
 
 /**
@@ -38,11 +32,13 @@ export function withStats(url: string): string {
  * A new page aborts the request for the old one: its figures could only land
  * against rows no longer shown. A failure leaves the rows as they are — the
  * names are still right, only the two figures are missing — and says so through
- * `failed` rather than as a page error.
+ * `status` rather than as a page error. So does an answer that lacks a row on
+ * screen, which the two requests' pages drifting apart can cause (a topic
+ * created or deleted in between): that row's figures are not coming either.
  */
 export function useTopicStats(data: Ref<Listing | null | undefined>, url: Ref<string>) {
   const stats = ref(new Map<string, TopicStats>())
-  const failed = ref(false)
+  const status = ref<'pending' | 'done' | 'failed'>('pending')
   let inFlight: AbortController | undefined
 
   watch(
@@ -51,22 +47,24 @@ export function useTopicStats(data: Ref<Listing | null | undefined>, url: Ref<st
       inFlight?.abort()
       inFlight = undefined
       stats.value = new Map()
-      failed.value = false
+      status.value = 'pending'
       // Group levels carry no topic rows; the flat listing has no `level`.
       if (!listing?.items?.length || listing.level === 'group') return
 
       const call = (inFlight = new AbortController())
       $fetch<{ items: ({ name: string } & TopicStats)[] }>(withStats(url.value), { signal: call.signal })
         .then((answer) => {
-          if (!call.signal.aborted) stats.value = new Map(answer.items.map((row) => [row.name, row]))
+          if (call.signal.aborted) return
+          stats.value = new Map(answer.items.map((row) => [row.name, row]))
+          status.value = 'done'
         })
         .catch(() => {
-          if (!call.signal.aborted) failed.value = true
+          if (!call.signal.aborted) status.value = 'failed'
         })
     },
     { immediate: true },
   )
   onScopeDispose(() => inFlight?.abort())
 
-  return { stats, failed }
+  return { stats, status }
 }

@@ -24,21 +24,21 @@ function make(initial: { level?: 'group' | 'topic'; items: unknown[] } | null = 
   const data = ref(initial)
   const url = ref(LIST)
   const scope = effectScope()
-  const { stats, failed } = scope.run(() => useTopicStats(data, url))!
-  return { data, url, scope, stats, failed }
+  const { stats, status } = scope.run(() => useTopicStats(data, url))!
+  return { data, url, scope, stats, status }
 }
 
 /** Lets a settled `$fetch` promise run its handlers. */
 const flush = () => new Promise((r) => setTimeout(r))
 
 describe('withStats', () => {
-  it('drops the opt-out, keeping every other parameter', () => {
-    expect(withStats(LIST)).toBe('/api/clusters/demo/topic-tree?prefix=a.b.c&search=&limit=50&offset=0')
+  it('turns the opt-out into an opt-in, keeping every other parameter', () => {
+    expect(withStats(LIST)).toBe('/api/clusters/demo/topic-tree?prefix=a.b.c&search=&limit=50&offset=0&stats=true')
   })
 
-  it('leaves a url without the flag alone', () => {
-    expect(withStats('/api/clusters/demo/topics?search=x')).toBe('/api/clusters/demo/topics?search=x')
-    expect(withStats('/api/clusters/demo/topics?stats=false')).toBe('/api/clusters/demo/topics')
+  it('asks for the stats of a url that did not mention them', () => {
+    expect(withStats('/api/clusters/demo/topics?search=x')).toBe('/api/clusters/demo/topics?search=x&stats=true')
+    expect(withStats('/api/clusters/demo/topics')).toBe('/api/clusters/demo/topics?stats=true')
   })
 })
 
@@ -48,12 +48,24 @@ describe('useTopicStats', () => {
   })
 
   it('asks for the stats of the page on screen, and maps them by name', async () => {
-    const { stats } = make({ level: 'topic', items: [row('a.b.c.x')] })
+    const { stats, status } = make({ level: 'topic', items: [row('a.b.c.x')] })
     expect(state.calls.map((c) => c.url)).toEqual([withStats(LIST)])
+    expect(status.value).toBe('pending')
 
     state.calls[0].resolve({ items: [{ name: 'a.b.c.x', messages: 3, storage_bytes: 42 }] })
     await flush()
     expect(stats.value.get('a.b.c.x')).toMatchObject({ messages: 3, storage_bytes: 42 })
+    expect(status.value).toBe('done')
+  })
+
+  it('is done, not pending, when the answer lacks a row on screen', async () => {
+    // The two requests select their page apart: a topic created in between
+    // shifts the second one, and the row it pushed out has no figures coming.
+    const { stats, status } = make({ level: 'topic', items: [row('a'), row('b')] })
+    state.calls[0].resolve({ items: [{ name: 'a', messages: 1, storage_bytes: 1 }] })
+    await flush()
+    expect(stats.value.has('b')).toBe(false)
+    expect(status.value).toBe('done')
   })
 
   it('asks for nothing at a group level, or for an empty page', () => {
@@ -85,20 +97,20 @@ describe('useTopicStats', () => {
   })
 
   it('reports a failure without treating an abort as one', async () => {
-    const { data, failed } = make({ level: 'topic', items: [row('x')] })
+    const { data, status } = make({ level: 'topic', items: [row('x')] })
     state.calls[0].reject(new Error('504'))
     await flush()
-    expect(failed.value).toBe(true)
+    expect(status.value).toBe('failed')
 
-    // A fresh page clears the flag; aborting it on the way is not a failure.
+    // A fresh page clears the failure; aborting it on the way is not one.
     data.value = { level: 'topic', items: [row('y')] }
     await nextTick()
-    expect(failed.value).toBe(false)
+    expect(status.value).toBe('pending')
     data.value = { level: 'topic', items: [row('z')] }
     await nextTick()
     state.calls[1].reject(new DOMException('aborted', 'AbortError'))
     await flush()
-    expect(failed.value).toBe(false)
+    expect(status.value).toBe('pending')
   })
 
   it('aborts what is in flight when its scope goes', () => {
