@@ -121,8 +121,11 @@ pub struct SegmentFooter {
     pub entries: Vec<SubstreamEntry>,
 }
 
+#[cfg(test)]
 impl SegmentFooter {
-    /// The entry for a sub-stream, if the segment holds one.
+    /// The entry for a sub-stream, if the segment holds one. Test-only: the
+    /// reader folds every entry in one pass (`segview::substream_segments`)
+    /// rather than scanning the footer once per partition.
     pub fn get(&self, id: SubstreamId<'_>, partition: i32) -> Option<&SubstreamEntry> {
         self.entries
             .iter()

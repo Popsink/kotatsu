@@ -17,7 +17,6 @@
 //!   open with a few records older than the target.
 //! - The `watermark.json` `timestamps` map is always null in S3 storage and unused.
 
-use futures::StreamExt;
 use serde::Deserialize;
 
 use super::{
@@ -97,8 +96,20 @@ impl StorageSource {
     /// floor", not an error.
     pub async fn watermark(&self, topic: &str, partition: i32) -> Result<Watermark, StorageError> {
         let view = self.build_segment_view(topic, partition).await?;
+        self.watermark_over(topic, partition, &view).await
+    }
+
+    /// [`Self::watermark`] over a view the caller already built — the topic
+    /// listing and detail fold every partition's view from one listing of the
+    /// prefix, so only the `watermark.json` hint is left to read.
+    pub(super) async fn watermark_over(
+        &self,
+        topic: &str,
+        partition: i32,
+        view: &super::segview::SegView,
+    ) -> Result<Watermark, StorageError> {
         let raw = self.watermark_hint(topic, partition).await?;
-        Ok(self.resolve_watermark(topic, partition, &view, &raw))
+        Ok(self.resolve_watermark(topic, partition, view, &raw))
     }
 
     /// Folds the segment view and the persisted hint into a watermark. Split out
@@ -311,41 +322,6 @@ impl StorageSource {
 
         let raw = self.watermark_hint(topic, partition).await?;
         Ok(self.resolve_watermark(topic, partition, &view, &raw).high)
-    }
-
-    /// Per-partition on-disk size for a topic: the bytes its sub-stream slices
-    /// occupy inside the shared segment objects of its routed prefix.
-    ///
-    /// One listing of the prefix plus the footers (cached, immutable) — the same
-    /// reads the segment view already makes, and no object content. Byte spans are
-    /// per sub-stream, so a topic is charged its own share of a shared segment and
-    /// never a sibling's — nor, since it is charged by the same identity it is
-    /// read by (#118), a retired incarnation of its own name's. Partitions with no
-    /// slice are absent from the map (callers default them to `0`).
-    pub(super) async fn topic_storage_bytes(
-        &self,
-        topic: &str,
-    ) -> Result<std::collections::BTreeMap<i32, i64>, StorageError> {
-        let route = self.route_of(topic).await?;
-        let prefix = route.prefix.clone();
-        let substream = route.substream(topic);
-        let list_prefix = self.keys().segment_prefix(&prefix);
-
-        let mut sizes = std::collections::BTreeMap::new();
-        let mut stream = self.store().list(Some(&list_prefix));
-        while let Some(meta) = stream.next().await {
-            let location = meta?.location;
-            let Some(seq) = super::Keys::seq_from_segment(&location) else {
-                continue;
-            };
-            let Some(footer) = self.segment_footer(&prefix, seq).await? else {
-                continue;
-            };
-            for entry in footer.entries.iter().filter(|e| substream.owns(e)) {
-                *sizes.entry(entry.partition).or_insert(0) += entry.byte_len as i64;
-            }
-        }
-        Ok(sizes)
     }
 }
 
@@ -583,7 +559,7 @@ mod tests {
 
         // Storage is attributed by the same identity it is read by, or the live
         // topic is charged for bytes it cannot read.
-        let sizes = src.topic_storage_bytes(SEG_TOPIC).await.unwrap();
+        let sizes = src.topic_segments(SEG_TOPIC).await.unwrap().bytes;
         assert_eq!(
             sizes.get(&0),
             Some(&(live.len() as i64)),
@@ -651,7 +627,7 @@ mod tests {
 
         // Storage size is the sub-stream's byte span in the segment — the
         // abandoned objects are not the topic's bytes either.
-        let sizes = src.topic_storage_bytes(SEG_TOPIC).await.unwrap();
+        let sizes = src.topic_segments(SEG_TOPIC).await.unwrap().bytes;
         assert_eq!(sizes.get(&0), Some(&(region.len() as i64)));
     }
 

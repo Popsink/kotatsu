@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { fmtBytes, splitTopicPath } from '~/utils/format'
+import type { TopicStats } from '~/composables/useTopicStats'
 
 interface TreeNode {
   segment: string
@@ -8,11 +9,10 @@ interface TreeNode {
   group: boolean
   topic?: string
 }
+/** A row as the page lists it: `stats=false`, so no message count or size yet. */
 interface TopicSummary {
   name: string
   partitions: number
-  messages: number
-  storage_bytes: number
 }
 
 const route = useRoute()
@@ -46,14 +46,17 @@ const searchLabel = computed(() =>
   flat.value ? 'all topics' : depth.value >= 3 ? 'topics' : (LEVELS[depth.value] ?? 'topics').toLowerCase(),
 )
 
-const { search, q, data, pending, error, refresh, pager, prev, next, first, reset } = await usePagedList<{
+// Lazy, and without the stats: on a large cluster those are what took the page
+// seconds to answer, and the whole page stayed blank until they had. The
+// rows render first; `useTopicStats` fills the two columns in behind them.
+const { search, q, url, data, pending, error, refresh, pager, prev, next, first, reset } = await usePagedList<{
   level?: 'group' | 'topic'
   items: TreeNode[] | TopicSummary[]
   total: number
 }>(
   ({ q, limit, offset }) => {
     if (!cluster.value) return ''
-    const paging = `&limit=${limit}&offset=${offset}`
+    const paging = `&limit=${limit}&offset=${offset}&stats=false`
     const term = `search=${encodeURIComponent(q)}`
     // `list_topics` already matches the full name across the cluster; it was
     // simply unreachable from the UI before this mode existed.
@@ -63,7 +66,14 @@ const { search, q, data, pending, error, refresh, pager, prev, next, first, rese
   },
   // The palette's "see all" link lands here with its term already typed.
   (route.query.q as string) || '',
+  { lazy: true },
 )
+const { stats, status: statsStatus } = useTopicStats(data, url)
+/** A stat cell: the figure once it is in, `…` while it is coming, `—` if it will not. */
+function stat(name: string, render: (s: TopicStats) => string) {
+  const s = stats.value.get(name)
+  return s ? render(s) : statsStatus.value === 'pending' ? '…' : '—'
+}
 
 // Moving to a different level resets the search box and paging.
 watch(prefix, reset)
@@ -197,8 +207,8 @@ function suffix(name: string) {
         <tr v-for="t in topics" :key="t.name">
           <td><NuxtLink :to="`/topics/${encodeURIComponent(t.name)}`" class="link">{{ suffix(t.name) }}</NuxtLink></td>
           <td class="mono">{{ t.partitions }}</td>
-          <td class="mono">{{ t.messages }}</td>
-          <td class="mono muted">{{ fmtBytes(t.storage_bytes) }}</td>
+          <td class="mono">{{ stat(t.name, (s) => String(s.messages)) }}</td>
+          <td class="mono muted">{{ stat(t.name, (s) => fmtBytes(s.storage_bytes)) }}</td>
         </tr>
 
         <!-- Flat search: no breadcrumb stands above these rows, so each carries
@@ -210,8 +220,8 @@ function suffix(name: string) {
             </NuxtLink>
           </td>
           <td class="mono">{{ t.partitions }}</td>
-          <td class="mono">{{ t.messages }}</td>
-          <td class="mono muted">{{ fmtBytes(t.storage_bytes) }}</td>
+          <td class="mono">{{ stat(t.name, (s) => String(s.messages)) }}</td>
+          <td class="mono muted">{{ stat(t.name, (s) => fmtBytes(s.storage_bytes)) }}</td>
         </tr>
       </DataTable>
     </template>

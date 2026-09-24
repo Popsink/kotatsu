@@ -220,8 +220,8 @@ are `GET`, all are read-only, all return JSON.
 | `/api/source/status` | live connectivity probe against the store | — |
 | `/api/clusters` | cluster ids found under `clusters/` | — |
 | `/api/clusters/{cluster}` | `meta.json` summary: topic, producer and transaction counts | — |
-| `/api/clusters/{cluster}/topic-tree` | one level of the dotted-name tree; `level` says whether the rows are group nodes or topics | `prefix`, `search`, `limit`, `offset` |
-| `/api/clusters/{cluster}/topics` | flat topic list, matched against the **full** dotted name | `search`, `limit`, `offset` |
+| `/api/clusters/{cluster}/topic-tree` | one level of the dotted-name tree; `level` says whether the rows are group nodes or topics | `prefix`, `search`, `limit`, `offset`, `stats` |
+| `/api/clusters/{cluster}/topics` | flat topic list, matched against the **full** dotted name | `search`, `limit`, `offset`, `stats` |
 | `/api/clusters/{cluster}/topics/{topic}` | partitions, watermarks, counts, configs, size | — |
 | `/api/clusters/{cluster}/topics/{topic}/groups` | groups with a committed offset on this topic | — |
 | `/api/clusters/{cluster}/topics/{topic}/messages` | the event browser's read | see below |
@@ -230,6 +230,12 @@ are `GET`, all are read-only, all return JSON.
 | `/api/schemas` | registry subjects (`503` when no registry is configured) | `search`, `limit`, `offset` |
 | `/api/schemas/{subject}` | versions, latest schema, compatibility level | — |
 | `/api/schemas/{subject}/versions/{version}` | one version's schema | — |
+
+`stats` (default `true`) computes each topic row's `messages` and
+`storage_bytes`; `stats=false` leaves both out, so the rows cost one metadata
+read each and nothing else. The Topics page lists without them and asks for them
+in a second request; the quick-jump palette never does. Every `/api` request is
+answered `504` after 30 s rather than left hanging.
 
 `messages` parameters:
 

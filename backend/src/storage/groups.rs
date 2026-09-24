@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use super::{catalog, keys::Keys, StorageError, StorageSource};
+use super::{catalog, keys::Keys, StorageError, StorageSource, FANOUT};
 use crate::pagination::{Page, Paged};
 
 // --- Mirrored `tansu-storage` JSON shapes (only the fields we use) ---
@@ -120,13 +120,6 @@ impl LagMode {
         }
     }
 }
-
-/// How many groups a lag listing reads at once.
-///
-/// The same decision as the message reader's partition fan-out: enough to hide
-/// S3 round-trip latency, not so much that a cluster with thousands of groups
-/// opens thousands of concurrent reads.
-const LAG_FANOUT: usize = 8;
 
 /// Ranking key for [`LagMode::RankAll`]. A group that has committed nothing
 /// sorts *below* one that is exactly caught up, rather than tying with it: `—`
@@ -306,7 +299,7 @@ impl StorageSource {
     }
 
     /// Resolves summaries for `names`, from the catalog cache where it can and
-    /// from the store where it cannot, `LAG_FANOUT` at a time.
+    /// from the store where it cannot, `FANOUT` at a time.
     ///
     /// A name whose objects have gone is dropped, not raised: the name index is
     /// bounded-stale by design (#84), so a group deleted inside the TTL window is
@@ -356,7 +349,7 @@ impl StorageSource {
                     }
                 }
             })
-            .buffered(LAG_FANOUT)
+            .buffered(FANOUT)
             .try_collect::<Vec<_>>()
             .await
             .map(|rows| rows.into_iter().flatten().collect())

@@ -151,14 +151,34 @@ pub async fn cluster(
     Ok(Json(json!(summary)))
 }
 
-/// `GET /api/clusters/{cluster}/topics?search=&limit=&offset=`
+/// Query params for the flat topic listing: the usual search/paging, plus
+/// whether to compute the stats columns.
+#[derive(Deserialize)]
+pub struct TopicsQuery {
+    search: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_stats")]
+    stats: bool,
+}
+
+/// Stats stay on by default, so existing callers keep their `messages` and
+/// `storage_bytes`; a caller after names only opts out with `stats=false`.
+fn default_stats() -> bool {
+    true
+}
+
+/// `GET /api/clusters/{cluster}/topics?search=&limit=&offset=&stats=`
 pub async fn topics(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
-    Query(query): Query<ListQuery>,
+    Query(query): Query<TopicsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
-    let paged = source.list_topics(&query.into()).await?;
+    let page = Page::new(query.search, query.limit, query.offset);
+    let paged = source.list_topics(&page, query.stats).await?;
     Ok(Json(json!({
         "cluster": cluster,
         "items": paged.items,
@@ -179,9 +199,12 @@ pub struct TreeQuery {
     limit: usize,
     #[serde(default)]
     offset: usize,
+    /// Only read at the connector level, where the rows are topic summaries.
+    #[serde(default = "default_stats")]
+    stats: bool,
 }
 
-/// `GET /api/clusters/{cluster}/topic-tree?prefix=&search=&limit=&offset=`
+/// `GET /api/clusters/{cluster}/topic-tree?prefix=&search=&limit=&offset=&stats=`
 ///
 /// One level of the prefix tree. Below `org.env.conn` (depth < 3) it returns the
 /// distinct next components as group nodes; at the connector level it returns the
@@ -201,7 +224,9 @@ pub async fn topic_tree(
     let page: Page = Page::new(query.search, query.limit, query.offset);
 
     if depth >= crate::storage::CONNECTOR_DEPTH {
-        let paged = source.list_topics_under(&prefix, &page).await?;
+        let paged = source
+            .list_topics_under(&prefix, &page, query.stats)
+            .await?;
         Ok(Json(json!({
             "cluster": cluster,
             "prefix": prefix,
