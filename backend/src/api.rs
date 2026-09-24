@@ -152,7 +152,7 @@ pub async fn cluster(
 }
 
 /// Query params for the flat topic listing: the usual search/paging, plus
-/// whether to compute the stats columns (#130).
+/// whether to compute the stats columns.
 #[derive(Deserialize)]
 pub struct TopicsQuery {
     search: Option<String>,

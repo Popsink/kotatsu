@@ -31,7 +31,7 @@ export async function usePagedList<T extends PagedResponse>(
   /**
    * Render at once and let the table show its spinner, instead of holding the
    * whole page until the first answer lands. For a list whose first answer can
-   * be slow — the topic listing on a large cluster (#130).
+   * be slow — the topic listing on a large cluster.
    */
   { lazy = false }: { lazy?: boolean } = {},
 ) {

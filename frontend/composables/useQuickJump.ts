@@ -64,7 +64,7 @@ export function useQuickJump() {
     if (kind === 'subject') return `/api/schemas?${search}`
     if (!c) return null
     // The palette shows names only, so the topic listing is spared its stats —
-    // five rows can sit under five different prefixes, each a cold read (#130).
+    // five rows can sit under five different prefixes, each a cold read.
     return kind === 'topic' ? `/api/clusters/${c}/topics?${search}&stats=false` : `/api/clusters/${c}/groups?${search}`
   }
 

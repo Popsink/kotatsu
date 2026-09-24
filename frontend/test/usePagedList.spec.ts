@@ -143,7 +143,7 @@ describe('usePagedList', () => {
 
   it('keys its fetch per list, not per url', async () => {
     // A url-derived key would start a new request beside the old one on every
-    // search; a per-list key lets `useFetch` cancel the one in flight (#130).
+    // search; a per-list key lets `useFetch` cancel the one in flight.
     // The cancelling itself is Nuxt's, and not re-tested here.
     const first = await makeList()
     const key = fetchState.opts!.key!

@@ -101,7 +101,7 @@ impl StorageSource {
 
     /// [`Self::watermark`] over a view the caller already built — the topic
     /// listing and detail fold every partition's view from one listing of the
-    /// prefix (#130), so only the `watermark.json` hint is left to read.
+    /// prefix, so only the `watermark.json` hint is left to read.
     pub(super) async fn watermark_over(
         &self,
         topic: &str,
