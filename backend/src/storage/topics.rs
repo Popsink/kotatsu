@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     catalog,
     model::Watermark,
-    segview::{substream_segments, PrefixFooters, SegView, SubstreamSegments},
+    segview::{substream_segments, PrefixFooters, SegView, TopicSegments},
     StorageError, StorageSource, FANOUT,
 };
 use crate::pagination::{Page, Paged};
@@ -55,7 +55,7 @@ pub struct ConfigEntry {
 
 /// One row in the topics list.
 ///
-/// The two stats are absent when the listing was asked for without them (#130):
+/// The stats are absent when the listing was asked for without them (#130):
 /// they are the only part of a row that costs object-store work beyond the
 /// metadata, so a caller after names — the quick-jump palette, the first paint
 /// of the Topics page — does not wait on them.
@@ -63,13 +63,18 @@ pub struct ConfigEntry {
 pub struct TopicSummary {
     pub name: String,
     pub partitions: i32,
+    #[serde(flatten)]
+    pub stats: Option<TopicStats>,
+}
+
+/// The two columns of a topic row that are folded from its segments.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TopicStats {
     /// Approximate message count = Σ(high − low) over partitions.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub messages: Option<i64>,
+    pub messages: i64,
     /// On-disk size in S3 (compressed bytes of the record segments) across all
     /// partitions. `0` for an empty topic.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage_bytes: Option<i64>,
+    pub storage_bytes: i64,
 }
 
 /// One node in the prefix tree (an org, env, or connector level), or a terminal
@@ -347,31 +352,19 @@ impl StorageSource {
     /// With `stats`, each prefix the uncached rows are routed under is listed
     /// **once**, up front, and every row under it is folded from that one
     /// listing. A leaf page is one connector's topics, so its 50 rows share a
-    /// single prefix — which they used to list `P + 1` times each (#130).
+    /// single prefix — which they used to list `P + 1` times each.
     async fn topic_summaries(
         &self,
         names: Vec<String>,
         stats: bool,
     ) -> Result<Vec<TopicSummary>, StorageError> {
-        // A row cached with stats answers either request, once the figures
-        // nobody asked for are dropped; one cached without them cannot answer a
-        // request that wants them.
         let cached: Vec<Option<TopicSummary>> = names
             .iter()
-            .map(|name| {
-                catalog::cached_summary(&self.topic_catalog, name).and_then(|row| {
-                    match (stats, row.messages.is_some()) {
-                        (false, _) => Some(TopicSummary {
-                            messages: None,
-                            storage_bytes: None,
-                            ..row
-                        }),
-                        (true, true) => Some(row),
-                        (true, false) => None,
-                    }
-                })
-            })
+            .map(|name| catalog::cached_summary(&self.topic_catalog, name))
             .collect();
+        // A row cached with stats answers either request; one cached without
+        // them answers only a request that does not want them.
+        let answers = |row: &TopicSummary| !stats || row.stats.is_some();
 
         // Footers per prefix, for the span of this listing only — the same
         // scope as the lag listing's memoised highs.
@@ -381,7 +374,7 @@ impl StorageSource {
             let uncached: Vec<String> = names
                 .iter()
                 .zip(&cached)
-                .filter(|(_, row)| row.is_none())
+                .filter(|(_, row)| !row.as_ref().is_some_and(answers))
                 .map(|(name, _)| name.clone())
                 .collect();
             let prefixes: BTreeSet<String> = futures::stream::iter(uncached)
@@ -393,7 +386,8 @@ impl StorageSource {
                 .await?;
             // One prefix at a time: each already reads its footers `FANOUT` at
             // a time, and running prefixes side by side would multiply the two
-            // bounds. A leaf page has a single prefix anyway.
+            // bounds. A leaf page has a single prefix; a flat page that spans
+            // many reads them in turn.
             let mut footers = HashMap::with_capacity(prefixes.len());
             for prefix in prefixes {
                 let listed = self.prefix_footers(&prefix).await?;
@@ -410,13 +404,34 @@ impl StorageSource {
             .map(|(name, row)| {
                 let footers = &footers;
                 async move {
-                    if let Some(row) = row {
-                        return Ok(row);
-                    }
-                    let summary = self
-                        .compute_topic_summary(&name, stats.then_some(footers))
-                        .await?;
-                    catalog::store_summary(&self.topic_catalog, name, summary.clone());
+                    let partitions = match row {
+                        Some(row) if answers(&row) => {
+                            return Ok(if stats {
+                                row
+                            } else {
+                                TopicSummary { stats: None, ..row }
+                            });
+                        }
+                        // Cached without stats, by the stats-less listing the
+                        // Topics page paints first: its partition count still
+                        // holds, so the metadata is not read a second time.
+                        Some(row) => row.partitions,
+                        None => self.topic_spec(&name).await?.num_partitions.max(0),
+                    };
+                    let summary = TopicSummary {
+                        stats: if stats {
+                            Some(self.topic_stats(&name, partitions, footers).await?)
+                        } else {
+                            None
+                        },
+                        name,
+                        partitions,
+                    };
+                    catalog::store_summary(
+                        &self.topic_catalog,
+                        summary.name.clone(),
+                        summary.clone(),
+                    );
                     Ok(summary)
                 }
             })
@@ -437,24 +452,14 @@ impl StorageSource {
         Ok(names)
     }
 
-    /// Computes one topic's list-row summary: the partition count from its
-    /// metadata, and — given the page's prefix footers — its approximate message
-    /// count and on-disk bytes. Cached per row by [`Self::topic_summaries`].
-    async fn compute_topic_summary(
+    /// One topic row's approximate message count and on-disk bytes, folded from
+    /// the page's prefix footers.
+    async fn topic_stats(
         &self,
         name: &str,
-        footers: Option<&HashMap<String, PrefixFooters>>,
-    ) -> Result<TopicSummary, StorageError> {
-        let partitions = self.topic_spec(name).await?.num_partitions.max(0);
-        let Some(footers) = footers else {
-            return Ok(TopicSummary {
-                name: name.to_string(),
-                partitions,
-                messages: None,
-                storage_bytes: None,
-            });
-        };
-
+        partitions: i32,
+        footers: &HashMap<String, PrefixFooters>,
+    ) -> Result<TopicStats, StorageError> {
         let route = self.route_of(name).await?;
         let segments = footers
             .get(&route.prefix)
@@ -463,11 +468,9 @@ impl StorageSource {
         let watermarks = self
             .partition_watermarks(name, partitions, &segments)
             .await?;
-        Ok(TopicSummary {
-            name: name.to_string(),
-            partitions,
-            messages: Some(watermarks.iter().map(Watermark::count).sum()),
-            storage_bytes: Some(segments.bytes.values().sum()),
+        Ok(TopicStats {
+            messages: watermarks.iter().map(Watermark::count).sum(),
+            storage_bytes: segments.bytes.values().sum(),
         })
     }
 
@@ -477,7 +480,7 @@ impl StorageSource {
         &self,
         name: &str,
         partitions: i32,
-        segments: &SubstreamSegments,
+        segments: &TopicSegments,
     ) -> Result<Vec<Watermark>, StorageError> {
         let empty = SegView::default();
         try_join_all(
@@ -708,7 +711,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.total, 1);
-        assert_eq!(first.items[0].messages, Some(5));
+        assert_eq!(first.items[0].stats, stats(5, 32));
 
         // Remove every object; within the TTL the catalog still answers.
         for p in [
@@ -724,8 +727,8 @@ mod tests {
             .unwrap();
         assert_eq!(cached.total, 1, "name index served from cache");
         assert_eq!(
-            cached.items[0].messages,
-            Some(5),
+            cached.items[0].stats,
+            stats(5, 32),
             "row summary served from cache"
         );
 
@@ -742,12 +745,13 @@ mod tests {
         assert_eq!(miss.total, 0);
     }
 
-    /// The in-memory store, counting the LISTs made under a segment prefix — the
-    /// read #130 is about.
+    /// The in-memory store, counting the LISTs made under a segment prefix and
+    /// the GETs of a topic's metadata.
     #[derive(Debug)]
     struct CountingStore {
         inner: object_store::memory::InMemory,
         segment_lists: std::sync::atomic::AtomicUsize,
+        metadata_gets: std::sync::atomic::AtomicUsize,
     }
 
     impl std::fmt::Display for CountingStore {
@@ -778,6 +782,10 @@ mod tests {
             location: &object_store::path::Path,
             options: object_store::GetOptions,
         ) -> object_store::Result<object_store::GetResult> {
+            if location.as_ref().contains("/topic-metadata/") {
+                self.metadata_gets
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             self.inner.get_opts(location, options).await
         }
         async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
@@ -818,19 +826,24 @@ mod tests {
 
     /// Three two-partition topics sharing the `acme.prod.db2` prefix: topic `i`
     /// holds `i + 1` records of 10 bytes on partition 0 and one of 7 bytes on
-    /// partition 1, spread over two segments.
+    /// partition 1, spread over two segments. Each is pinned to its prefix, as
+    /// every topic created since Popsink/tansu#236 is, so resolving its route
+    /// does not read its metadata.
     async fn seed_connector(store: &CountingStore, src: &StorageSource) -> [&'static str; 3] {
         use object_store::{ObjectStore, PutPayload};
         let topics = ["acme.prod.db2.a", "acme.prod.db2.b", "acme.prod.db2.c"];
         for topic in topics {
             let meta = serde_json::json!({ "topic": { "num_partitions": 2 } });
-            store
-                .put(
-                    &src.keys().topic_metadata(topic),
-                    PutPayload::from(serde_json::to_vec(&meta).unwrap()),
-                )
-                .await
-                .unwrap();
+            let pin = serde_json::json!({ "prefix": "acme.prod.db2" });
+            for (path, body) in [
+                (src.keys().topic_metadata(topic), meta),
+                (src.keys().topic_routing(topic), pin),
+            ] {
+                store
+                    .put(&path, PutPayload::from(serde_json::to_vec(&body).unwrap()))
+                    .await
+                    .unwrap();
+            }
         }
         let bytes = [vec![0u8; 10], vec![0u8; 20], vec![0u8; 30], vec![0u8; 7]];
         let seg0: Vec<super::super::segment::TestRegion> = topics
@@ -859,6 +872,7 @@ mod tests {
         let store = std::sync::Arc::new(CountingStore {
             inner: object_store::memory::InMemory::new(),
             segment_lists: Default::default(),
+            metadata_gets: Default::default(),
         });
         let src = StorageSource::with_store(store.clone(), "c");
         (store, src)
@@ -870,7 +884,20 @@ mod tests {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// #130: a leaf page lists its connector's segment prefix once, and every
+    fn metadata_gets(store: &CountingStore) -> usize {
+        store
+            .metadata_gets
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn stats(messages: i64, storage_bytes: i64) -> Option<TopicStats> {
+        Some(TopicStats {
+            messages,
+            storage_bytes,
+        })
+    }
+
+    /// A leaf page lists its connector's segment prefix once, and every
     /// row's count and size are folded from that one listing — it used to be
     /// `P + 1` listings per row, here 3 × (2 + 1) = 9.
     #[tokio::test]
@@ -884,47 +911,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(segment_lists(&store), 1);
-        let rows: Vec<(&str, Option<i64>, Option<i64>)> = page
+        let rows: Vec<(&str, Option<TopicStats>)> = page
             .items
             .iter()
-            .map(|r| (r.name.as_str(), r.messages, r.storage_bytes))
+            .map(|r| (r.name.as_str(), r.stats.clone()))
             .collect();
         assert_eq!(
             rows,
             [
-                (topics[0], Some(1 + 1), Some(10 + 7)),
-                (topics[1], Some(2 + 1), Some(20 + 7)),
-                (topics[2], Some(3 + 1), Some(30 + 7)),
+                (topics[0], stats(1 + 1, 10 + 7)),
+                (topics[1], stats(2 + 1, 20 + 7)),
+                (topics[2], stats(3 + 1, 30 + 7)),
             ]
         );
     }
 
-    /// #130: without stats a page reads no segment at all, and a row cached that
-    /// way does not pass for one with stats on the next request.
+    /// Without stats a page reads no segment at all. A row cached that way does
+    /// not pass for one with stats on the next request, but its partition count
+    /// is reused: the Topics page's second request does not read the metadata
+    /// again.
     #[tokio::test]
-    async fn stats_are_opt_out_and_a_stats_less_row_is_not_reused_for_them() {
+    async fn stats_are_opt_out_and_a_stats_less_row_only_lends_its_partitions() {
         let (store, src) = counting_source();
         seed_connector(&store, &src).await;
         let page = Page::new(None, 50, 0);
 
         let bare = src.list_topics(&page, false).await.unwrap();
         assert_eq!(segment_lists(&store), 0);
+        assert_eq!(metadata_gets(&store), 3);
         assert!(bare
             .items
             .iter()
-            .all(|r| r.partitions == 2 && r.messages.is_none() && r.storage_bytes.is_none()));
+            .all(|r| r.partitions == 2 && r.stats.is_none()));
 
         let full = src.list_topics(&page, true).await.unwrap();
         assert_eq!(segment_lists(&store), 1);
-        assert_eq!(full.items[0].messages, Some(2));
+        assert_eq!(metadata_gets(&store), 3, "partitions taken from the cache");
+        assert_eq!(full.items[0].partitions, 2);
+        assert_eq!(full.items[0].stats, stats(2, 17));
+        // The wire shape: both figures at the row's top level, or neither.
+        assert_eq!(
+            serde_json::to_value(&full.items[0]).unwrap(),
+            serde_json::json!({
+                "name": "acme.prod.db2.a",
+                "partitions": 2,
+                "messages": 2,
+                "storage_bytes": 17,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&bare.items[0]).unwrap(),
+            serde_json::json!({ "name": "acme.prod.db2.a", "partitions": 2 })
+        );
 
         // A row cached with stats answers a stats-less request, figures dropped.
         let again = src.list_topics(&page, false).await.unwrap();
         assert_eq!(segment_lists(&store), 1, "served from the catalog");
-        assert!(again.items[0].messages.is_none());
+        assert!(again.items[0].stats.is_none());
     }
 
-    /// #130: topic detail folds its partitions from the same single listing,
+    /// Topic detail folds its partitions from the same single listing,
     /// and agrees with the listing row for the same topic.
     #[tokio::test]
     async fn detail_agrees_with_the_listing_from_one_listing() {
@@ -944,11 +990,13 @@ mod tests {
             .list_topics(&Page::new(Some(topics[2].into()), 50, 0), true)
             .await
             .unwrap();
-        assert_eq!(row.items[0].messages, Some(detail.messages));
-        assert_eq!(row.items[0].storage_bytes, Some(detail.storage_bytes));
+        assert_eq!(
+            row.items[0].stats,
+            stats(detail.messages, detail.storage_bytes)
+        );
     }
 
-    /// #130: a flat page spans prefixes, and each row is folded from its
+    /// A flat page spans prefixes, and each row is folded from its
     /// *routed* prefix — a pinned one included — never from the one its name
     /// derives, where it would silently read as empty.
     #[tokio::test]
@@ -993,13 +1041,13 @@ mod tests {
         assert_eq!(page.total, 4);
         assert_eq!(segment_lists(&store), 2, "one listing per prefix");
         let audit = page.items.iter().find(|r| r.name == pinned).unwrap();
-        assert_eq!((audit.messages, audit.storage_bytes), (Some(4), Some(12)));
+        assert_eq!(audit.stats, stats(4, 12));
         let a = page
             .items
             .iter()
             .find(|r| r.name == "acme.prod.db2.a")
             .unwrap();
-        assert_eq!((a.messages, a.storage_bytes), (Some(2), Some(17)));
+        assert_eq!(a.stats, stats(2, 17));
     }
 
     #[test]

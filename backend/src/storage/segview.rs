@@ -33,7 +33,7 @@ pub(super) type PrefixFooters = Vec<(u64, SegmentFooter)>;
 /// One sub-stream's slice of a prefix, per partition: its resolved segment view
 /// and the bytes it occupies. Partitions with no slice are absent from both.
 #[derive(Default)]
-pub(super) struct SubstreamSegments {
+pub(super) struct TopicSegments {
     pub views: BTreeMap<i32, SegView>,
     pub bytes: BTreeMap<i32, i64>,
 }
@@ -185,10 +185,7 @@ impl StorageSource {
     /// Every partition's segment view and on-disk size for a topic, from one
     /// listing of its routed prefix — rather than one listing per partition plus
     /// one more for the size.
-    pub(super) async fn topic_segments(
-        &self,
-        topic: &str,
-    ) -> Result<SubstreamSegments, StorageError> {
+    pub(super) async fn topic_segments(&self, topic: &str) -> Result<TopicSegments, StorageError> {
         let route = self.route_of(topic).await?;
         let footers = self.prefix_footers(&route.prefix).await?;
         Ok(substream_segments(
@@ -198,11 +195,10 @@ impl StorageSource {
         ))
     }
 
-    /// Lists a prefix's segments once and reads every footer (cached, immutable),
-    /// `FANOUT` at a time — footers are cached, so that only matters on a cold pass,
-    /// which is exactly the pass that used to be slow. The one listing a topic's count *and* size are
-    /// both folded from, for every partition — and, in a topic listing, for every
-    /// row under the same prefix (#130).
+    /// Lists a prefix's segments once and reads their footers (cached,
+    /// immutable), `FANOUT` at a time on a cold pass. A topic's count and size
+    /// are folded from this one listing, for every partition — and, in a topic
+    /// listing, for every row under the same prefix.
     pub(super) async fn prefix_footers(&self, prefix: &str) -> Result<PrefixFooters, StorageError> {
         let seqs: Vec<u64> = self
             .store()
@@ -248,7 +244,7 @@ pub(super) fn substream_segments(
     footers: &[(u64, SegmentFooter)],
     prefix: &str,
     substream: SubstreamId<'_>,
-) -> SubstreamSegments {
+) -> TopicSegments {
     let mut placed: BTreeMap<i32, Vec<Placed>> = BTreeMap::new();
     let mut bytes = BTreeMap::new();
     for (seq, footer) in footers {
@@ -266,7 +262,7 @@ pub(super) fn substream_segments(
             });
         }
     }
-    SubstreamSegments {
+    TopicSegments {
         views: placed
             .into_iter()
             .map(|(partition, placed)| {
