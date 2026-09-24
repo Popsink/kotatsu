@@ -371,29 +371,30 @@ impl StorageSource {
         let footers: HashMap<String, PrefixFooters> = if stats {
             // Owned names: a stream over borrows trips the `Send` bound the
             // router puts on the handler's future.
-            let uncached: Vec<String> = names
+            let to_compute: Vec<String> = names
                 .iter()
                 .zip(&cached)
                 .filter(|(_, row)| !row.as_ref().is_some_and(answers))
                 .map(|(name, _)| name.clone())
                 .collect();
-            let prefixes: BTreeSet<String> = futures::stream::iter(uncached)
+            let prefixes: BTreeSet<String> = futures::stream::iter(to_compute)
                 .map(
                     |name| async move { Ok::<_, StorageError>(self.route_of(&name).await?.prefix) },
                 )
                 .buffered(FANOUT)
                 .try_collect()
                 .await?;
-            // One prefix at a time: each already reads its footers `FANOUT` at
-            // a time, and running prefixes side by side would multiply the two
-            // bounds. A leaf page has a single prefix; a flat page that spans
-            // many reads them in turn.
-            let mut footers = HashMap::with_capacity(prefixes.len());
-            for prefix in prefixes {
-                let listed = self.prefix_footers(&prefix).await?;
-                footers.insert(prefix, listed);
-            }
-            footers
+            // Prefixes side by side, each reading its footers `FANOUT` at a
+            // time: the bounds multiply on a cold pass only, as they do on any
+            // multi-partition read, and a footer once read is cached for good.
+            futures::stream::iter(prefixes)
+                .map(|prefix| async move {
+                    let listed = self.prefix_footers(&prefix).await?;
+                    Ok::<_, StorageError>((prefix, listed))
+                })
+                .buffer_unordered(FANOUT)
+                .try_collect()
+                .await?
         } else {
             HashMap::new()
         };
