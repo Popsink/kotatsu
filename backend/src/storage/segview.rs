@@ -13,15 +13,30 @@
 //! wins** — turning the collected entries into a set of non-overlapping
 //! [`OwnerPiece`]s that partition the topition's segment-backed offset space.
 
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::{GetOptions, GetRange};
 
 use super::{
     keys::Keys,
-    segment::{decode_segment_footer, FooterOutcome, SegmentFooter, SEGMENT_FOOTER_OVER_READ},
-    StorageError, StorageSource,
+    segment::{
+        decode_segment_footer, FooterOutcome, SegmentFooter, SubstreamId, SEGMENT_FOOTER_OVER_READ,
+    },
+    StorageError, StorageSource, FANOUT,
 };
+
+/// A prefix's live multi-topic segments, `(seq, footer)`, in listing order.
+pub(super) type PrefixFooters = Vec<(u64, SegmentFooter)>;
+
+/// One sub-stream's slice of a prefix, per partition: its resolved segment view
+/// and the bytes it occupies. Partitions with no slice are absent from both.
+#[derive(Default)]
+pub(super) struct TopicSegments {
+    pub views: BTreeMap<i32, SegView>,
+    pub bytes: BTreeMap<i32, i64>,
+}
 
 /// A contiguous run of absolute offsets `[lo, hi)` for a topition, owned by one
 /// segment region (after overlap resolution). Reading it means a ranged GET of
@@ -159,38 +174,48 @@ impl StorageSource {
         topic: &str,
         partition: i32,
     ) -> Result<SegView, StorageError> {
+        Ok(self
+            .topic_segments(topic)
+            .await?
+            .views
+            .remove(&partition)
+            .unwrap_or_default())
+    }
+
+    /// Every partition's segment view and on-disk size for a topic, from one
+    /// listing of its routed prefix — rather than one listing per partition plus
+    /// one more for the size.
+    pub(super) async fn topic_segments(&self, topic: &str) -> Result<TopicSegments, StorageError> {
         let route = self.route_of(topic).await?;
-        let prefix = route.prefix.clone();
-        let substream = route.substream(topic);
-        let list_prefix = self.keys().segment_prefix(&prefix);
+        let footers = self.prefix_footers(&route.prefix).await?;
+        Ok(substream_segments(
+            &footers,
+            &route.prefix,
+            route.substream(topic),
+        ))
+    }
 
-        let mut placed = Vec::new();
-        let mut stream = self.store().list(Some(&list_prefix));
-        while let Some(meta) = stream.next().await {
-            let location = meta?.location;
-            let Some(seq) = Keys::seq_from_segment(&location) else {
-                continue;
-            };
-            let Some(footer) = self.segment_footer(&prefix, seq).await? else {
-                continue;
-            };
-            if let Some(entry) = footer.get(substream, partition) {
-                placed.push(Placed {
-                    seq,
-                    epoch: footer.writer_epoch,
-                    prefix: prefix.clone(),
-                    base_offset: entry.base_offset,
-                    end_offset: entry.end_offset(),
-                    byte_start: entry.byte_start,
-                    byte_len: entry.byte_len,
-                    max_timestamp: entry.max_timestamp,
-                });
-            }
-        }
+    /// Lists a prefix's segments once and reads their footers (cached,
+    /// immutable), `FANOUT` at a time on a cold pass. A topic's count and size
+    /// are folded from this one listing, for every partition — and, in a topic
+    /// listing, for every row under the same prefix.
+    pub(super) async fn prefix_footers(&self, prefix: &str) -> Result<PrefixFooters, StorageError> {
+        let seqs: Vec<u64> = self
+            .store()
+            .list(Some(&self.keys().segment_prefix(prefix)))
+            .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
 
-        Ok(SegView {
-            pieces: resolve_owners(placed),
-        })
+        futures::stream::iter(seqs)
+            .map(|seq| async move { Ok(self.segment_footer(prefix, seq).await?.map(|f| (seq, f))) })
+            .buffered(FANOUT)
+            .try_collect::<Vec<_>>()
+            .await
+            .map(|footers| footers.into_iter().flatten().collect())
     }
 
     /// Reads a segment region's raw bytes (`[byte_start, byte_start + byte_len)`).
@@ -206,6 +231,50 @@ impl StorageSource {
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(StorageError::from_object(e, &path)),
         }
+    }
+}
+
+/// Folds a prefix's footers into one sub-stream's per-partition views and byte
+/// sizes, in a single pass over the entries.
+///
+/// Byte spans are per sub-stream, so a topic is charged its own share of a
+/// shared segment and never a sibling's — nor, since it is charged by the same
+/// identity it is read by (#118), a retired incarnation of its own name's.
+pub(super) fn substream_segments(
+    footers: &[(u64, SegmentFooter)],
+    prefix: &str,
+    substream: SubstreamId<'_>,
+) -> TopicSegments {
+    let mut placed: BTreeMap<i32, Vec<Placed>> = BTreeMap::new();
+    let mut bytes = BTreeMap::new();
+    for (seq, footer) in footers {
+        for entry in footer.entries.iter().filter(|e| substream.owns(e)) {
+            *bytes.entry(entry.partition).or_insert(0) += entry.byte_len as i64;
+            placed.entry(entry.partition).or_default().push(Placed {
+                seq: *seq,
+                epoch: footer.writer_epoch,
+                prefix: prefix.to_string(),
+                base_offset: entry.base_offset,
+                end_offset: entry.end_offset(),
+                byte_start: entry.byte_start,
+                byte_len: entry.byte_len,
+                max_timestamp: entry.max_timestamp,
+            });
+        }
+    }
+    TopicSegments {
+        views: placed
+            .into_iter()
+            .map(|(partition, placed)| {
+                (
+                    partition,
+                    SegView {
+                        pieces: resolve_owners(placed),
+                    },
+                )
+            })
+            .collect(),
+        bytes,
     }
 }
 

@@ -8,6 +8,8 @@ export interface PagedResponse {
 const PAGE_SIZE = 50
 const DEBOUNCE_MS = 300
 
+let lists = 0
+
 /**
  * Search + pagination for a list endpoint: a debounced search box, an
  * offset/limit window, and the fetch that follows them.
@@ -26,6 +28,12 @@ export async function usePagedList<T extends PagedResponse>(
    * arriving a debounce later.
    */
   initialSearch = '',
+  /**
+   * Render at once and let the table show its spinner, instead of holding the
+   * whole page until the first answer lands. For a list whose first answer can
+   * be slow — the topic listing on a large cluster.
+   */
+  { lazy = false }: { lazy?: boolean } = {},
 ) {
   /** What the user is typing. */
   const search = ref(initialSearch)
@@ -50,8 +58,14 @@ export async function usePagedList<T extends PagedResponse>(
   onScopeDispose(() => clearTimeout(timer))
 
   const url = computed(() => buildUrl({ q: q.value, limit: limit.value, offset: offset.value }))
-  const asyncData = useFetch<T>(url, { watch: [url] })
-  await asyncData
+  // One key for the life of the list, not one per url: `useFetch` keys by url
+  // otherwise, and a new key starts a new request *beside* the old one, which
+  // keeps running to the end. Under a stable key a new url refetches the same
+  // entry, and its `dedupe: 'cancel'` aborts the request still in flight — so a
+  // superseded search term stops costing the backend anything (#130).
+  const key = `paged-list:${++lists}`
+  const asyncData = useFetch<T>(url, { key, watch: [url], lazy })
+  if (!lazy) await asyncData
 
   const { data, pending, error, refresh } = asyncData
   // `useFetch` widens `data` to a Pick<> of the response; the envelope is ours.
@@ -83,5 +97,5 @@ export async function usePagedList<T extends PagedResponse>(
     offset.value = 0
   }
 
-  return { search, q, data, pending, error, refresh, pager, prev, next, first, reset }
+  return { search, q, url, data, pending, error, refresh, pager, prev, next, first, reset }
 }

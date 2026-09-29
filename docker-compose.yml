@@ -6,7 +6,10 @@
 # here "demo", which Kotatsu reads via KOTATSU_CLUSTER.
 services:
   minio:
-    image: minio/minio:latest
+    # From quay.io, MinIO's own registry: the `minio/*` repositories on Docker
+    # Hub are gone ("pull access denied"), which broke every CI job that starts
+    # this stack. Same images, same entrypoints.
+    image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -19,7 +22,7 @@ services:
 
   # One-shot: create the bucket Kotatsu reads from.
   createbucket:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     depends_on:
       - minio
     entrypoint: >

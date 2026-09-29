@@ -62,7 +62,10 @@ export function useQuickJump() {
     const search = `search=${encodeURIComponent(term)}&limit=${PER_KIND}`
     const c = cluster.value
     if (kind === 'subject') return `/api/schemas?${search}`
-    return c ? `/api/clusters/${c}/${kind === 'topic' ? 'topics' : 'groups'}?${search}` : null
+    if (!c) return null
+    // The palette shows names only, so the topic listing is spared its stats —
+    // five rows can sit under five different prefixes, each a cold read.
+    return kind === 'topic' ? `/api/clusters/${c}/topics?${search}&stats=false` : `/api/clusters/${c}/groups?${search}`
   }
 
   async function run(term: string) {

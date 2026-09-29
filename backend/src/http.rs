@@ -1,14 +1,25 @@
 //! HTTP router construction.
 
-use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
+use std::time::Duration;
+
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use serde_json::{json, Value};
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
+    timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 
 use crate::{api, config::Config, state::AppState};
+
+/// How long an API request may take before it is answered `504 Gateway
+/// Timeout` (#130). Every endpoint reads the object store on demand, and nothing
+/// else bounds that: a pathological cluster must degrade into an error the UI can
+/// render, not a request that never returns. A chosen bound, not a measured one.
+/// It covers the event browser too, whose filtered scan is bounded in records,
+/// not in time: a scan that runs past it is cut.
+const API_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Build the application router.
 ///
@@ -46,7 +57,11 @@ pub fn router(config: &Config, state: AppState) -> Router {
             "/schemas/{subject}/versions/{version}",
             get(api::schema_version),
         )
-        .with_state(state);
+        .with_state(state)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::GATEWAY_TIMEOUT,
+            API_TIMEOUT,
+        ));
 
     let mut app = Router::new()
         .route("/health", get(health))

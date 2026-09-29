@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::{
     schema::{decode_field, raw_field, FieldFormat, SchemaRegistry},
-    storage::{DecodedRecord, OffsetSpec, StorageError, StorageSource, Watermark},
+    storage::{DecodedRecord, OffsetSpec, StorageError, StorageSource, Watermark, FANOUT},
 };
 
 /// Maximum records returned in one `messages` call.
@@ -17,9 +17,6 @@ pub const MAX_LIMIT: usize = 500;
 pub const MAX_SCAN_CAP: usize = 50_000;
 /// Default scan budget when filtering.
 pub const DEFAULT_MAX_SCAN: usize = 5000;
-/// How many partitions a `partition=all` read may hold ranged GETs open for at
-/// once. A 200-partition topic must not open 200 simultaneous reads.
-const FANOUT: usize = 8;
 
 /// A read-query error: either a caller mistake (`BadRequest`) or a storage error.
 #[derive(Debug, thiserror::Error)]

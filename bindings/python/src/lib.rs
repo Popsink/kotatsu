@@ -153,7 +153,7 @@ impl Source {
         let source = self.source.clone();
         let page = Page::new(search, limit, offset);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let v = source.list_topics(&page).await.map_err(storage_err)?;
+            let v = source.list_topics(&page, true).await.map_err(storage_err)?;
             to_py(&v)
         })
     }
