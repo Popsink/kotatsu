@@ -4,6 +4,71 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-10-13
+
+Consumer groups on a current broker (#133) and a Topics page that paints on a
+large cluster (#130). Kodansu moved group membership out of `{group}.json` into
+per-group `generation.json` + `assignment/` objects, and committed offsets into
+one `offsets.json` per group; 0.11.0 read neither, so on any install pinned to
+kodansu `1.0.0-alpha.20` the groups page was empty or frozen at the upgrade, and
+the data-plane's per-subscription lag disappeared the moment Kotatsu was turned
+on. This release reads whichever layout the cluster declares. Separately, a
+topic listing past ~50 topics no longer hangs: it costs one object-store listing
+per page instead of about two hundred, and no `/api` request outlives 30 s.
+
+### Added
+- **Consumer groups in the decomposed layout** (#133) — the layout is picked
+  from `clusters/{c}/schema/groups.json`: `version: 2` reads
+  `{group}/generation.json` (members, leader, protocol, generation) and
+  `{group}/assignment/{generation_id:010}.json` (the leader's assignment, decoded
+  as before), and derives the state exactly as the broker's
+  `GenerationDoc::state` does — `Empty`, `Assigning`, `CompletingRebalance`,
+  `Stable`. A cluster without the object keeps the legacy `{group}.json`
+  layout, unchanged. A group formed since the upgrade, or one that only ever
+  committed offsets (manual `assign()`), is listed, described and found among a
+  topic's consuming groups; a group with no `generation.json` but something left
+  under its name is `Empty`, not 404. A `{group}.json` left from before the
+  upgrade counts for the group's existence only — the members it names were
+  gone at the cut-over. The decomposed answer is cached for the process (the
+  broker never goes back); the legacy one is re-probed after 60 s, so a broker
+  upgraded under a running Kotatsu is picked up without a restart. An assignment
+  object is immutable and is read once per generation. API responses keep their
+  shape, so the data-plane's `KotatsuServiceClient.group` reads lag again.
+- **`stats=false` on `/topics` and `/topic-tree`** (#130) — leaves
+  `messages` / `storage_bytes` out, so a row costs one metadata GET. The default
+  is still `true`; the Topics page and the `⌘K` palette now ask for names first
+  and the figures second. A row cached with stats answers both kinds of request,
+  one cached without them never passes for one with them.
+
+### Changed
+- **Committed offsets come from `offsets.json` first** (#133) — then, per
+  partition, from the per-partition object only when `offsets.json` lacks it;
+  the partitions a group committed are the union of both, as in the broker's
+  `offset_fetch`. Kodansu neither migrated nor deleted the per-partition
+  objects, so reading them alone reported a pre-upgrade group's last
+  pre-upgrade commit, with a lag that grew without bound. Applies to the group
+  detail, the lag listing and a topic's consuming groups, which now reads its
+  groups 8 at a time.
+- **A topic listing lists each segment prefix once per page** (#130) — rows
+  shared a prefix and each listed it `P + 1` times, sequentially: 200 LISTs for
+  a 50-row, 3-partition page, now 1, with rows computed 8 at a time. Measured
+  locally behind 40 ms of store latency: rows on screen in 0.56 s instead of
+  18.9 s, figures in 2.2 s. Topic detail uses the same fold.
+- **Every `/api` request answers `504` after 30 s** (#130) — there was no
+  timeout anywhere on the router, so a slow cluster showed up as a request that
+  never returned. This includes the event browser: a filtered message scan is
+  bounded in records, not in time, and one that runs past 30 s is now cut.
+
+### Fixed
+- **The Topics page paints before its figures arrive** (#130) — it blocked on
+  the slowest row's stats, blank until then; a new page or search term now
+  aborts the previous request instead of letting it run unseen, on the Groups
+  and Schemas pages too.
+- **CI pulls MinIO from `cgr.dev/chainguard/minio`** — `quay.io/minio/*` began
+  answering `unauthorized`, failing every job that starts the stack since
+  2026-09-29, a week after #130 had moved off `minio/*` on Docker Hub for the
+  same reason.
+
 ## [0.11.0] - 2026-09-07
 
 The frontend UX epic (#101 — PRs #114–#128) and segment footer v4 (#118). 0.10.0
