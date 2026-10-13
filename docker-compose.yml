@@ -6,10 +6,11 @@
 # here "demo", which Kotatsu reads via KOTATSU_CLUSTER.
 services:
   minio:
-    # From quay.io, MinIO's own registry: the `minio/*` repositories on Docker
-    # Hub are gone ("pull access denied"), which broke every CI job that starts
-    # this stack. Same images, same entrypoints.
-    image: quay.io/minio/minio:latest
+    # Chainguard's build: MinIO stopped publishing images, first on Docker Hub
+    # (`minio/*`, "pull access denied") and then on quay.io (`unauthorized`),
+    # and each time every CI job that starts this stack broke. Its entrypoint is
+    # `minio`, like upstream's.
+    image: cgr.dev/chainguard/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -20,9 +21,11 @@ services:
     volumes:
       - minio-data:/data
 
-  # One-shot: create the bucket Kotatsu reads from.
+  # One-shot: create the bucket Kotatsu reads from. The server image, not
+  # `chainguard/minio-client`: that one has no shell, and this ships `mc`
+  # beside `sh`.
   createbucket:
-    image: quay.io/minio/mc:latest
+    image: cgr.dev/chainguard/minio:latest
     depends_on:
       - minio
     entrypoint: >

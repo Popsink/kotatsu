@@ -66,6 +66,16 @@ pub struct StorageSource {
     /// like a segment footer — a resolved value never goes stale and needs no
     /// TTL. Shared across clones via the `Arc`.
     topic_routes: Arc<Mutex<HashMap<String, routing::TopicRoute>>>,
+    /// The consumer-group layout the cluster declares (`schema/groups.json`),
+    /// with when it was read. The decomposed layout is permanent once claimed,
+    /// so it never expires; the legacy answer is re-probed, because the broker
+    /// can be upgraded under a running Kotatsu.
+    group_layout: Arc<Mutex<Option<(groups::GroupLayout, std::time::Instant)>>>,
+    /// The latest assignment read per group, keyed by group name and stamped
+    /// with its generation. An assignment object is create-only and immutable,
+    /// so a hit for the current generation never goes stale; a new generation
+    /// replaces the entry, which keeps this to one entry per group.
+    group_assignments: Arc<Mutex<HashMap<String, groups::CachedAssignment>>>,
 }
 
 impl StorageSource {
@@ -125,6 +135,8 @@ impl StorageSource {
             topic_catalog: Arc::new(Mutex::new(None)),
             group_catalog: Arc::new(Mutex::new(None)),
             topic_routes: Arc::new(Mutex::new(HashMap::new())),
+            group_layout: Arc::new(Mutex::new(None)),
+            group_assignments: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -143,6 +155,8 @@ impl StorageSource {
             topic_catalog: Arc::new(Mutex::new(None)),
             group_catalog: Arc::new(Mutex::new(None)),
             topic_routes: Arc::new(Mutex::new(HashMap::new())),
+            group_layout: Arc::new(Mutex::new(None)),
+            group_assignments: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
