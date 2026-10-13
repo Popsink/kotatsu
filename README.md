@@ -51,9 +51,19 @@ clusters/{cluster}/topic-metadata/{topic}.json                      per-topic sp
 clusters/{cluster}/topic-routing/{topic}.json                       the prefix a topic is routed under + its sub-stream id
 clusters/{cluster}/topics/{topic}/partitions/{p:010}/watermark.json high, truncation floor, served end
 clusters/{cluster}/prefixes/{prefix}/segments/{seq:020}.seg         the records themselves
-clusters/{cluster}/groups/consumers/{group}.json                    consumer group detail
-clusters/{cluster}/groups/consumers/{group}/offsets/{topic}/partitions/{p:010}.json
+clusters/{cluster}/schema/groups.json                               consumer-group layout ({"version": 2})
+clusters/{cluster}/groups/consumers/{group}.json                    consumer group detail (legacy layout)
+clusters/{cluster}/groups/consumers/{group}/generation.json         members, leader, generation (layout 2)
+clusters/{cluster}/groups/consumers/{group}/assignment/{gen:010}.json  that generation's assignment (layout 2)
+clusters/{cluster}/groups/consumers/{group}/offsets.json            committed offsets, one object per group
+clusters/{cluster}/groups/consumers/{group}/offsets/{topic}/partitions/{p:010}.json  pre-offsets.json commits
 ```
+
+Consumer groups are read in whichever layout `schema/groups.json` declares:
+`version: 2` (what current kodansu writes) is the decomposed `generation.json` +
+`assignment/` objects, an absent object is the legacy `{group}.json`. Committed
+offsets come from `offsets.json` first, falling back per partition to the older
+per-partition objects the broker left in place — the broker's own read order.
 
 Records live in **shared per-prefix segment objects**, each multiplexing many
 sub-streams: a footer at the tail of the segment says where each sub-stream's bytes

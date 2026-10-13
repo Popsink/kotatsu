@@ -8,7 +8,11 @@
 //! clusters/{cluster}/topic-routing/{topic}.json
 //! clusters/{cluster}/topics/{topic}/partitions/{partition:010}/watermark.json
 //! clusters/{cluster}/prefixes/{prefix}/segments/{seq:020}.seg
+//! clusters/{cluster}/schema/groups.json
 //! clusters/{cluster}/groups/consumers/{group}.json
+//! clusters/{cluster}/groups/consumers/{group}/generation.json
+//! clusters/{cluster}/groups/consumers/{group}/assignment/{generation_id:010}.json
+//! clusters/{cluster}/groups/consumers/{group}/offsets.json
 //! clusters/{cluster}/groups/consumers/{group}/offsets/{topic}/partitions/{partition:010}.json
 //! ```
 //!
@@ -142,6 +146,13 @@ impl Keys {
         name.parse().ok()
     }
 
+    /// `clusters/{cluster}/schema/groups.json` — the consumer-group layout the
+    /// cluster's broker writes, `{"version": 2}` since Popsink/kodansu#359.
+    /// Absent on a cluster still in the legacy `{group}.json` layout.
+    pub fn group_schema(&self) -> Path {
+        Path::from(format!("clusters/{}/schema/groups.json", self.cluster))
+    }
+
     /// `clusters/{cluster}/groups/consumers/` — prefix for listing groups.
     pub fn groups_prefix(&self) -> Path {
         Path::from(format!("clusters/{}/groups/consumers/", self.cluster))
@@ -155,11 +166,56 @@ impl Keys {
         ))
     }
 
+    /// `clusters/{cluster}/groups/consumers/{group}/` — everything a group has
+    /// under the decomposed layout.
+    pub fn group_prefix(&self, group: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/groups/consumers/{}/",
+            self.cluster, group
+        ))
+    }
+
+    /// `.../groups/consumers/{group}/generation.json` — the group's composition
+    /// (Popsink/kodansu#359).
+    pub fn group_generation(&self, group: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/groups/consumers/{}/generation.json",
+            self.cluster, group
+        ))
+    }
+
+    /// `.../groups/consumers/{group}/assignment/{generation_id:010}.json` — one
+    /// generation's assignment, create-only and immutable.
+    pub fn group_assignment(&self, group: &str, generation_id: i32) -> Path {
+        Path::from(format!(
+            "clusters/{}/groups/consumers/{}/assignment/{:0>10}.json",
+            self.cluster, group, generation_id
+        ))
+    }
+
+    /// `.../groups/consumers/{group}/offsets.json` — every offset the group
+    /// committed since Popsink/kodansu#415, in one object.
+    pub fn group_offsets_doc(&self, group: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/groups/consumers/{}/offsets.json",
+            self.cluster, group
+        ))
+    }
+
     /// `clusters/{cluster}/groups/consumers/{group}/offsets/` — prefix for listing committed offsets.
     pub fn group_offsets_prefix(&self, group: &str) -> Path {
         Path::from(format!(
             "clusters/{}/groups/consumers/{}/offsets/",
             self.cluster, group
+        ))
+    }
+
+    /// `.../groups/consumers/{group}/offsets/{topic}/partitions/` — the group's
+    /// per-partition committed offsets on one topic.
+    pub fn group_topic_offsets_prefix(&self, group: &str, topic: &str) -> Path {
+        Path::from(format!(
+            "clusters/{}/groups/consumers/{}/offsets/{}/partitions/",
+            self.cluster, group, topic
         ))
     }
 
@@ -204,6 +260,19 @@ mod tests {
             "clusters/c1/groups/consumers/g1/offsets/orders/partitions/0000000000.json"
         );
         assert_eq!(k.groups_prefix().as_ref(), "clusters/c1/groups/consumers");
+        assert_eq!(k.group_schema().as_ref(), "clusters/c1/schema/groups.json");
+        assert_eq!(
+            k.group_generation("g1").as_ref(),
+            "clusters/c1/groups/consumers/g1/generation.json"
+        );
+        assert_eq!(
+            k.group_assignment("g1", 7).as_ref(),
+            "clusters/c1/groups/consumers/g1/assignment/0000000007.json"
+        );
+        assert_eq!(
+            k.group_offsets_doc("g1").as_ref(),
+            "clusters/c1/groups/consumers/g1/offsets.json"
+        );
     }
 
     #[test]

@@ -1,16 +1,38 @@
 //! Consumer groups, read from S3. Groups exist in Tansu's storage even though
 //! Kotatsu never connects to a broker.
 //!
+//! A group's membership is in one of two layouts, picked by what the cluster
+//! declares in `schema/groups.json`:
+//!
 //! ```text
+//! legacy (no schema object):
 //! groups/consumers/{group}.json                                    → GroupDetail
+//!
+//! decomposed ({"version": 2}, Popsink/kodansu#359):
+//! groups/consumers/{group}/generation.json                         → GenerationDoc
+//! groups/consumers/{group}/assignment/{generation_id:010}.json     → AssignmentDoc
+//! ```
+//!
+//! Committed offsets are read the same way under either:
+//!
+//! ```text
+//! groups/consumers/{group}/offsets.json                            → GroupOffsets
 //! groups/consumers/{group}/offsets/{topic}/partitions/{p:010}.json → OffsetCommitRequest
 //! ```
 //!
+//! `offsets.json` replaced the per-partition objects in Popsink/kodansu#415,
+//! which neither migrated nor deleted them. So a partition is read from
+//! `offsets.json` first and from its own object only when `offsets.json` lacks
+//! it, and the partitions a group committed are the union of both — the
+//! broker's own `offset_fetch` order.
+//!
 //! The JSON shapes mirror `tansu-storage`'s types (we don't depend on that
-//! crate). Lag is `high_watermark − committed_offset`.
+//! crate), keep only the fields we use and ignore the rest. Lag is
+//! `high_watermark − committed_offset`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -20,6 +42,7 @@ use crate::pagination::{Page, Paged};
 
 // --- Mirrored `tansu-storage` JSON shapes (only the fields we use) ---
 
+/// The legacy `{group}.json`.
 #[derive(Deserialize)]
 struct GroupDetailRaw {
     #[serde(default)]
@@ -49,9 +72,115 @@ enum GroupStateRaw {
     },
 }
 
+/// `schema/groups.json`.
+#[derive(Deserialize)]
+struct GroupSchemaRaw {
+    version: u32,
+}
+
+/// `generation.json`. It stores no state: the broker derives it, and so do we
+/// ([`derive_decomposed_state`]).
+#[derive(Deserialize)]
+struct GenerationRaw {
+    #[serde(default)]
+    generation_id: i32,
+    #[serde(default)]
+    protocol_type: Option<String>,
+    #[serde(default)]
+    protocol_name: Option<String>,
+    #[serde(default)]
+    leader: Option<String>,
+    /// `member_id → {group_instance_id?}`.
+    #[serde(default)]
+    members: BTreeMap<String, serde_json::Value>,
+}
+
+/// `assignment/{generation_id:010}.json`: the leader's assignment blobs, in the
+/// same `[u8]`-array encoding `Formed` gives them.
+#[derive(Deserialize)]
+struct AssignmentRaw {
+    #[serde(default)]
+    assignments: BTreeMap<String, serde_json::Value>,
+}
+
+/// `offsets.json`: `topic → partition → commit`. The partition is a JSON object
+/// key, so a string on the wire; serde parses it back to the number.
+#[derive(Deserialize)]
+struct GroupOffsetsRaw {
+    #[serde(default)]
+    committed: BTreeMap<String, BTreeMap<i32, OffsetCommitRaw>>,
+}
+
 #[derive(Deserialize)]
 struct OffsetCommitRaw {
     offset: i64,
+}
+
+/// The consumer-group layout a cluster is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GroupLayout {
+    /// One `{group}.json` per group: every broker before Popsink/kodansu#359.
+    Legacy,
+    /// `generation.json` and `assignment/` under `{group}/`.
+    Decomposed,
+}
+
+/// How long "this cluster has no `schema/groups.json`" is trusted before it is
+/// asked again. The broker writes the object when it starts on the new layout,
+/// so a cached legacy answer has to give way soon after an upgrade.
+const LEGACY_LAYOUT_TTL: Duration = Duration::from_secs(60);
+
+/// A group's assignment blobs, stamped with the generation they belong to.
+pub(super) type CachedAssignment = (i32, Arc<BTreeMap<String, serde_json::Value>>);
+
+/// A group's membership, whichever layout it was read from.
+struct Membership {
+    state: &'static str,
+    generation_id: i32,
+    protocol_type: Option<String>,
+    protocol_name: Option<String>,
+    members: Vec<MemberView>,
+}
+
+impl Membership {
+    /// A group that exists only through what it left behind — committed
+    /// offsets, a `{group}.json` from before the upgrade — and so has no
+    /// members.
+    fn empty() -> Self {
+        Self {
+            state: "Empty",
+            generation_id: 0,
+            protocol_type: None,
+            protocol_name: None,
+            members: Vec::new(),
+        }
+    }
+}
+
+impl From<GroupDetailRaw> for Membership {
+    fn from(detail: GroupDetailRaw) -> Self {
+        let state = derive_state(&detail);
+        let (protocol_type, protocol_name, assignments) = match detail.state {
+            GroupStateRaw::Forming {
+                protocol_type,
+                protocol_name,
+                ..
+            } => (protocol_type, protocol_name, BTreeMap::new()),
+            GroupStateRaw::Formed {
+                protocol_type,
+                protocol_name,
+                assignments,
+                ..
+            } => (Some(protocol_type), Some(protocol_name), assignments),
+        };
+        Self {
+            state,
+            generation_id: detail.generation_id,
+            protocol_type,
+            protocol_name,
+            members: member_views(detail.members.keys(), &assignments),
+        }
+    }
 }
 
 // --- API view types ---
@@ -245,7 +374,23 @@ fn decode_assignment(bytes: &[u8]) -> Vec<AssignedTopic> {
     topics
 }
 
-/// Derives the consumer group state, mirroring Tansu's mapping.
+/// Pairs each member with its (best-effort decoded) assignment blob, if any.
+fn member_views<'a>(
+    ids: impl Iterator<Item = &'a String>,
+    assignments: &BTreeMap<String, serde_json::Value>,
+) -> Vec<MemberView> {
+    ids.map(|id| MemberView {
+        id: id.clone(),
+        assignments: assignments
+            .get(id)
+            .and_then(value_to_bytes)
+            .map(|b| decode_assignment(&b))
+            .unwrap_or_default(),
+    })
+    .collect()
+}
+
+/// Derives a legacy group's state, mirroring Tansu's mapping.
 fn derive_state(detail: &GroupDetailRaw) -> &'static str {
     if detail.members.is_empty() {
         "Empty"
@@ -258,9 +403,24 @@ fn derive_state(detail: &GroupDetailRaw) -> &'static str {
     }
 }
 
+/// Derives a decomposed group's state exactly as the broker's
+/// `GenerationDoc::state` does. `assignment_present` is whether
+/// `assignment/{generation_id}` exists.
+fn derive_decomposed_state(generation: &GenerationRaw, assignment_present: bool) -> &'static str {
+    if generation.members.is_empty() {
+        "Empty"
+    } else if generation.leader.is_none() {
+        "Assigning"
+    } else if assignment_present {
+        "Stable"
+    } else {
+        "CompletingRebalance"
+    }
+}
+
 impl StorageSource {
-    /// Lists consumer groups (one `{group}.json` per group), filtered and
-    /// paginated. `GroupDetail` is read only for the rows that are returned.
+    /// Lists consumer groups, filtered and paginated. Membership is read only
+    /// for the rows that are returned.
     ///
     /// `mode` decides what a row costs and how the list is ordered — see
     /// [`LagMode`]. Under [`LagMode::RankAll`] the page cannot be sliced before
@@ -339,12 +499,12 @@ impl StorageSource {
                         }
                     }
                     match self.compute_group_summary(&name, lag, highs).await {
-                        Ok(summary) => {
+                        Ok(Some(summary)) => {
                             catalog::store_summary(&self.group_catalog, name, summary.clone());
                             Ok(Some(summary))
                         }
                         // Gone since the index was listed.
-                        Err(StorageError::NotFound(_)) => Ok(None),
+                        Ok(None) | Err(StorageError::NotFound(_)) => Ok(None),
                         Err(err) => Err(err),
                     }
                 }
@@ -366,11 +526,43 @@ impl StorageSource {
         Ok(names)
     }
 
-    /// Lists consumer-group names (one `{group}.json` per group).
+    /// The consumer-group layout the cluster declares in `schema/groups.json`:
+    /// decomposed from `version` 2 on, legacy when the object is absent (an
+    /// older or self-hosted broker).
+    async fn group_layout(&self) -> Result<GroupLayout, StorageError> {
+        let cached = self.group_layout.lock().ok().and_then(|c| *c);
+        if let Some((layout, read_at)) = cached {
+            if layout == GroupLayout::Decomposed || read_at.elapsed() < LEGACY_LAYOUT_TTL {
+                return Ok(layout);
+            }
+        }
+        let layout = match self
+            .get_json::<GroupSchemaRaw>(&self.keys().group_schema())
+            .await
+        {
+            Ok(schema) if schema.version >= 2 => GroupLayout::Decomposed,
+            Ok(_) | Err(StorageError::NotFound(_)) => GroupLayout::Legacy,
+            Err(err) => return Err(err),
+        };
+        if let Ok(mut c) = self.group_layout.lock() {
+            *c = Some((layout, Instant::now()));
+        }
+        Ok(layout)
+    }
+
+    /// Lists consumer-group names.
+    ///
+    /// The legacy layout is listed by its `{group}.json` objects, as it always
+    /// was. The decomposed one also takes every `{group}/` prefix: a group
+    /// formed since the upgrade has no `{group}.json`, and a group that only
+    /// ever committed offsets (manual `assign()`, no membership) has no
+    /// `generation.json` either. The union is what the broker's own
+    /// `ListGroups` answers.
     async fn group_names(&self) -> Result<Vec<String>, StorageError> {
+        let layout = self.group_layout().await?;
         let prefix = self.keys().groups_prefix();
         let listed = self.store().list_with_delimiter(Some(&prefix)).await?;
-        let mut names: Vec<String> = listed
+        let mut names: BTreeSet<String> = listed
             .objects
             .iter()
             .filter_map(|meta| {
@@ -380,29 +572,139 @@ impl StorageSource {
                     .map(str::to_string)
             })
             .collect();
-        names.sort();
-        Ok(names)
+        if layout == GroupLayout::Decomposed {
+            names.extend(
+                listed
+                    .common_prefixes
+                    .iter()
+                    .filter_map(|p| p.filename().map(str::to_string)),
+            );
+        }
+        Ok(names.into_iter().collect())
     }
 
-    /// Computes one group's list row from its `{group}.json`, plus its lag when
-    /// the listing asked for it. Cached per row by [`list_groups`].
+    /// Reads a group's membership from the layout the cluster is in, or `None`
+    /// when nothing of the group exists.
+    async fn membership(&self, group: &str) -> Result<Option<Membership>, StorageError> {
+        match self.group_layout().await? {
+            GroupLayout::Legacy => match self
+                .get_json::<GroupDetailRaw>(&self.keys().group(group))
+                .await
+            {
+                Ok(detail) => Ok(Some(Membership::from(detail))),
+                Err(StorageError::NotFound(_)) => Ok(None),
+                Err(err) => Err(err),
+            },
+            GroupLayout::Decomposed => self.decomposed_membership(group).await,
+        }
+    }
+
+    /// Membership from `generation.json` and the current generation's
+    /// assignment. A group without a `generation.json` that still has
+    /// something under its name is `Empty`, not missing.
+    async fn decomposed_membership(&self, group: &str) -> Result<Option<Membership>, StorageError> {
+        let generation: GenerationRaw =
+            match self.get_json(&self.keys().group_generation(group)).await {
+                Ok(generation) => generation,
+                Err(StorageError::NotFound(_)) => {
+                    return Ok(self
+                        .group_remnants_exist(group)
+                        .await?
+                        .then(Membership::empty));
+                }
+                Err(err) => return Err(err),
+            };
+
+        // The assignment only decides the state of a group that has members and
+        // a leader; the state is already known for any other.
+        let assignment = match !generation.members.is_empty() && generation.leader.is_some() {
+            true => self.assignment(group, generation.generation_id).await?,
+            false => None,
+        };
+        let state = derive_decomposed_state(&generation, assignment.is_some());
+        let members = member_views(
+            generation.members.keys(),
+            assignment.as_deref().unwrap_or(&BTreeMap::new()),
+        );
+        Ok(Some(Membership {
+            state,
+            generation_id: generation.generation_id,
+            protocol_type: generation.protocol_type,
+            protocol_name: generation.protocol_name,
+            members,
+        }))
+    }
+
+    /// Whether a group with no `generation.json` exists anyway: something under
+    /// its prefix (committed offsets, typically), or a `{group}.json` left from
+    /// before the upgrade. That object is read for its existence only — the
+    /// members it names were gone when the broker was cut over.
+    async fn group_remnants_exist(&self, group: &str) -> Result<bool, StorageError> {
+        let prefix = self.keys().group_prefix(group);
+        if let Some(first) = self.store().list(Some(&prefix)).next().await {
+            first?;
+            return Ok(true);
+        }
+        match self.store().head(&self.keys().group(group)).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// A generation's assignment blobs, or `None` while the leader has not
+    /// written them yet. The object is create-only and immutable, so a read is
+    /// cached for as long as the group stays on that generation; an absence is
+    /// not, because it is about to change.
+    async fn assignment(
+        &self,
+        group: &str,
+        generation_id: i32,
+    ) -> Result<Option<Arc<BTreeMap<String, serde_json::Value>>>, StorageError> {
+        let hit = self.group_assignments.lock().ok().and_then(|c| {
+            c.get(group)
+                .filter(|(generation, _)| *generation == generation_id)
+                .map(|(_, assignments)| assignments.clone())
+        });
+        if hit.is_some() {
+            return Ok(hit);
+        }
+        let path = self.keys().group_assignment(group, generation_id);
+        match self.get_json::<AssignmentRaw>(&path).await {
+            Ok(doc) => {
+                let assignments = Arc::new(doc.assignments);
+                if let Ok(mut c) = self.group_assignments.lock() {
+                    c.insert(group.to_string(), (generation_id, assignments.clone()));
+                }
+                Ok(Some(assignments))
+            }
+            Err(StorageError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Computes one group's list row from its membership, plus its lag when
+    /// the listing asked for it. `None` when the group is gone. Cached per row
+    /// by [`list_groups`].
     async fn compute_group_summary(
         &self,
         name: &str,
         lag: bool,
         highs: &Mutex<HashMap<(String, i32), i64>>,
-    ) -> Result<GroupSummary, StorageError> {
-        let detail: GroupDetailRaw = self.get_json(&self.keys().group(name)).await?;
+    ) -> Result<Option<GroupSummary>, StorageError> {
+        let Some(membership) = self.membership(name).await? else {
+            return Ok(None);
+        };
         let lag = match lag {
             true => Some(self.group_lag(name, highs).await?),
             false => None,
         };
-        Ok(GroupSummary {
-            state: derive_state(&detail),
-            members: detail.members.len(),
+        Ok(Some(GroupSummary {
+            state: membership.state,
+            members: membership.members.len(),
             name: name.to_string(),
             lag,
-        })
+        }))
     }
 
     /// The three list figures for one group: Σ lag, distinct topics, and the
@@ -412,7 +714,7 @@ impl StorageSource {
         group: &str,
         highs: &Mutex<HashMap<(String, i32), i64>>,
     ) -> Result<GroupLag, StorageError> {
-        let committed = self.group_committed(group).await?;
+        let committed = self.committed_offsets(group, None).await?;
         if committed.is_empty() {
             // Committed nothing anywhere. Not the same as being caught up, and
             // reported as its own answer rather than as a zero.
@@ -426,12 +728,9 @@ impl StorageSource {
         let mut total = 0i64;
         let mut worst = 0i64;
         let mut topics = BTreeSet::new();
-        for (topic, partition) in committed {
-            let commit: OffsetCommitRaw = self
-                .get_json(&self.keys().group_offset(group, &topic, partition))
-                .await?;
+        for ((topic, partition), offset) in committed {
             let high = self.memoised_high(&topic, partition, highs).await?;
-            let lag = (high - commit.offset).max(0);
+            let lag = (high - offset).max(0);
             total += lag;
             worst = worst.max(lag);
             topics.insert(topic);
@@ -444,18 +743,66 @@ impl StorageSource {
         })
     }
 
-    /// The `(topic, partition)` pairs a group has committed an offset for.
-    async fn group_committed(&self, group: &str) -> Result<Vec<(String, i32)>, StorageError> {
-        let prefix = self.keys().group_offsets_prefix(group);
-        let mut pairs = Vec::new();
+    /// Every offset a group has committed, on `topic` only when given, keyed by
+    /// `(topic, partition)`.
+    ///
+    /// `offsets.json` first; a partition's own object only for the partitions
+    /// `offsets.json` lacks, so a stale pre-upgrade commit never shadows a newer
+    /// one, and a group that has not committed since the upgrade still reports
+    /// what it had. The set is the union of both, as the broker's.
+    async fn committed_offsets(
+        &self,
+        group: &str,
+        topic: Option<&str>,
+    ) -> Result<BTreeMap<(String, i32), i64>, StorageError> {
+        let mut committed = BTreeMap::new();
+        match self
+            .get_json::<GroupOffsetsRaw>(&self.keys().group_offsets_doc(group))
+            .await
+        {
+            Ok(doc) => {
+                for (t, partitions) in doc.committed {
+                    if topic.is_some_and(|wanted| wanted != t) {
+                        continue;
+                    }
+                    for (partition, commit) in partitions {
+                        committed.insert((t.clone(), partition), commit.offset);
+                    }
+                }
+            }
+            Err(StorageError::NotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+
+        let prefix = match topic {
+            Some(topic) => self.keys().group_topic_offsets_prefix(group, topic),
+            None => self.keys().group_offsets_prefix(group),
+        };
+        let mut missing = Vec::new();
         let mut stream = self.store().list(Some(&prefix));
         while let Some(meta) = stream.next().await {
             if let Some(tp) = Keys::topic_partition_from_offset(&meta?.location) {
-                pairs.push(tp);
+                if !committed.contains_key(&tp) {
+                    missing.push(tp);
+                }
             }
         }
-        pairs.sort();
-        Ok(pairs)
+
+        let fallback: Vec<_> = futures::stream::iter(missing)
+            .map(|(topic, partition)| async move {
+                let path = self.keys().group_offset(group, &topic, partition);
+                match self.get_json::<OffsetCommitRaw>(&path).await {
+                    Ok(commit) => Ok(Some(((topic, partition), commit.offset))),
+                    // Deleted since it was listed.
+                    Err(StorageError::NotFound(_)) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            })
+            .buffer_unordered(FANOUT)
+            .try_collect()
+            .await?;
+        committed.extend(fallback.into_iter().flatten());
+        Ok(committed)
     }
 
     /// A topition's high watermark, read at most once per listing.
@@ -483,70 +830,32 @@ impl StorageSource {
 
     /// Reads a group's metadata, committed offsets and lag.
     pub async fn group_detail(&self, group: &str) -> Result<GroupDetailView, StorageError> {
-        let detail: GroupDetailRaw =
-            self.get_json(&self.keys().group(group))
-                .await
-                .map_err(|e| match e {
-                    StorageError::NotFound(_) => StorageError::GroupNotFound(group.to_string()),
-                    other => other,
-                })?;
+        let membership = self
+            .membership(group)
+            .await?
+            .ok_or_else(|| StorageError::GroupNotFound(group.to_string()))?;
 
-        let (protocol_type, protocol_name) = match &detail.state {
-            GroupStateRaw::Forming {
-                protocol_type,
-                protocol_name,
-                ..
-            } => (protocol_type.clone(), protocol_name.clone()),
-            GroupStateRaw::Formed {
-                protocol_type,
-                protocol_name,
-                ..
-            } => (Some(protocol_type.clone()), Some(protocol_name.clone())),
-        };
-
-        // member_id -> assignment blob (only in the Formed state).
-        let assignments = match &detail.state {
-            GroupStateRaw::Formed { assignments, .. } => assignments.clone(),
-            GroupStateRaw::Forming { .. } => BTreeMap::new(),
-        };
-        let members: Vec<MemberView> = detail
-            .members
-            .keys()
-            .map(|id| MemberView {
-                id: id.clone(),
-                assignments: assignments
-                    .get(id)
-                    .and_then(value_to_bytes)
-                    .map(|b| decode_assignment(&b))
-                    .unwrap_or_default(),
-            })
-            .collect();
-
-        let topic_partitions = self.group_committed(group).await?;
-
-        let mut offsets = Vec::with_capacity(topic_partitions.len());
-        for (topic, partition) in topic_partitions {
-            let commit: OffsetCommitRaw = self
-                .get_json(&self.keys().group_offset(group, &topic, partition))
-                .await?;
+        let committed = self.committed_offsets(group, None).await?;
+        let mut offsets = Vec::with_capacity(committed.len());
+        for ((topic, partition), committed_offset) in committed {
             let high = self.watermark_or_empty(&topic, partition).await?.high;
             offsets.push(GroupOffset {
                 topic,
                 partition,
-                committed_offset: commit.offset,
+                committed_offset,
                 high_watermark: high,
-                lag: (high - commit.offset).max(0),
+                lag: (high - committed_offset).max(0),
             });
         }
 
         let total_lag = offsets.iter().map(|o| o.lag).sum();
         Ok(GroupDetailView {
             name: group.to_string(),
-            state: derive_state(&detail),
-            protocol_type,
-            protocol_name,
-            generation_id: detail.generation_id,
-            members,
+            state: membership.state,
+            protocol_type: membership.protocol_type,
+            protocol_name: membership.protocol_name,
+            generation_id: membership.generation_id,
+            members: membership.members,
             offsets,
             total_lag,
         })
@@ -556,59 +865,36 @@ impl StorageSource {
     /// per-partition committed/high/lag. Scans every group's offsets — meant to
     /// be called lazily (opt-in) from the topic detail page.
     pub async fn groups_consuming(&self, topic: &str) -> Result<Vec<ConsumingGroup>, StorageError> {
-        let listed = self
-            .store()
-            .list_with_delimiter(Some(&self.keys().groups_prefix()))
-            .await?;
-        let mut group_names: Vec<String> = listed
-            .objects
-            .iter()
-            .filter_map(|m| {
-                m.location
-                    .filename()
-                    .and_then(|f| f.strip_suffix(".json"))
-                    .map(str::to_string)
-            })
-            .collect();
-        group_names.sort();
+        let group_names = self.group_names().await?;
+        // Every group here reads the same topic's watermarks.
+        let highs = Mutex::new(HashMap::new());
 
-        let mut consuming = Vec::new();
-        for group in group_names {
-            // Partitions this group committed for the target topic.
-            let mut partitions = Vec::new();
-            let mut stream = self
-                .store()
-                .list(Some(&self.keys().group_offsets_prefix(&group)));
-            while let Some(meta) = stream.next().await {
-                let meta = meta?;
-                if let Some((t, p)) = Keys::topic_partition_from_offset(&meta.location) {
-                    if t == topic {
-                        partitions.push(p);
+        futures::stream::iter(group_names)
+            .map(|group| {
+                let highs = &highs;
+                async move {
+                    let committed = self.committed_offsets(&group, Some(topic)).await?;
+                    if committed.is_empty() {
+                        return Ok(None);
                     }
+                    let mut offsets = Vec::with_capacity(committed.len());
+                    for ((_, partition), committed_offset) in committed {
+                        let high = self.memoised_high(topic, partition, highs).await?;
+                        offsets.push(GroupOffset {
+                            topic: topic.to_string(),
+                            partition,
+                            committed_offset,
+                            high_watermark: high,
+                            lag: (high - committed_offset).max(0),
+                        });
+                    }
+                    Ok(Some(ConsumingGroup { group, offsets }))
                 }
-            }
-            if partitions.is_empty() {
-                continue;
-            }
-            partitions.sort_unstable();
-
-            let mut offsets = Vec::with_capacity(partitions.len());
-            for partition in partitions {
-                let commit: OffsetCommitRaw = self
-                    .get_json(&self.keys().group_offset(&group, topic, partition))
-                    .await?;
-                let high = self.watermark_or_empty(topic, partition).await?.high;
-                offsets.push(GroupOffset {
-                    topic: topic.to_string(),
-                    partition,
-                    committed_offset: commit.offset,
-                    high_watermark: high,
-                    lag: (high - commit.offset).max(0),
-                });
-            }
-            consuming.push(ConsumingGroup { group, offsets });
-        }
-        Ok(consuming)
+            })
+            .buffered(FANOUT)
+            .try_collect::<Vec<_>>()
+            .await
+            .map(|rows| rows.into_iter().flatten().collect())
     }
 }
 
@@ -935,5 +1221,342 @@ mod tests {
             .await
             .unwrap();
         assert!(cheap.items[0].lag.is_none());
+    }
+    // --- The decomposed layout and `offsets.json` (#133) ---
+
+    const GENERATION: &[u8] = include_bytes!("../../tests/fixtures/group_generation.json");
+    const ASSIGNMENT: &[u8] = include_bytes!("../../tests/fixtures/group_assignment.json");
+    const OFFSETS: &[u8] = include_bytes!("../../tests/fixtures/group_offsets.json");
+
+    /// A source over a cluster that declares the decomposed layout.
+    async fn decomposed_source() -> (Arc<InMemory>, StorageSource) {
+        let (store, src) = source();
+        put(
+            &store,
+            &src.keys().group_schema(),
+            br#"{"version":2}"#.to_vec(),
+        )
+        .await;
+        (store, src)
+    }
+
+    async fn watermark(
+        store: &Arc<InMemory>,
+        src: &StorageSource,
+        topic: &str,
+        partition: i32,
+        high: i64,
+    ) {
+        put(
+            store,
+            &src.keys().watermark(topic, partition),
+            format!(r#"{{"high":{high}}}"#).into_bytes(),
+        )
+        .await;
+    }
+
+    #[test]
+    fn parses_the_decomposed_documents_and_ignores_fields_it_does_not_model() {
+        // The fixtures carry fields Kotatsu does not read (`seq`, `swept_at_ms`,
+        // an `assignor` no version models yet); none of them may fail the parse.
+        let generation: GenerationRaw = serde_json::from_slice(GENERATION).unwrap();
+        assert_eq!(generation.generation_id, 7);
+        assert_eq!(generation.leader.as_deref(), Some("m-1"));
+        assert_eq!(generation.members.len(), 2);
+
+        let assignment: AssignmentRaw = serde_json::from_slice(ASSIGNMENT).unwrap();
+        let blob = value_to_bytes(&assignment.assignments["m-2"]).unwrap();
+        let topics = decode_assignment(&blob);
+        assert_eq!(topics[0].topic, "orders");
+        assert_eq!(topics[0].partitions, vec![2]);
+
+        let offsets: GroupOffsetsRaw = serde_json::from_slice(OFFSETS).unwrap();
+        assert_eq!(offsets.committed["orders"][&0].offset, 40);
+        assert_eq!(offsets.committed["orders"][&1].offset, 95);
+    }
+
+    #[test]
+    fn the_decomposed_state_is_derived_as_the_broker_derives_it() {
+        let mut generation: GenerationRaw = serde_json::from_slice(GENERATION).unwrap();
+        assert_eq!(derive_decomposed_state(&generation, true), "Stable");
+        assert_eq!(
+            derive_decomposed_state(&generation, false),
+            "CompletingRebalance"
+        );
+
+        generation.leader = None;
+        assert_eq!(derive_decomposed_state(&generation, false), "Assigning");
+
+        // An assignment left by a generation the group has since emptied does
+        // not make an empty group stable.
+        generation.members.clear();
+        assert_eq!(derive_decomposed_state(&generation, true), "Empty");
+    }
+
+    /// The acceptance criterion: a group that formed on a current broker has
+    /// no `{group}.json` and must still be listed, described, and found among
+    /// a topic's consumers.
+    #[tokio::test]
+    async fn a_group_formed_on_the_decomposed_layout_lists_describes_and_consumes() {
+        let (store, src) = decomposed_source().await;
+        put(
+            &store,
+            &src.keys().group_generation("g1"),
+            GENERATION.to_vec(),
+        )
+        .await;
+        put(
+            &store,
+            &src.keys().group_assignment("g1", 7),
+            ASSIGNMENT.to_vec(),
+        )
+        .await;
+        put(
+            &store,
+            &src.keys().group_offsets_doc("g1"),
+            OFFSETS.to_vec(),
+        )
+        .await;
+        watermark(&store, &src, "orders", 0, 100).await;
+        watermark(&store, &src, "orders", 1, 100).await;
+
+        let page = src
+            .list_groups(&Page::new(None, 50, 0), LagMode::RankAll)
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        let row = &page.items[0];
+        assert_eq!(row.name, "g1");
+        assert_eq!(row.state, "Stable");
+        assert_eq!(row.members, 2);
+        assert_eq!(row.lag.as_ref().unwrap().total, Some(65));
+
+        let detail = src.group_detail("g1").await.unwrap();
+        assert_eq!(detail.state, "Stable");
+        assert_eq!(detail.generation_id, 7);
+        assert_eq!(detail.protocol_type.as_deref(), Some("consumer"));
+        assert_eq!(detail.protocol_name.as_deref(), Some("range"));
+        let members: Vec<(&str, Vec<i32>)> = detail
+            .members
+            .iter()
+            .map(|m| (m.id.as_str(), m.assignments[0].partitions.clone()))
+            .collect();
+        assert_eq!(members, [("m-1", vec![0, 1]), ("m-2", vec![2])]);
+        let offsets: Vec<(i32, i64, i64)> = detail
+            .offsets
+            .iter()
+            .map(|o| (o.partition, o.committed_offset, o.lag))
+            .collect();
+        assert_eq!(offsets, [(0, 40, 60), (1, 95, 5)]);
+        assert_eq!(detail.total_lag, 65);
+
+        let consuming = src.groups_consuming("orders").await.unwrap();
+        assert_eq!(consuming.len(), 1);
+        assert_eq!(consuming[0].group, "g1");
+        assert_eq!(consuming[0].offsets.len(), 2);
+        assert!(src.groups_consuming("events").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_led_group_whose_assignment_is_not_written_yet_is_completing_its_rebalance() {
+        let (store, src) = decomposed_source().await;
+        put(
+            &store,
+            &src.keys().group_generation("g1"),
+            GENERATION.to_vec(),
+        )
+        .await;
+
+        let detail = src.group_detail("g1").await.unwrap();
+        assert_eq!(detail.state, "CompletingRebalance");
+        assert_eq!(detail.members.len(), 2);
+        assert!(detail.members.iter().all(|m| m.assignments.is_empty()));
+    }
+
+    /// The bug the lag figures had: a group that existed before the upgrade
+    /// reported its last pre-upgrade commit, so its lag grew without bound.
+    #[tokio::test]
+    async fn offsets_json_wins_over_a_stale_per_partition_commit_and_the_set_is_the_union() {
+        let (store, src) = decomposed_source().await;
+        put(
+            &store,
+            &src.keys().group_generation("g1"),
+            GENERATION.to_vec(),
+        )
+        .await;
+        // `offsets.json` holds partitions 0 and 1; the per-partition layout
+        // left a stale 0 behind, and a 2 committed before the upgrade only.
+        put(
+            &store,
+            &src.keys().group_offsets_doc("g1"),
+            OFFSETS.to_vec(),
+        )
+        .await;
+        put(
+            &store,
+            &src.keys().group_offset("g1", "orders", 0),
+            br#"{"offset":10}"#.to_vec(),
+        )
+        .await;
+        put(
+            &store,
+            &src.keys().group_offset("g1", "orders", 2),
+            br#"{"offset":7}"#.to_vec(),
+        )
+        .await;
+        for p in 0..3 {
+            watermark(&store, &src, "orders", p, 100).await;
+        }
+
+        let detail = src.group_detail("g1").await.unwrap();
+        let offsets: Vec<(i32, i64)> = detail
+            .offsets
+            .iter()
+            .map(|o| (o.partition, o.committed_offset))
+            .collect();
+        assert_eq!(offsets, [(0, 40), (1, 95), (2, 7)]);
+
+        let consuming = src.groups_consuming("orders").await.unwrap();
+        let offsets: Vec<(i32, i64)> = consuming[0]
+            .offsets
+            .iter()
+            .map(|o| (o.partition, o.committed_offset))
+            .collect();
+        assert_eq!(offsets, [(0, 40), (1, 95), (2, 7)]);
+    }
+
+    /// A consumer that `assign()`s and commits never joins, so it has no
+    /// `generation.json` — and is still a group.
+    #[tokio::test]
+    async fn a_group_that_only_commits_offsets_is_listed_as_empty_not_missing() {
+        let (store, src) = decomposed_source().await;
+        put(
+            &store,
+            &src.keys().group_offsets_doc("manual"),
+            OFFSETS.to_vec(),
+        )
+        .await;
+        watermark(&store, &src, "orders", 0, 100).await;
+        watermark(&store, &src, "orders", 1, 100).await;
+
+        let page = src
+            .list_groups(&Page::new(None, 50, 0), LagMode::Off)
+            .await
+            .unwrap();
+        let names: Vec<&str> = page.items.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["manual"]);
+        assert_eq!(page.items[0].state, "Empty");
+
+        let detail = src.group_detail("manual").await.unwrap();
+        assert_eq!(detail.state, "Empty");
+        assert!(detail.members.is_empty());
+        assert_eq!(detail.total_lag, 65);
+    }
+
+    /// A `{group}.json` left from before the upgrade names members the
+    /// cut-over quiesced: it proves the group exists, and nothing else.
+    #[tokio::test]
+    async fn a_leftover_legacy_object_counts_for_existence_not_for_its_members() {
+        let (store, src) = decomposed_source().await;
+        let stale = br#"{"generation_id":3,"members":{"gone":{}},"state":{"Formed":{"protocol_type":"consumer","protocol_name":"range","leader":"gone","assignments":{}}}}"#;
+        put(&store, &src.keys().group("old"), stale.to_vec()).await;
+        // And one that has re-formed since: its generation is what counts.
+        put(&store, &src.keys().group("reformed"), stale.to_vec()).await;
+        put(
+            &store,
+            &src.keys().group_generation("reformed"),
+            GENERATION.to_vec(),
+        )
+        .await;
+
+        let page = src
+            .list_groups(&Page::new(None, 50, 0), LagMode::Off)
+            .await
+            .unwrap();
+        let names: Vec<&str> = page.items.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["old", "reformed"], "each listed once");
+
+        let old = src.group_detail("old").await.unwrap();
+        assert_eq!(old.state, "Empty");
+        assert!(old.members.is_empty());
+        assert_eq!(old.generation_id, 0);
+
+        let reformed = src.group_detail("reformed").await.unwrap();
+        assert_eq!(reformed.generation_id, 7);
+        assert_eq!(reformed.members.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_group_on_the_decomposed_layout_is_not_found() {
+        let (_store, src) = decomposed_source().await;
+        let err = src.group_detail("nope").await.unwrap_err();
+        assert!(matches!(err, StorageError::GroupNotFound(_)), "got {err}");
+    }
+
+    /// An assignment object never changes, so it is read once per generation;
+    /// a new generation is a new object and is read again.
+    #[tokio::test]
+    async fn an_assignment_is_read_once_per_generation() {
+        let (store, src) = decomposed_source().await;
+        put(
+            &store,
+            &src.keys().group_generation("g1"),
+            GENERATION.to_vec(),
+        )
+        .await;
+        put(
+            &store,
+            &src.keys().group_assignment("g1", 7),
+            ASSIGNMENT.to_vec(),
+        )
+        .await;
+        assert_eq!(src.group_detail("g1").await.unwrap().state, "Stable");
+
+        store
+            .delete(&src.keys().group_assignment("g1", 7))
+            .await
+            .unwrap();
+        assert_eq!(
+            src.group_detail("g1").await.unwrap().state,
+            "Stable",
+            "served from the cache"
+        );
+
+        let next = String::from_utf8(GENERATION.to_vec())
+            .unwrap()
+            .replace(r#""generation_id":7"#, r#""generation_id":8"#);
+        put(
+            &store,
+            &src.keys().group_generation("g1"),
+            next.into_bytes(),
+        )
+        .await;
+        assert_eq!(
+            src.group_detail("g1").await.unwrap().state,
+            "CompletingRebalance",
+            "generation 8 has no assignment yet"
+        );
+    }
+
+    /// Without `schema/groups.json` the cluster is read exactly as before: a
+    /// `{group}/` prefix is not a group of its own.
+    #[tokio::test]
+    async fn a_cluster_without_a_schema_object_keeps_the_legacy_layout() {
+        let (store, src) = source();
+        seed_commit(&store, &src, "g1", "orders", 0, 40, 100).await;
+        put(
+            &store,
+            &src.keys().group_offsets_doc("orphan"),
+            OFFSETS.to_vec(),
+        )
+        .await;
+
+        let page = src
+            .list_groups(&Page::new(None, 50, 0), LagMode::Off)
+            .await
+            .unwrap();
+        let names: Vec<&str> = page.items.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["g1"]);
+        assert_eq!(src.group_detail("g1").await.unwrap().state, "Empty");
     }
 }

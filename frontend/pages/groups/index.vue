@@ -51,7 +51,7 @@ function toggleSort() {
 const items = computed(() => data.value?.items ?? [])
 
 function stateClass(s: string) {
-  return { Stable: 'ok', Empty: 'muted', Assigning: 'warn' }[s] || 'muted'
+  return { Stable: 'ok', Empty: 'muted', Assigning: 'warn', CompletingRebalance: 'warn' }[s] || 'muted'
 }
 </script>
 

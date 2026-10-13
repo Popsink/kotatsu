@@ -1,0 +1,1 @@
+{"committed":{"orders":{"0":{"offset":40,"leader_epoch":0,"timestamp":{"secs_since_epoch":1780339300,"nanos_since_epoch":0},"metadata":""},"1":{"offset":95,"leader_epoch":null,"timestamp":null,"metadata":null}}},"compacted_at_ms":1780339301000}

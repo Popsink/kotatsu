@@ -1,0 +1,1 @@
+{"seq":4,"generation_id":7,"protocol_type":"consumer","protocol_name":"range","leader":"m-1","members":{"m-1":{},"m-2":{"group_instance_id":"static-2"}},"members_changed_at_ms":1780339256000,"state_since_ms":1780339256000,"swept_at_ms":1780339250000,"session_timeout_ms":45000,"rebalance_timeout_ms":300000,"inception_ms":1780339200000,"assignor":"cooperative-sticky"}

@@ -24,10 +24,14 @@ const GROUP: &str = "kotatsu-it-group";
 const TOPIC: &str = "kotatsu-it-topic";
 
 fn demo_source() -> StorageSource {
+    source_for("demo")
+}
+
+fn source_for(cluster: &str) -> StorageSource {
     let cfg = S3Config {
         provider: kotatsu::config::StorageProvider::S3,
         bucket: "tansu".into(),
-        cluster: "demo".into(),
+        cluster: cluster.into(),
         endpoint: Some("http://127.0.0.1:9000".into()),
         region: "us-east-1".into(),
         access_key: Some("minioadmin".into()),
@@ -130,4 +134,92 @@ async fn unknown_group_errors() {
         .await
         .expect_err("should not be found");
     assert!(err.to_string().contains("not found"), "got: {err}");
+}
+
+/// The layout a current broker writes (Popsink/kodansu#359, #415): no
+/// `{group}.json`, membership in `generation.json` + `assignment/`, offsets in
+/// `offsets.json` with a stale per-partition object beside it. Seeded under a
+/// cluster of its own, because `schema/groups.json` switches the whole cluster.
+#[tokio::test]
+#[ignore = "requires local MinIO"]
+async fn decomposed_group_lists_describes_and_prefers_offsets_json() {
+    let source = source_for("kotatsu-it-decomposed");
+    let keys = source.keys();
+
+    let schema = keys.group_schema();
+    let generation = keys.group_generation(GROUP);
+    let assignment = keys.group_assignment(GROUP, 3);
+    let offsets = keys.group_offsets_doc(GROUP);
+    let stale = keys.group_offset(GROUP, TOPIC, 0);
+    let watermark = keys.watermark(TOPIC, 0);
+
+    put(&source, &schema, r#"{"version":2}"#).await;
+    put(
+        &source,
+        &generation,
+        r#"{"seq":1,"generation_id":3,"protocol_type":"consumer","protocol_name":"range","leader":"m-1","members":{"m-1":{}},"members_changed_at_ms":0,"state_since_ms":0,"swept_at_ms":0,"session_timeout_ms":45000,"inception_ms":0}"#,
+    )
+    .await;
+    // version 0, one topic of 16 bytes, partition [0], no user data.
+    let mut blob = vec![0u8, 0, 0, 0, 0, 1, 0, TOPIC.len() as u8];
+    blob.extend_from_slice(TOPIC.as_bytes());
+    blob.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 255, 255, 255, 255]);
+    put(
+        &source,
+        &assignment,
+        &format!(
+            r#"{{"generation_id":3,"leader":"m-1","protocol_type":"consumer","protocol_name":"range","assignments":{{"m-1":{blob:?}}},"assigned_at_ms":0}}"#
+        ),
+    )
+    .await;
+    put(
+        &source,
+        &offsets,
+        &format!(r#"{{"committed":{{"{TOPIC}":{{"0":{{"offset":8,"leader_epoch":null,"timestamp":null,"metadata":null}}}}}}}}"#),
+    )
+    .await;
+    put(&source, &stale, r#"{"offset":4}"#).await;
+    put(
+        &source,
+        &watermark,
+        r#"{"low":0,"high":10,"timestamps":null}"#,
+    )
+    .await;
+
+    let groups = source
+        .list_groups(&Page::new(Some(GROUP.into()), 200, 0), LagMode::Off)
+        .await
+        .expect("list groups")
+        .items;
+    let summary = groups
+        .iter()
+        .find(|g| g.name == GROUP)
+        .expect("a group with no {group}.json is listed");
+    assert_eq!(summary.state, "Stable");
+    assert_eq!(summary.members, 1);
+
+    let detail = source.group_detail(GROUP).await.expect("group detail");
+    assert_eq!(detail.generation_id, 3);
+    assert_eq!(detail.members.len(), 1);
+    assert_eq!(detail.members[0].assignments[0].partitions, vec![0]);
+    assert_eq!(detail.offsets.len(), 1);
+    assert_eq!(
+        detail.offsets[0].committed_offset, 8,
+        "offsets.json, not the stale object"
+    );
+    assert_eq!(detail.offsets[0].lag, 2);
+
+    let consuming = source.groups_consuming(TOPIC).await.expect("consuming");
+    assert!(consuming.iter().any(|g| g.group == GROUP));
+
+    for path in [
+        &schema,
+        &generation,
+        &assignment,
+        &offsets,
+        &stale,
+        &watermark,
+    ] {
+        let _ = source.store().delete(path).await;
+    }
 }
