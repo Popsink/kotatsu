@@ -74,6 +74,8 @@ priorityClassName: ""
 podSecurityContext:
   enabled: true
   fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
 
 ## @param containerSecurityContext.enabled Enable container security context
 containerSecurityContext:
