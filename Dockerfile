@@ -23,10 +23,15 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+# Non-root by default, by uid so Kubernetes' runAsNonRoot can check it: the chart already runs it
+# as 1001, this is the same user for any other runtime.
+RUN groupadd --system --gid 1001 kotatsu \
+    && useradd --system --uid 1001 --gid kotatsu --home-dir /app --shell /usr/sbin/nologin kotatsu
 WORKDIR /app
 COPY --from=backend /app/backend/target/release/kotatsu /usr/local/bin/kotatsu
 COPY --from=frontend /app/frontend/.output/public /app/static
 ENV KOTATSU_BIND=0.0.0.0:8080 \
     KOTATSU_STATIC_DIR=/app/static
 EXPOSE 8080
+USER 1001:1001
 CMD ["kotatsu"]
