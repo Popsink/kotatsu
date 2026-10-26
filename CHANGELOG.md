@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-10-26
+
+Kotatsu meets the Pod Security `restricted` level out of the box (#136, PR #137).
+The chart already ran it non-root, with every capability dropped and a read-only
+root filesystem, but set no seccomp profile, so clusters enforcing or warning on
+`restricted` flagged the pod; and the image itself ran as root wherever the
+chart's `runAsUser` did not apply. No behaviour change.
+
+### Fixed
+- **The chart runs Kotatsu under the `RuntimeDefault` seccomp profile** (#136) —
+  `podSecurityContext.seccompProfile.type: RuntimeDefault`, the one field missing
+  for the `restricted` level. Override it in `values.yaml` if a cluster needs a
+  different profile.
+- **The image runs as a non-root user by default** (#136) — the runtime stage had
+  no `USER`. It now runs as `kotatsu`, uid/gid `1001` like the chart, set by uid
+  so Kubernetes' `runAsNonRoot` can check it. Anything that ran the image directly
+  (`docker run`, Compose) no longer runs it as root; Kotatsu writes nothing to
+  disk, so it starts unchanged.
+
 ## [0.12.0] - 2026-10-13
 
 Consumer groups on a current broker (#133) and a Topics page that paints on a
