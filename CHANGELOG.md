@@ -4,7 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.13.0] - 2026-11-10
+
+Consumer-group detail on large groups (Popsink/data-plane#6095). A group
+committing to many partitions of a large connector timed out (504), because
+each partition re-listed its topic's whole prefix in sequence. The detail now
+reads one listing per topic, topics in parallel, and takes a `?topic=` filter
+so the data-plane's target lag reads only the topic it needs.
 
 ### Fixed
 - **Consumer-group detail no longer times out on large groups** (Popsink/data-plane#6095) —

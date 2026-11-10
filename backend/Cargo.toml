@@ -1,6 +1,6 @@
 [package]
 name = "kotatsu"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 description = "Read-only, on-demand browser over Tansu's native S3 storage"
 license = "Apache-2.0"
