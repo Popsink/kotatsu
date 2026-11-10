@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Consumer-group detail no longer times out on large groups** (Popsink/data-plane#6095) —
+  the high watermarks behind a group's offsets are folded from one listing of
+  each topic's prefix, topics `FANOUT` at a time, instead of one listing per
+  committed partition in sequence; a group spanning many partitions of a large
+  connector ran past the 30 s API timeout (504).
+
+### Added
+- **`?topic=` on `GET /api/clusters/{cluster}/groups/{group}`** (Popsink/data-plane#6095) —
+  only that topic's committed offsets and lag are read and returned, for
+  callers such as the data-plane's target lag that want one topic out of a
+  group committing to many. Without it, the response is unchanged.
+
 ## [0.12.1] - 2026-10-26
 
 Kotatsu meets the Pod Security `restricted` level out of the box (#136, PR #137).

@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
+use super::segview::SegView;
 use super::{catalog, keys::Keys, StorageError, StorageSource, FANOUT};
 use crate::pagination::{Page, Paged};
 
@@ -828,25 +829,46 @@ impl StorageSource {
         Ok(high)
     }
 
-    /// Reads a group's metadata, committed offsets and lag.
+    /// Reads a group's metadata, committed offsets and lag, on every topic.
     pub async fn group_detail(&self, group: &str) -> Result<GroupDetailView, StorageError> {
+        self.group_detail_on(group, None).await
+    }
+
+    /// Reads a group's metadata, plus its committed offsets and lag on `topic`
+    /// only when given (Popsink/data-plane#6095).
+    ///
+    /// The data-plane's target lag wants one topic out of a group that may
+    /// commit to hundreds, so the filter is pushed down to the offset read
+    /// instead of being applied to the answer. The high watermarks behind the
+    /// offsets are then resolved one *topic* at a time — one listing of its
+    /// prefix for all of its partitions — and the topics `FANOUT` at a time:
+    /// one listing per partition, in sequence, ran a large group past the API
+    /// timeout.
+    pub async fn group_detail_on(
+        &self,
+        group: &str,
+        topic: Option<&str>,
+    ) -> Result<GroupDetailView, StorageError> {
         let membership = self
             .membership(group)
             .await?
             .ok_or_else(|| StorageError::GroupNotFound(group.to_string()))?;
 
-        let committed = self.committed_offsets(group, None).await?;
-        let mut offsets = Vec::with_capacity(committed.len());
-        for ((topic, partition), committed_offset) in committed {
-            let high = self.watermark_or_empty(&topic, partition).await?.high;
-            offsets.push(GroupOffset {
-                topic,
-                partition,
-                committed_offset,
-                high_watermark: high,
-                lag: (high - committed_offset).max(0),
-            });
-        }
+        let committed = self.committed_offsets(group, topic).await?;
+        let highs = self.committed_highs(&committed).await?;
+        let offsets: Vec<GroupOffset> = committed
+            .into_iter()
+            .map(|((topic, partition), committed_offset)| {
+                let high = highs.get(&(topic.clone(), partition)).copied().unwrap_or(0);
+                GroupOffset {
+                    topic,
+                    partition,
+                    committed_offset,
+                    high_watermark: high,
+                    lag: (high - committed_offset).max(0),
+                }
+            })
+            .collect();
 
         let total_lag = offsets.iter().map(|o| o.lag).sum();
         Ok(GroupDetailView {
@@ -859,6 +881,66 @@ impl StorageSource {
             offsets,
             total_lag,
         })
+    }
+
+    /// The high watermark behind every committed `(topic, partition)`, one topic
+    /// at a time and `FANOUT` topics at once.
+    async fn committed_highs(
+        &self,
+        committed: &BTreeMap<(String, i32), i64>,
+    ) -> Result<HashMap<(String, i32), i64>, StorageError> {
+        let mut by_topic: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
+        for (topic, partition) in committed.keys() {
+            by_topic
+                .entry(topic.clone())
+                .or_default()
+                .insert(*partition);
+        }
+        let per_topic: Vec<(String, Vec<(i32, i64)>)> = futures::stream::iter(by_topic)
+            .map(|(topic, partitions)| async move {
+                let highs = self.topic_highs(&topic, &partitions).await?;
+                Ok::<_, StorageError>((topic, highs))
+            })
+            .buffer_unordered(FANOUT)
+            .try_collect()
+            .await?;
+        let mut highs = HashMap::new();
+        for (topic, partitions) in per_topic {
+            for (partition, high) in partitions {
+                highs.insert((topic.clone(), partition), high);
+            }
+        }
+        Ok(highs)
+    }
+
+    /// High watermarks of some partitions of one topic, folded from a single
+    /// listing of its prefix (as the topic detail does) rather than one listing
+    /// per partition. A topic or partition with nothing stored reads as empty,
+    /// like [`StorageSource::watermark_or_empty`].
+    async fn topic_highs(
+        &self,
+        topic: &str,
+        partitions: &BTreeSet<i32>,
+    ) -> Result<Vec<(i32, i64)>, StorageError> {
+        let segments = match self.topic_segments(topic).await {
+            Ok(segments) => segments,
+            Err(StorageError::NotFound(_)) => {
+                return Ok(partitions.iter().map(|&p| (p, 0)).collect());
+            }
+            Err(err) => return Err(err),
+        };
+        let empty = SegView::default();
+        let segments = &segments;
+        let empty = &empty;
+        futures::future::try_join_all(partitions.iter().map(|&partition| async move {
+            let view = segments.views.get(&partition).unwrap_or(empty);
+            match self.watermark_over(topic, partition, view).await {
+                Ok(wm) => Ok((partition, wm.high)),
+                Err(StorageError::NotFound(_)) => Ok((partition, 0)),
+                Err(err) => Err(err),
+            }
+        }))
+        .await
     }
 
     /// Lists consumer groups that have committed offsets on `topic`, with their

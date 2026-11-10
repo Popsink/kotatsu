@@ -358,13 +358,24 @@ pub async fn groups(
     })))
 }
 
-/// `GET /api/clusters/{cluster}/groups/{group}`
+/// Query params for a consumer group's detail.
+#[derive(Deserialize)]
+pub struct GroupDetailQuery {
+    /// Only this topic's committed offsets and lag (Popsink/data-plane#6095).
+    /// Absent: every topic the group committed to.
+    topic: Option<String>,
+}
+
+/// `GET /api/clusters/{cluster}/groups/{group}?topic=`
 pub async fn group_detail(
     State(state): State<AppState>,
     Path((cluster, group)): Path<(String, String)>,
+    Query(query): Query<GroupDetailQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let source = cluster_source(&state, &cluster)?;
-    let detail = source.group_detail(&group).await?;
+    let detail = source
+        .group_detail_on(&group, query.topic.as_deref().filter(|t| !t.is_empty()))
+        .await?;
     Ok(Json(json!(detail)))
 }
 
