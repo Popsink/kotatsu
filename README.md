@@ -236,7 +236,7 @@ are `GET`, all are read-only, all return JSON.
 | `/api/clusters/{cluster}/topics/{topic}/groups` | groups with a committed offset on this topic | — |
 | `/api/clusters/{cluster}/topics/{topic}/messages` | the event browser's read | see below |
 | `/api/clusters/{cluster}/groups` | consumer group list | `search`, `limit`, `offset` |
-| `/api/clusters/{cluster}/groups/{group}` | members, committed offsets, per-partition lag | — |
+| `/api/clusters/{cluster}/groups/{group}` | members, committed offsets, per-partition lag | `topic` (only that topic's offsets and lag) |
 | `/api/schemas` | registry subjects (`503` when no registry is configured) | `search`, `limit`, `offset` |
 | `/api/schemas/{subject}` | versions, latest schema, compatibility level | — |
 | `/api/schemas/{subject}/versions/{version}` | one version's schema | — |

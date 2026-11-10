@@ -898,6 +898,104 @@ mod tests {
         })
     }
 
+    /// A decomposed group that committed on both partitions of every topic
+    /// seeded by [`seed_connector`], at offset 0 except where noted.
+    async fn seed_group(store: &CountingStore, src: &StorageSource) {
+        use object_store::{ObjectStore, PutPayload};
+        let generation = serde_json::json!({
+            "generation_id": 1, "protocol_type": "consumer", "protocol_name": "range",
+            "leader": "m-1", "members": { "m-1": {} },
+        });
+        let commit = |offset: i64| serde_json::json!({ "offset": offset });
+        let offsets = serde_json::json!({ "committed": {
+            "acme.prod.db2.a": { "0": commit(0), "1": commit(0) },
+            "acme.prod.db2.b": { "0": commit(1), "1": commit(1) },
+            "acme.prod.db2.c": { "0": commit(0), "1": commit(0) },
+        }});
+        for (path, body) in [
+            (
+                src.keys().group_schema(),
+                serde_json::json!({ "version": 2 }),
+            ),
+            (src.keys().group_generation("g"), generation),
+            (src.keys().group_offsets_doc("g"), offsets),
+        ] {
+            store
+                .put(&path, PutPayload::from(serde_json::to_vec(&body).unwrap()))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Popsink/data-plane#6095: a group's watermarks are folded from one
+    /// listing per *topic* — it used to be one per committed partition, in
+    /// sequence, here 3 × 2 = 6.
+    #[tokio::test]
+    async fn group_detail_lists_each_topic_prefix_once() {
+        let (store, src) = counting_source();
+        seed_connector(&store, &src).await;
+        seed_group(&store, &src).await;
+
+        let detail = src.group_detail_on("g", None).await.unwrap();
+
+        assert_eq!(segment_lists(&store), 3);
+        let rows: Vec<(&str, i32, i64, i64)> = detail
+            .offsets
+            .iter()
+            .map(|o| (o.topic.as_str(), o.partition, o.high_watermark, o.lag))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("acme.prod.db2.a", 0, 1, 1),
+                ("acme.prod.db2.a", 1, 1, 1),
+                ("acme.prod.db2.b", 0, 2, 1),
+                ("acme.prod.db2.b", 1, 1, 0),
+                ("acme.prod.db2.c", 0, 3, 3),
+                ("acme.prod.db2.c", 1, 1, 1),
+            ]
+        );
+        assert_eq!(detail.total_lag, 1 + 1 + 1 + 0 + 3 + 1);
+    }
+
+    /// `?topic=` reads only that topic: its offsets, and its prefix once.
+    #[tokio::test]
+    async fn group_detail_on_one_topic_reads_only_that_topic() {
+        let (store, src) = counting_source();
+        seed_connector(&store, &src).await;
+        seed_group(&store, &src).await;
+
+        let detail = src
+            .group_detail_on("g", Some("acme.prod.db2.c"))
+            .await
+            .unwrap();
+
+        assert_eq!(segment_lists(&store), 1);
+        let rows: Vec<(&str, i32, i64)> = detail
+            .offsets
+            .iter()
+            .map(|o| (o.topic.as_str(), o.partition, o.lag))
+            .collect();
+        assert_eq!(rows, [("acme.prod.db2.c", 0, 3), ("acme.prod.db2.c", 1, 1)]);
+        assert_eq!(detail.total_lag, 4);
+    }
+
+    /// A topic the group committed to but that has nothing stored any more
+    /// reads as empty (lag 0), as `watermark_or_empty` did — not as an error.
+    #[tokio::test]
+    async fn group_detail_on_a_topic_with_nothing_stored_is_empty() {
+        let (store, src) = counting_source();
+        seed_group(&store, &src).await;
+
+        let detail = src.group_detail_on("g", None).await.unwrap();
+
+        assert_eq!(detail.offsets.len(), 6);
+        assert!(detail
+            .offsets
+            .iter()
+            .all(|o| o.high_watermark == 0 && o.lag == 0));
+    }
+
     /// A leaf page lists its connector's segment prefix once, and every
     /// row's count and size are folded from that one listing — it used to be
     /// `P + 1` listings per row, here 3 × (2 + 1) = 9.
