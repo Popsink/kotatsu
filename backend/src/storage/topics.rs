@@ -955,7 +955,8 @@ mod tests {
                 ("acme.prod.db2.c", 1, 1, 1),
             ]
         );
-        assert_eq!(detail.total_lag, 1 + 1 + 1 + 0 + 3 + 1);
+        // a: 1 + 1, b: 1 + 0, c: 3 + 1
+        assert_eq!(detail.total_lag, 7);
     }
 
     /// `?topic=` reads only that topic: its offsets, and its prefix once.
