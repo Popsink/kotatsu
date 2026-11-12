@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A prefix whose LIST outlasts the 30 s API timeout no longer 504s on every
+  request** (Popsink/data-plane#6123) — the segment listing runs in a task of
+  its own, so a request that times out leaves it running: it completes and
+  fills the listing cache for the next request, instead of being cancelled
+  with the request and restarted from zero each time.
+
 ## [0.14.0] - 2026-11-12
 
 Detail reads on large connector prefixes (Popsink/data-plane#6096). Topic
