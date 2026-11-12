@@ -22,7 +22,10 @@ Four constraints shape every feature below:
   request happens because a user asked for it. The list and search views are
   served from a **45 s in-process catalog cache** (`backend/src/storage/catalog.rs`)
   filled lazily by those same requests, so a new topic can take that long to
-  appear in a listing. Detail reads are uncached and exact.
+  appear in a listing. Detail reads reuse each connector prefix's **segment
+  listing for 10 s** (`backend/src/storage/segview.rs`), so a just-flushed
+  segment — and the `high` it carries — can take that long to show; footers
+  and records are read exactly.
 - **Bounded scans.** A filtered read has a scan budget and stops at it, so no
   query can turn into an unbounded walk of the store.
 

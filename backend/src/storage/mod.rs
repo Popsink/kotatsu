@@ -51,8 +51,9 @@ pub struct StorageSource {
     high_cache: Arc<Mutex<HashMap<(String, i32), i64>>>,
     /// In-memory segment-footer cache, keyed by the segment object's full path.
     /// Segments are immutable and create-only, so a decoded footer never changes
-    /// — no TTL. Each query still re-lists the prefix to discover new/compacted
-    /// segments; this only spares re-reading a footer already seen. Shared across
+    /// — no TTL. New/compacted segments are discovered by re-listing the prefix
+    /// (see [`Self::segment_listings`]); this only spares re-reading a footer
+    /// already seen. Shared across
     /// clones via the `Arc`.
     segment_footers: Arc<Mutex<HashMap<String, segment::SegmentFooter>>>,
     /// Cached topic catalog (name index + per-row summaries) for the list/search
@@ -76,6 +77,14 @@ pub struct StorageSource {
     /// so a hit for the current generation never goes stale; a new generation
     /// replaces the entry, which keeps this to one entry per group.
     group_assignments: Arc<Mutex<HashMap<String, groups::CachedAssignment>>>,
+    /// Short-TTL listings of each routed prefix's segment sequences
+    /// (Popsink/data-plane#6096), keyed by prefix. One slot per prefix; its
+    /// async lock makes the listing single-flight, so concurrent reads of the
+    /// topics of one connector share one LIST. Footers stay in
+    /// [`Self::segment_footers`]. Shared across clones via the `Arc`.
+    segment_listings: segview::SegmentListings,
+    /// How long a prefix listing is served from [`Self::segment_listings`].
+    listing_ttl: std::time::Duration,
 }
 
 impl StorageSource {
@@ -137,6 +146,8 @@ impl StorageSource {
             topic_routes: Arc::new(Mutex::new(HashMap::new())),
             group_layout: Arc::new(Mutex::new(None)),
             group_assignments: Arc::new(Mutex::new(HashMap::new())),
+            segment_listings: Default::default(),
+            listing_ttl: segview::LISTING_TTL,
         })
     }
 
@@ -157,7 +168,17 @@ impl StorageSource {
             topic_routes: Arc::new(Mutex::new(HashMap::new())),
             group_layout: Arc::new(Mutex::new(None)),
             group_assignments: Arc::new(Mutex::new(HashMap::new())),
+            segment_listings: Default::default(),
+            listing_ttl: segview::LISTING_TTL,
         }
+    }
+
+    /// Overrides the prefix-listing TTL; zero lists on every read, as before
+    /// the cache existed.
+    #[cfg(test)]
+    pub(crate) fn with_listing_ttl(mut self, ttl: std::time::Duration) -> Self {
+        self.listing_ttl = ttl;
+        self
     }
 
     /// The underlying object store, for modules that need raw reads (#9).
