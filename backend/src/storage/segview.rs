@@ -13,7 +13,11 @@
 //! wins** — turning the collected entries into a set of non-overlapping
 //! [`OwnerPiece`]s that partition the topition's segment-backed offset space.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
@@ -29,6 +33,26 @@ use super::{
 
 /// A prefix's live multi-topic segments, `(seq, footer)`, in listing order.
 pub(super) type PrefixFooters = Vec<(u64, SegmentFooter)>;
+
+/// How long a prefix's segment listing is reused (Popsink/data-plane#6096).
+///
+/// It bounds how stale a served `high` can be: a segment flushed after the
+/// listing is invisible until it expires. Tighter than the catalog's 45 s
+/// (#84) for that reason; target lag polls every 30 s, and the Stream tab is
+/// not a live tail.
+pub(super) const LISTING_TTL: Duration = Duration::from_secs(10);
+
+/// A prefix's segment sequences, as last listed.
+pub(super) struct Listing {
+    at: Instant,
+    seqs: Arc<Vec<u64>>,
+}
+
+/// One slot per routed prefix. The outer lock only finds the slot; the slot's
+/// async lock is held across the LIST, so callers arriving meanwhile wait for
+/// that listing instead of starting their own (single-flight).
+pub(super) type SegmentListings =
+    Arc<Mutex<HashMap<String, Arc<futures::lock::Mutex<Option<Listing>>>>>>;
 
 /// One sub-stream's slice of a prefix, per partition: its resolved segment view
 /// and the bytes it occupies. Partitions with no slice are absent from both.
@@ -199,23 +223,81 @@ impl StorageSource {
     /// immutable), `FANOUT` at a time on a cold pass. A topic's count and size
     /// are folded from this one listing, for every partition — and, in a topic
     /// listing, for every row under the same prefix.
+    ///
+    /// The listing itself is reused for [`LISTING_TTL`]. A segment that a
+    /// reused listing names but that compaction has since deleted reads as no
+    /// footer: the listing is then dropped and taken again once, so the
+    /// segment that replaced it is not missed for the rest of the TTL.
     pub(super) async fn prefix_footers(&self, prefix: &str) -> Result<PrefixFooters, StorageError> {
-        let seqs: Vec<u64> = self
-            .store()
-            .list(Some(&self.keys().segment_prefix(prefix)))
-            .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
-            .try_collect::<Vec<_>>()
-            .await?
-            .into_iter()
-            .flatten()
-            .collect();
+        let (seqs, reused) = self.segment_seqs(prefix).await?;
+        let footers = self.footers_of(prefix, &seqs).await?;
+        if reused && footers.len() < seqs.len() {
+            self.invalidate_listing(prefix);
+            let (seqs, _) = self.segment_seqs(prefix).await?;
+            return self.footers_of(prefix, &seqs).await;
+        }
+        Ok(footers)
+    }
 
-        futures::stream::iter(seqs)
+    async fn footers_of(&self, prefix: &str, seqs: &[u64]) -> Result<PrefixFooters, StorageError> {
+        futures::stream::iter(seqs.iter().copied())
             .map(|seq| async move { Ok(self.segment_footer(prefix, seq).await?.map(|f| (seq, f))) })
             .buffered(FANOUT)
             .try_collect::<Vec<_>>()
             .await
             .map(|footers| footers.into_iter().flatten().collect())
+    }
+
+    /// The prefix's segment sequences, and whether they came from a listing
+    /// taken earlier rather than by this call.
+    async fn segment_seqs(&self, prefix: &str) -> Result<(Arc<Vec<u64>>, bool), StorageError> {
+        let slot = {
+            let mut slots = self
+                .segment_listings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let ttl = self.listing_ttl;
+            // Expired listings are dropped on the way, so the map holds only
+            // prefixes read within the TTL. A slot someone holds is kept.
+            slots.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || slot
+                        .try_lock()
+                        .is_some_and(|l| l.as_ref().is_some_and(|l| l.at.elapsed() < ttl))
+            });
+            slots.entry(prefix.to_string()).or_default().clone()
+        };
+
+        let mut listing = slot.lock().await;
+        if let Some(l) = listing
+            .as_ref()
+            .filter(|l| l.at.elapsed() < self.listing_ttl)
+        {
+            return Ok((l.seqs.clone(), true));
+        }
+        let seqs: Arc<Vec<u64>> = Arc::new(
+            self.store()
+                .list(Some(&self.keys().segment_prefix(prefix)))
+                .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .flatten()
+                .collect(),
+        );
+        *listing = Some(Listing {
+            at: Instant::now(),
+            seqs: seqs.clone(),
+        });
+        Ok((seqs, false))
+    }
+
+    /// Forgets a prefix's listing, so the next read lists it again — after a
+    /// segment it named turned out to be gone.
+    pub(super) fn invalidate_listing(&self, prefix: &str) {
+        if let Ok(mut slots) = self.segment_listings.lock() {
+            slots.remove(prefix);
+        }
     }
 
     /// Reads a segment region's raw bytes (`[byte_start, byte_start + byte_len)`).

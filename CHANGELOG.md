@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Topic detail, watermarks and group detail no longer re-list a large
+  connector prefix on every request** (Popsink/data-plane#6096) — a prefix's
+  segment listing is reused for 10 s and taken once for concurrent requests
+  (single-flight), so the topics of one connector, the Stream tab's page
+  changes and target-lag polls share one LIST instead of each paying for
+  thousands of segments. `high` may lag the broker by up to those 10 s. A
+  segment compacted away under a reused listing triggers a fresh listing, on
+  the footer read and on the record read alike.
+
 ## [0.13.0] - 2026-11-10
 
 Consumer-group detail on large groups (Popsink/data-plane#6095). A group

@@ -932,7 +932,10 @@ mod tests {
     /// sequence, here 3 × 2 = 6.
     #[tokio::test]
     async fn group_detail_lists_each_topic_prefix_once() {
+        // Without the prefix-listing cache (#6096), which would fold the three
+        // topics' listings into one: this proves the per-topic fold alone.
         let (store, src) = counting_source();
+        let src = src.with_listing_ttl(std::time::Duration::ZERO);
         seed_connector(&store, &src).await;
         seed_group(&store, &src).await;
 
@@ -979,6 +982,83 @@ mod tests {
             .collect();
         assert_eq!(rows, [("acme.prod.db2.c", 0, 3), ("acme.prod.db2.c", 1, 1)]);
         assert_eq!(detail.total_lag, 4);
+    }
+
+    /// Popsink/data-plane#6096: topics of one connector share one listing of
+    /// its prefix within the TTL — on consecutive reads, and on concurrent
+    /// ones (single-flight) — where each used to LIST it again.
+    #[tokio::test]
+    async fn topics_of_one_connector_share_one_listing_within_the_ttl() {
+        let (store, src) = counting_source();
+        let [a, b, c] = seed_connector(&store, &src).await;
+        seed_group(&store, &src).await;
+
+        let (da, db, dc) = tokio::join!(
+            src.topic_detail(a),
+            src.topic_detail(b),
+            src.topic_detail(c)
+        );
+        assert_eq!(segment_lists(&store), 1, "concurrent reads share the LIST");
+        assert_eq!(dc.unwrap().messages, 4);
+        assert_eq!((da.unwrap().messages, db.unwrap().messages), (2, 3));
+
+        src.topic_detail(a).await.unwrap();
+        src.group_detail_on("g", None).await.unwrap();
+        assert_eq!(segment_lists(&store), 1, "later reads reuse it");
+    }
+
+    /// With a zero TTL every read lists, as before the cache: the cache is the
+    /// only thing sparing the LISTs.
+    #[tokio::test]
+    async fn a_zero_ttl_lists_on_every_read() {
+        let (store, src) = counting_source();
+        let src = src.with_listing_ttl(std::time::Duration::ZERO);
+        let [a, b, _] = seed_connector(&store, &src).await;
+
+        src.topic_detail(a).await.unwrap();
+        src.topic_detail(b).await.unwrap();
+        src.topic_detail(a).await.unwrap();
+        assert_eq!(segment_lists(&store), 3);
+    }
+
+    /// A reused listing that names a segment compaction deleted, whose footer
+    /// was never read, is taken again: otherwise the segment that replaced it
+    /// would stay invisible until the TTL ran out.
+    #[tokio::test]
+    async fn a_listed_segment_that_vanished_triggers_one_relisting() {
+        use object_store::ObjectStore;
+        let (store, src) = counting_source();
+        let [_, _, c] = seed_connector(&store, &src).await;
+        src.topic_detail(c).await.unwrap();
+        assert_eq!(segment_lists(&store), 1);
+
+        // Segment 1 is rewritten as 2 and deleted; its footer leaves the cache,
+        // as it would on a Kotatsu that listed but had not read it yet.
+        let seg1 = store
+            .get(&src.keys().segment("acme.prod.db2", 1))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        store
+            .put(&src.keys().segment("acme.prod.db2", 2), seg1.into())
+            .await
+            .unwrap();
+        store
+            .delete(&src.keys().segment("acme.prod.db2", 1))
+            .await
+            .unwrap();
+        src.segment_footers.lock().unwrap().clear();
+
+        let detail = src.topic_detail(c).await.unwrap();
+        assert_eq!(segment_lists(&store), 2, "relisted once");
+        let parts: Vec<(i64, i64)> = detail
+            .partitions
+            .iter()
+            .map(|p| (p.messages, p.storage_bytes))
+            .collect();
+        assert_eq!(parts, [(3, 30), (1, 7)], "partition 1 read from segment 2");
     }
 
     /// A topic the group committed to but that has nothing stored any more

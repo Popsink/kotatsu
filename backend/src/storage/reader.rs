@@ -251,8 +251,14 @@ impl StorageSource {
                 .await?
             {
                 true => return Ok(out),
-                // A region vanished (compaction); retry with a fresh view.
-                false if attempt == 0 => continue,
+                // A region vanished (compaction); retry with a fresh view —
+                // freshly listed, not the reused listing that named it.
+                false if attempt == 0 => {
+                    for piece in &view.pieces {
+                        self.invalidate_listing(&piece.prefix);
+                    }
+                    continue;
+                }
                 false => return Ok(out),
             }
         }
@@ -436,6 +442,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(from1.iter().map(|r| r.offset).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// Popsink/data-plane#6096: the listing is reused, so after compaction it
+    /// still names a segment that is gone. The read that hits the hole must
+    /// retry against a *fresh* listing — retried against the reused one, it
+    /// would find the same hole and come back empty.
+    #[tokio::test]
+    async fn a_read_after_compaction_relists_instead_of_reusing_the_listing() {
+        use object_store::{memory::InMemory, ObjectStore};
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c");
+        let region: Vec<u8> = [BATCH, BATCH2, BATCH3].concat();
+        let regions = [(SEG_TOPIC, 0, 0, 3, region.as_slice(), 555, None)];
+        put_segment(&store, &src, 0, 3, 7, &regions).await;
+        let first = src
+            .fetch(SEG_TOPIC, 0, OffsetSpec::Earliest, 100)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 3);
+
+        // Compaction rewrites segment 0 as segment 1, then deletes 0 — inside
+        // the TTL of the listing the first read took.
+        put_segment(&store, &src, 1, 3, 7, &regions).await;
+        store
+            .delete(&src.keys().segment(&Keys::prefix_of(SEG_TOPIC), 0))
+            .await
+            .unwrap();
+
+        let again = src
+            .fetch(SEG_TOPIC, 0, OffsetSpec::Earliest, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            again.iter().map(|r| r.offset).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "read from the segment that replaced the vanished one"
+        );
     }
 
     /// #92: a compacted topic with ≥ 3 dotted components is routed under its own
@@ -720,13 +763,53 @@ mod tests {
         assert_eq!((wm.low, wm.high, wm.count()), (0, 0, 0));
     }
 
+    /// Popsink/data-plane#6096: a segment flushed after the listing shows up
+    /// once that listing expires — `high` lags the broker by at most the TTL.
+    #[tokio::test]
+    async fn a_new_tail_shows_once_the_listing_expires() {
+        use object_store::memory::InMemory;
+        let ttl = std::time::Duration::from_millis(50);
+        let store = std::sync::Arc::new(InMemory::new());
+        let src = StorageSource::with_store(store.clone(), "c").with_listing_ttl(ttl);
+        put_segment(
+            &store,
+            &src,
+            0,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 0, 2, BATCH, 1, None)],
+        )
+        .await;
+        assert_eq!(src.watermark(SEG_TOPIC, 0).await.unwrap().high, 2);
+
+        put_segment(
+            &store,
+            &src,
+            1,
+            3,
+            1,
+            &[(SEG_TOPIC, 0, 2, 3, BATCH2, 2, None)],
+        )
+        .await;
+        assert_eq!(
+            src.watermark(SEG_TOPIC, 0).await.unwrap().high,
+            2,
+            "inside the TTL the listing is reused"
+        );
+        tokio::time::sleep(ttl).await;
+        assert_eq!(src.watermark(SEG_TOPIC, 0).await.unwrap().high, 5);
+    }
+
     /// #73: the cached high is a monotonic floor — it survives a segment
     /// disappearing, and a segment appended above it still raises the watermark.
     #[tokio::test]
     async fn cached_high_is_a_floor_and_still_catches_a_new_tail() {
         use object_store::{memory::InMemory, ObjectStore};
         let store = std::sync::Arc::new(InMemory::new());
-        let src = StorageSource::with_store(store.clone(), "c");
+        // Every read lists afresh: this is about the high cache, not about the
+        // listing's TTL (covered by `a_new_tail_shows_once_the_listing_expires`).
+        let src = StorageSource::with_store(store.clone(), "c")
+            .with_listing_ttl(std::time::Duration::ZERO);
 
         put_segment(
             &store,
