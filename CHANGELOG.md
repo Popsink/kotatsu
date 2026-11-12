@@ -4,7 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-11-12
+
+Detail reads on large connector prefixes (Popsink/data-plane#6096). Topic
+detail, watermarks, message pages and group detail re-listed the connector's
+whole prefix on every request, which took 8–30 s (and 504s) on the largest
+tenant. The listing is now reused for 10 s and shared by concurrent requests;
+`high` may lag the broker by up to that long.
 
 ### Fixed
 - **Topic detail, watermarks and group detail no longer re-list a large
