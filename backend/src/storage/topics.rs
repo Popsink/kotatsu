@@ -753,6 +753,9 @@ mod tests {
         inner: object_store::memory::InMemory,
         segment_lists: std::sync::atomic::AtomicUsize,
         metadata_gets: std::sync::atomic::AtomicUsize,
+        /// While set, a segment LIST waits before returning anything — a LIST
+        /// slower than the request that started it.
+        list_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl std::fmt::Display for CountingStore {
@@ -800,6 +803,16 @@ mod tests {
             if prefix.is_some_and(|p| p.as_ref().ends_with("/segments")) {
                 self.segment_lists
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let held = self.list_held.clone();
+                let listed = self.inner.list(prefix);
+                return futures::stream::once(async move {
+                    while held.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                    listed
+                })
+                .flatten()
+                .boxed();
             }
             self.inner.list(prefix)
         }
@@ -874,6 +887,7 @@ mod tests {
             inner: object_store::memory::InMemory::new(),
             segment_lists: Default::default(),
             metadata_gets: Default::default(),
+            list_held: Default::default(),
         });
         let src = StorageSource::with_store(store.clone(), "c");
         (store, src)
@@ -1005,6 +1019,34 @@ mod tests {
         src.topic_detail(a).await.unwrap();
         src.group_detail_on("g", None).await.unwrap();
         assert_eq!(segment_lists(&store), 1, "later reads reuse it");
+    }
+
+    /// Popsink/data-plane#6123: a LIST outliving the request that started it
+    /// (the API's 504 drops the request) still completes and fills the cache,
+    /// so the next request is served from it — one LIST in all. It used to be
+    /// cancelled with the request, and every request restarted it from zero.
+    #[tokio::test]
+    async fn a_listing_outliving_its_request_still_warms_the_cache() {
+        let (store, src) = counting_source();
+        let [_, _, c] = seed_connector(&store, &src).await;
+
+        store
+            .list_held
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let timed_out =
+            tokio::time::timeout(std::time::Duration::from_millis(20), src.topic_detail(c)).await;
+        assert!(timed_out.is_err(), "the request gave up mid-LIST");
+        store
+            .list_held
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let detail = src.topic_detail(c).await.unwrap();
+        assert_eq!(detail.messages, 4);
+        assert_eq!(
+            segment_lists(&store),
+            1,
+            "served by the LIST the first request started"
+        );
     }
 
     /// With a zero TTL every read lists, as before the cache: the cache is the

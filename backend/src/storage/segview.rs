@@ -268,28 +268,40 @@ impl StorageSource {
             slots.entry(prefix.to_string()).or_default().clone()
         };
 
-        let mut listing = slot.lock().await;
-        if let Some(l) = listing
-            .as_ref()
-            .filter(|l| l.at.elapsed() < self.listing_ttl)
-        {
-            return Ok((l.seqs.clone(), true));
-        }
-        let seqs: Arc<Vec<u64>> = Arc::new(
-            self.store()
-                .list(Some(&self.keys().segment_prefix(prefix)))
-                .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
-                .try_collect::<Vec<_>>()
-                .await?
-                .into_iter()
-                .flatten()
-                .collect(),
-        );
-        *listing = Some(Listing {
-            at: Instant::now(),
-            seqs: seqs.clone(),
-        });
-        Ok((seqs, false))
+        // The LIST runs in a task of its own, holding the slot. A request
+        // dropped mid-way — the API's 504 (Popsink/data-plane#6123) — does not
+        // cancel it: it completes and fills the slot for the next request,
+        // where on a prefix whose LIST outlasts the timeout it used to be
+        // restarted from zero every time. Callers arriving meanwhile wait on
+        // the slot and get its result, so the LIST stays single-flight.
+        let this = self.clone();
+        let prefix = prefix.to_string();
+        tokio::spawn(async move {
+            let mut listing = slot.lock().await;
+            if let Some(l) = listing
+                .as_ref()
+                .filter(|l| l.at.elapsed() < this.listing_ttl)
+            {
+                return Ok((l.seqs.clone(), true));
+            }
+            let seqs: Arc<Vec<u64>> = Arc::new(
+                this.store()
+                    .list(Some(&this.keys().segment_prefix(&prefix)))
+                    .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
+                    .try_collect::<Vec<_>>()
+                    .await?
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            );
+            *listing = Some(Listing {
+                at: Instant::now(),
+                seqs: seqs.clone(),
+            });
+            Ok((seqs, false))
+        })
+        .await
+        .map_err(|e| StorageError::Unreachable(format!("segment listing task failed: {e}")))?
     }
 
     /// Forgets a prefix's listing, so the next read lists it again — after a
