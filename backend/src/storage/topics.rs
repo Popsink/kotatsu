@@ -753,7 +753,12 @@ mod tests {
         inner: object_store::memory::InMemory,
         segment_lists: std::sync::atomic::AtomicUsize,
         metadata_gets: std::sync::atomic::AtomicUsize,
+        /// While set, a LIST under a segment prefix waits [`SLOW_LIST`] before
+        /// yielding anything — a LIST that outlasts its caller.
+        slow_lists: std::sync::atomic::AtomicBool,
     }
+
+    const SLOW_LIST: std::time::Duration = std::time::Duration::from_millis(300);
 
     impl std::fmt::Display for CountingStore {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -797,11 +802,22 @@ mod tests {
             prefix: Option<&object_store::path::Path>,
         ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
         {
-            if prefix.is_some_and(|p| p.as_ref().ends_with("/segments")) {
+            let segments = prefix.is_some_and(|p| p.as_ref().ends_with("/segments"));
+            if segments {
                 self.segment_lists
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
-            self.inner.list(prefix)
+            let listing = self.inner.list(prefix);
+            if segments && self.slow_lists.load(std::sync::atomic::Ordering::SeqCst) {
+                use futures::StreamExt;
+                return futures::stream::once(async move {
+                    tokio::time::sleep(SLOW_LIST).await;
+                    listing
+                })
+                .flatten()
+                .boxed();
+            }
+            listing
         }
         async fn list_with_delimiter(
             &self,
@@ -874,6 +890,7 @@ mod tests {
             inner: object_store::memory::InMemory::new(),
             segment_lists: Default::default(),
             metadata_gets: Default::default(),
+            slow_lists: Default::default(),
         });
         let src = StorageSource::with_store(store.clone(), "c");
         (store, src)
@@ -1005,6 +1022,26 @@ mod tests {
         src.topic_detail(a).await.unwrap();
         src.group_detail_on("g", None).await.unwrap();
         assert_eq!(segment_lists(&store), 1, "later reads reuse it");
+    }
+
+    /// Popsink/data-plane#6123: a caller dropped mid-LIST — the API timeout
+    /// answering 504 — does not cancel the LIST. It completes and fills the
+    /// cache, so the next caller joins it instead of listing from zero, and a
+    /// prefix whose LIST outlasts the timeout still warms.
+    #[tokio::test]
+    async fn a_listing_whose_caller_gives_up_still_fills_the_cache() {
+        let (store, src) = counting_source();
+        let [a, _, _] = seed_connector(&store, &src).await;
+        store
+            .slow_lists
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let gave_up = tokio::time::timeout(SLOW_LIST / 6, src.topic_detail(a)).await;
+        assert!(gave_up.is_err(), "the first caller is dropped mid-LIST");
+        assert_eq!(segment_lists(&store), 1, "the LIST had started");
+
+        assert_eq!(src.topic_detail(a).await.unwrap().messages, 2);
+        assert_eq!(segment_lists(&store), 1, "the next caller reuses that LIST");
     }
 
     /// With a zero TTL every read lists, as before the cache: the cache is the
