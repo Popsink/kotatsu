@@ -1,9 +1,10 @@
 # kotatsu
 
-Read-only, on-demand browser over [Tansu](https://github.com/Popsink/tansu)'s
-**native S3 storage**. Topics, events, consumer groups and simple stats are read
-directly from the object store Tansu writes to — **no Kafka broker, no Kafka
-client, no background polling**. Every read is triggered by a user action.
+Read-only, broker-less API and browser over [Kodansu](https://github.com/Popsink/kodansu)'s
+object storage (**S3 / GCS**): topics, events, consumer groups, offsets and lag,
+read straight from the bucket — **no Kafka broker, no Kafka client, no background
+polling**. Every read is triggered by a request. It also serves the data-plane's
+target-lag queries (see [Used by the data-plane](#used-by-the-data-plane)).
 
 Built with **Rust (Axum)** + **Nuxt 3**. Release history is in
 [`CHANGELOG.md`](CHANGELOG.md).
@@ -43,9 +44,17 @@ What that buys you today:
 
 ![Event browser](e2e/reports/screenshots/MSG-001-orders-messages.png)
 
+## Used by the data-plane
+
+Besides the UI, the Popsink data-plane queries this API for **target lag**: the
+committed offsets and per-partition lag of a target connector's consumer group,
+filtered to one topic with `GET /api/clusters/{cluster}/groups/{group}?topic=`
+(see [HTTP API](#http-api)). The data-plane authenticates with an mTLS client
+certificate (Popsink/data-plane#6095, #6096).
+
 ## Architecture
 
-Tansu persists everything to S3 under a known layout (`tansu-storage::dynostore`,
+Kodansu (a fork of Tansu) persists everything to the bucket under a known layout (`tansu-storage::dynostore`,
 documented in `Popsink/tansu:docs/virtual-topics-format.md`):
 
 ```

@@ -2,7 +2,7 @@
 name = "kotatsu"
 version = "0.14.0"
 edition = "2021"
-description = "Read-only, on-demand browser over Tansu's native S3 storage"
+description = "Read-only, broker-less API and browser over Kodansu's object storage (S3 / GCS): topics, events, consumer groups, offsets and lag"
 license = "Apache-2.0"
 
 [dependencies]
