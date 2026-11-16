@@ -50,7 +50,8 @@ pub(super) struct Listing {
 
 /// One slot per routed prefix. The outer lock only finds the slot; the slot's
 /// async lock is held across the LIST, so callers arriving meanwhile wait for
-/// that listing instead of starting their own (single-flight).
+/// that listing instead of starting their own (single-flight). The LIST runs
+/// detached from the caller, so a caller that gives up does not cancel it.
 pub(super) type SegmentListings =
     Arc<Mutex<HashMap<String, Arc<futures::lock::Mutex<Option<Listing>>>>>>;
 
@@ -268,28 +269,46 @@ impl StorageSource {
             slots.entry(prefix.to_string()).or_default().clone()
         };
 
-        let mut listing = slot.lock().await;
-        if let Some(l) = listing
-            .as_ref()
-            .filter(|l| l.at.elapsed() < self.listing_ttl)
-        {
-            return Ok((l.seqs.clone(), true));
-        }
-        let seqs: Arc<Vec<u64>> = Arc::new(
-            self.store()
-                .list(Some(&self.keys().segment_prefix(prefix)))
-                .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
-                .try_collect::<Vec<_>>()
-                .await?
-                .into_iter()
-                .flatten()
-                .collect(),
-        );
-        *listing = Some(Listing {
-            at: Instant::now(),
-            seqs: seqs.clone(),
+        // The LIST runs in a detached task that owns the slot, not in the
+        // request's future (Popsink/data-plane#6123). When the API timeout
+        // drops the request, the LIST carries on and fills the cache for the
+        // next caller; otherwise a prefix whose LIST outlasts the timeout
+        // would be listed from zero on every request and never warm. Callers
+        // arriving meanwhile still queue on the slot's lock and join it.
+        let this = self.clone();
+        let prefix = prefix.to_string();
+        let listing = tokio::spawn(async move {
+            let mut listing = slot.lock().await;
+            if let Some(l) = listing
+                .as_ref()
+                .filter(|l| l.at.elapsed() < this.listing_ttl)
+            {
+                return Ok((l.seqs.clone(), true));
+            }
+            let seqs: Arc<Vec<u64>> = Arc::new(
+                this.store()
+                    .list(Some(&this.keys().segment_prefix(&prefix)))
+                    .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
+                    .try_collect::<Vec<_>>()
+                    .await?
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            );
+            *listing = Some(Listing {
+                at: Instant::now(),
+                seqs: seqs.clone(),
+            });
+            Ok((seqs, false))
         });
-        Ok((seqs, false))
+        match listing.await {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            // Only on runtime shutdown.
+            Err(e) => Err(StorageError::Unreachable(format!(
+                "segment listing aborted: {e}"
+            ))),
+        }
     }
 
     /// Forgets a prefix's listing, so the next read lists it again — after a
