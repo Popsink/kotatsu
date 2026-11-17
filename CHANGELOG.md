@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-11-17
+
+A connector prefix whose LIST outlasts the API timeout (Popsink/data-plane#6123).
+
+### Fixed
+- **A prefix whose LIST takes longer than the 30 s API timeout no longer
+  returns 504 on every request** (Popsink/data-plane#6123) — the segment
+  listing runs in a detached task that owns the prefix's cache slot. A request
+  that times out no longer cancels it: it completes and fills the listing cache
+  for the next request, instead of being restarted from zero each time.
+
+### Changed
+- **Description** (Popsink/data-plane#6181) — Kotatsu is described as the
+  Kodansu S3/GCS API and browser used by the data-plane, in the README and the
+  crate metadata.
+
 ## [0.14.0] - 2026-11-12
 
 Detail reads on large connector prefixes (Popsink/data-plane#6096). Topic

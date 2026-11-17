@@ -1,6 +1,6 @@
 [package]
 name = "kotatsu"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 description = "Read-only, broker-less API and browser over Kodansu's object storage (S3 / GCS): topics, events, consumer groups, offsets and lag"
 license = "Apache-2.0"
