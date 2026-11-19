@@ -156,9 +156,39 @@ pub fn decode_batch(
     partition: i32,
 ) -> Result<Vec<DecodedRecord>, StorageError> {
     let mut out = Vec::new();
+    decode_window(
+        bytes,
+        base_offset,
+        partition,
+        i64::MIN..i64::MAX,
+        usize::MAX,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+/// Decodes only the records of a region in `window` (absolute offsets),
+/// appending them to `out` until it holds `limit` records.
+///
+/// A sub-batch wholly below the window is skipped **without being inflated**,
+/// and decoding stops at the first sub-batch past the window or once `out` is
+/// full. A busy topic's region can hold tens of thousands of records: inflating
+/// all of them to return 20 cost seconds and blew the pod's memory
+/// (`messages?offset=earliest` on a large topic was OOMKilled).
+pub fn decode_window(
+    bytes: Bytes,
+    base_offset: i64,
+    partition: i32,
+    window: std::ops::Range<i64>,
+    limit: usize,
+    out: &mut Vec<DecodedRecord>,
+) -> Result<(), StorageError> {
     let mut sub_base = base_offset;
 
     for slice in split_frame(&bytes) {
+        if out.len() >= limit || sub_base >= window.end {
+            break;
+        }
         let deflated =
             deflated::Batch::try_from(slice).map_err(|e| StorageError::Decode(e.to_string()))?;
         // The offset span of this sub-batch, captured before `deflated` is
@@ -166,7 +196,7 @@ pub fn decode_batch(
         // batches, which occupy offsets but carry no user records.
         let span = deflated.last_offset_delta as i64 + 1;
 
-        if deflated.is_control() {
+        if deflated.is_control() || sub_base + span <= window.start {
             sub_base += span;
             continue;
         }
@@ -175,28 +205,34 @@ pub fn decode_batch(
             inflated::Batch::try_from(deflated).map_err(|e| StorageError::Decode(e.to_string()))?;
         let base_timestamp = inflated.base_timestamp;
 
-        out.extend(inflated.records.into_iter().map(|r| {
-            DecodedRecord {
-                offset: sub_base + r.offset_delta as i64,
-                partition,
-                timestamp: base_timestamp + r.timestamp_delta,
-                key: r.key,
-                value: r.value,
-                headers: r
-                    .headers
-                    .into_iter()
-                    .map(|h| RecordHeader {
-                        key: h.key,
-                        value: h.value,
-                    })
-                    .collect(),
-            }
-        }));
+        let room = limit - out.len();
+        out.extend(
+            inflated
+                .records
+                .into_iter()
+                .filter(|r| window.contains(&(sub_base + r.offset_delta as i64)))
+                .take(room)
+                .map(|r| DecodedRecord {
+                    offset: sub_base + r.offset_delta as i64,
+                    partition,
+                    timestamp: base_timestamp + r.timestamp_delta,
+                    key: r.key,
+                    value: r.value,
+                    headers: r
+                        .headers
+                        .into_iter()
+                        .map(|h| RecordHeader {
+                            key: h.key,
+                            value: h.value,
+                        })
+                        .collect(),
+                }),
+        );
 
         sub_base += span;
     }
 
-    Ok(out)
+    Ok(())
 }
 
 /// Serializes optional bytes as a UTF-8 string when valid, else hex — matching
@@ -309,6 +345,39 @@ mod tests {
             records.iter().map(|r| r.offset).collect::<Vec<_>>(),
             [100, 101, 102]
         );
+    }
+
+    fn window(bytes: Bytes, window: std::ops::Range<i64>, limit: usize) -> Vec<i64> {
+        let mut out = Vec::new();
+        decode_window(bytes, 100, 0, window, limit, &mut out).unwrap();
+        out.iter().map(|r| r.offset).collect()
+    }
+
+    /// Only the records in the window, and no more than the limit.
+    #[test]
+    fn decode_window_keeps_the_window_and_stops_at_the_limit() {
+        let three = || coalesced(&[OFFSET_0, OFFSET_2, OFFSET_4]);
+        assert_eq!(window(three(), 101..103, usize::MAX), [101, 102]);
+        assert_eq!(window(three(), 100..103, 2), [100, 101]);
+        assert_eq!(window(three(), 100..101, usize::MAX), [100]);
+        assert!(window(three(), 103..200, usize::MAX).is_empty());
+    }
+
+    /// A sub-batch below the window is skipped without being inflated: its
+    /// record payload is garbage here, and decoding still succeeds.
+    #[test]
+    fn decode_window_does_not_inflate_a_sub_batch_below_the_window() {
+        let mut garbled = OFFSET_0.to_vec();
+        let n = garbled.len();
+        for b in &mut garbled[n - 8..] {
+            *b = 0xff;
+        }
+        assert!(
+            decode_batch(Bytes::from(garbled.clone()), 100, 0).is_err(),
+            "the garbled batch does not decode"
+        );
+        let mixed = coalesced(&[&garbled, OFFSET_2]);
+        assert_eq!(window(mixed, 101..102, usize::MAX), [101]);
     }
 
     #[test]

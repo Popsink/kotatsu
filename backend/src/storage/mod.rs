@@ -55,7 +55,7 @@ pub struct StorageSource {
     /// (see [`Self::segment_listings`]); this only spares re-reading a footer
     /// already seen. Shared across
     /// clones via the `Arc`.
-    segment_footers: Arc<Mutex<HashMap<String, segment::SegmentFooter>>>,
+    segment_footers: Arc<Mutex<HashMap<String, Arc<segment::SegmentFooter>>>>,
     /// Cached topic catalog (name index + per-row summaries) for the list/search
     /// views, short-TTL and lazily warmed (#84). `None` until first filled.
     topic_catalog: Arc<Mutex<Option<catalog::Catalog<TopicSummary>>>>,

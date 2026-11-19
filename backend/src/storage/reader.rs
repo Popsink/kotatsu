@@ -20,7 +20,7 @@
 use serde::Deserialize;
 
 use super::{
-    model::{decode_batch, DecodedRecord, OffsetSpec, Watermark},
+    model::{decode_window, DecodedRecord, OffsetSpec, Watermark},
     StorageError, StorageSource,
 };
 
@@ -290,14 +290,7 @@ impl StorageSource {
             let Some(bytes) = self.read_segment_region(piece).await? else {
                 return Ok(false); // compaction race
             };
-            for record in decode_batch(bytes, piece.base_offset, partition)? {
-                if record.offset >= lo && record.offset < hi {
-                    out.push(record);
-                    if out.len() >= limit {
-                        break;
-                    }
-                }
-            }
+            decode_window(bytes, piece.base_offset, partition, lo..hi, limit, out)?;
         }
         Ok(true)
     }

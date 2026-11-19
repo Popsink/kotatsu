@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A message page on a large topic no longer runs the pod out of memory**
+  (OOMKilled at 256Mi on 19/11) — a segment region is decoded only over the
+  requested window: sub-batches below it are skipped without being inflated,
+  and decoding stops at the end of the window or once the page is full. It
+  used to inflate and decode every record of the region (tens of thousands on
+  a busy topic) to return 20, which also made `earliest` pages slow.
+- **Segment footers are shared with their cache instead of copied out of it**
+  on every read — a large prefix's thousands of footers were deep-copied per
+  request, and per concurrent request.
+
 ## [0.14.1] - 2026-11-17
 
 A connector prefix whose LIST outlasts the API timeout (Popsink/data-plane#6123).
