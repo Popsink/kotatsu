@@ -4,7 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.2] - 2026-11-19
+
+Memory on large topics: a message page no longer inflates a whole segment
+region, and cached footers are shared instead of copied per read. A pod was
+OOMKilled at 256Mi by one `earliest` page on a large topic.
 
 ### Fixed
 - **A message page on a large topic no longer runs the pod out of memory**
