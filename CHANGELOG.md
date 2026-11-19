@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A large connector prefix no longer takes ~30 s to read**
+  (Popsink/data-plane#6096) — `topic()` took up to 28 s on the largest tenant,
+  each time the 10 s listing cache had expired:
+  - past the TTL, a prefix's listing is brought up to date **incrementally**,
+    one LIST page from the highest known sequence (Kodansu only creates
+    segments above it, and never reuses a sequence), instead of the whole
+    prefix again;
+  - a **full** listing — needed only to drop deleted segments — runs every
+    5 min in the background, while requests are served incrementally;
+  - a full listing of a prefix larger than one LIST page is cut into 16
+    sequence ranges listed side by side, instead of paging through it one
+    page after the other.
+
 ## [0.14.2] - 2026-11-19
 
 Memory on large topics: a message page no longer inflates a whole segment

@@ -85,6 +85,8 @@ pub struct StorageSource {
     segment_listings: segview::SegmentListings,
     /// How long a prefix listing is served from [`Self::segment_listings`].
     listing_ttl: std::time::Duration,
+    /// How often a prefix is listed again in full, in the background.
+    full_listing_interval: std::time::Duration,
 }
 
 impl StorageSource {
@@ -148,6 +150,7 @@ impl StorageSource {
             group_assignments: Arc::new(Mutex::new(HashMap::new())),
             segment_listings: Default::default(),
             listing_ttl: segview::LISTING_TTL,
+            full_listing_interval: segview::FULL_LISTING_INTERVAL,
         })
     }
 
@@ -170,6 +173,7 @@ impl StorageSource {
             group_assignments: Arc::new(Mutex::new(HashMap::new())),
             segment_listings: Default::default(),
             listing_ttl: segview::LISTING_TTL,
+            full_listing_interval: segview::FULL_LISTING_INTERVAL,
         }
     }
 
@@ -178,6 +182,13 @@ impl StorageSource {
     #[cfg(test)]
     pub(crate) fn with_listing_ttl(mut self, ttl: std::time::Duration) -> Self {
         self.listing_ttl = ttl;
+        self
+    }
+
+    /// Overrides how often a prefix is listed again in full.
+    #[cfg(test)]
+    pub(crate) fn with_full_listing_interval(mut self, interval: std::time::Duration) -> Self {
+        self.full_listing_interval = interval;
         self
     }
 

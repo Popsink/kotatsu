@@ -37,26 +37,54 @@ use super::{
 /// and copying them all on every read dominated the pod's memory.
 pub(super) type PrefixFooters = Vec<(u64, Arc<SegmentFooter>)>;
 
-/// How long a prefix's segment listing is reused (Popsink/data-plane#6096).
+/// How long a prefix's segment listing is served as is (Popsink/data-plane#6096).
 ///
 /// It bounds how stale a served `high` can be: a segment flushed after the
-/// listing is invisible until it expires. Tighter than the catalog's 45 s
-/// (#84) for that reason; target lag polls every 30 s, and the Stream tab is
-/// not a live tail.
+/// listing is invisible until it expires. Past it, the listing is brought up
+/// to date incrementally — one LIST page from the highest sequence known —
+/// so a short TTL costs little.
 pub(super) const LISTING_TTL: Duration = Duration::from_secs(10);
+
+/// How often a prefix is listed again **in full** (Popsink/data-plane#6096).
+///
+/// An incremental refresh only sees segments created above the highest known
+/// sequence — the only place Kodansu creates them, compaction included: a
+/// segment is created at `max(tail + 1, seq floor)` and a sequence is never
+/// reused. What it cannot see is a deletion (retention, or the segments a
+/// compaction replaced), so a deleted segment stays listed — `low` and the
+/// message count lag — until the next full listing. That listing runs in the
+/// background: the request that finds it due is served incrementally.
+pub(super) const FULL_LISTING_INTERVAL: Duration = Duration::from_secs(300);
+
+/// A prefix not read for this long is forgotten, and listed in full on its
+/// next read. Kept well above [`LISTING_TTL`]: the listing is what makes the
+/// next refresh incremental.
+const LISTING_IDLE: Duration = Duration::from_secs(900);
+
+/// Keys one LIST request returns (S3 and GCS both page by 1000).
+const LIST_PAGE: usize = 1000;
+
+/// Ranges a large prefix is listed in, side by side, on a full listing.
+pub(super) const LIST_RANGES: usize = 16;
 
 /// A prefix's segment sequences, as last listed.
 pub(super) struct Listing {
+    /// Last brought up to date, fully or incrementally.
     at: Instant,
+    /// When the last full listing started — what it saw is at least that fresh.
+    full_at: Instant,
+    /// Ascending.
     seqs: Arc<Vec<u64>>,
+    /// A background full listing is running.
+    full_in_flight: bool,
 }
 
 /// One slot per routed prefix. The outer lock only finds the slot; the slot's
-/// async lock is held across the LIST, so callers arriving meanwhile wait for
-/// that listing instead of starting their own (single-flight). The LIST runs
-/// detached from the caller, so a caller that gives up does not cancel it.
-pub(super) type SegmentListings =
-    Arc<Mutex<HashMap<String, Arc<futures::lock::Mutex<Option<Listing>>>>>>;
+/// async lock is held across a refresh, so callers arriving meanwhile wait for
+/// it instead of starting their own (single-flight). A refresh runs detached
+/// from the caller, so a caller that gives up does not cancel it.
+pub(super) type Slot = Arc<futures::lock::Mutex<Option<Listing>>>;
+pub(super) type SegmentListings = Arc<Mutex<HashMap<String, Slot>>>;
 
 /// One sub-stream's slice of a prefix, per partition: its resolved segment view
 /// and the bytes it occupies. Partitions with no slice are absent from both.
@@ -229,10 +257,11 @@ impl StorageSource {
     /// are folded from this one listing, for every partition — and, in a topic
     /// listing, for every row under the same prefix.
     ///
-    /// The listing itself is reused for [`LISTING_TTL`]. A segment that a
-    /// reused listing names but that compaction has since deleted reads as no
-    /// footer: the listing is then dropped and taken again once, so the
-    /// segment that replaced it is not missed for the rest of the TTL.
+    /// The listing itself is reused for [`LISTING_TTL`], then brought up to
+    /// date incrementally (see [`FULL_LISTING_INTERVAL`]). A segment that a
+    /// reused listing names but that has since been deleted, and whose footer
+    /// was never read, reads as no footer: the listing is then dropped and
+    /// taken again in full once.
     pub(super) async fn prefix_footers(&self, prefix: &str) -> Result<PrefixFooters, StorageError> {
         let (seqs, reused) = self.segment_seqs(prefix).await?;
         let footers = self.footers_of(prefix, &seqs).await?;
@@ -253,27 +282,27 @@ impl StorageSource {
             .map(|footers| footers.into_iter().flatten().collect())
     }
 
-    /// The prefix's segment sequences, and whether they came from a listing
-    /// taken earlier rather than by this call.
+    /// The prefix's segment sequences, ascending, and whether part of them
+    /// comes from a listing taken earlier rather than by this call.
     async fn segment_seqs(&self, prefix: &str) -> Result<(Arc<Vec<u64>>, bool), StorageError> {
         let slot = {
             let mut slots = self
                 .segment_listings
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let ttl = self.listing_ttl;
-            // Expired listings are dropped on the way, so the map holds only
-            // prefixes read within the TTL. A slot someone holds is kept.
+            // Listings idle past LISTING_IDLE are dropped on the way. A slot
+            // someone holds is kept.
+            let idle = LISTING_IDLE.max(self.listing_ttl);
             slots.retain(|_, slot| {
                 Arc::strong_count(slot) > 1
                     || slot
                         .try_lock()
-                        .is_some_and(|l| l.as_ref().is_some_and(|l| l.at.elapsed() < ttl))
+                        .is_some_and(|l| l.as_ref().is_some_and(|l| l.at.elapsed() < idle))
             });
             slots.entry(prefix.to_string()).or_default().clone()
         };
 
-        // The LIST runs in a detached task that owns the slot, not in the
+        // The refresh runs in a detached task that owns the slot, not in the
         // request's future (Popsink/data-plane#6123). When the API timeout
         // drops the request, the LIST carries on and fills the cache for the
         // next caller; otherwise a prefix whose LIST outlasts the timeout
@@ -282,28 +311,40 @@ impl StorageSource {
         let this = self.clone();
         let prefix = prefix.to_string();
         let listing = tokio::spawn(async move {
-            let mut listing = slot.lock().await;
-            if let Some(l) = listing
-                .as_ref()
-                .filter(|l| l.at.elapsed() < this.listing_ttl)
-            {
-                return Ok((l.seqs.clone(), true));
+            let mut guard = slot.lock().await;
+            let Some(listing) = guard.as_mut() else {
+                let started = Instant::now();
+                let seqs = Arc::new(this.list_seqs(&prefix, None).await?);
+                *guard = Some(Listing {
+                    at: Instant::now(),
+                    full_at: started,
+                    seqs: seqs.clone(),
+                    full_in_flight: false,
+                });
+                return Ok((seqs, false));
+            };
+            if listing.at.elapsed() < this.listing_ttl {
+                return Ok((listing.seqs.clone(), true));
             }
-            let seqs: Arc<Vec<u64>> = Arc::new(
-                this.store()
-                    .list(Some(&this.keys().segment_prefix(&prefix)))
-                    .map(|meta| meta.map(|m| Keys::seq_from_segment(&m.location)))
-                    .try_collect::<Vec<_>>()
-                    .await?
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-            );
-            *listing = Some(Listing {
-                at: Instant::now(),
-                seqs: seqs.clone(),
-            });
-            Ok((seqs, false))
+
+            // Only what was created since: one LIST page, however large the
+            // prefix, where a full listing of a busy connector runs to many.
+            let added = this
+                .list_seqs(&prefix, listing.seqs.last().copied())
+                .await?;
+            if !added.is_empty() {
+                let mut seqs = Vec::with_capacity(listing.seqs.len() + added.len());
+                seqs.extend_from_slice(&listing.seqs);
+                seqs.extend(added);
+                listing.seqs = Arc::new(seqs);
+            }
+            listing.at = Instant::now();
+            if listing.full_at.elapsed() >= this.full_listing_interval && !listing.full_in_flight {
+                listing.full_in_flight = true;
+                let known = listing.seqs.last().copied();
+                this.spawn_full_listing(prefix.clone(), slot.clone(), known);
+            }
+            Ok((listing.seqs.clone(), true))
         });
         match listing.await {
             Ok(result) => result,
@@ -313,6 +354,153 @@ impl StorageSource {
                 "segment listing aborted: {e}"
             ))),
         }
+    }
+
+    /// Lists a prefix again in full, without holding its slot — a busy
+    /// prefix's full LIST can outlast a request, and readers keep being served
+    /// from the incremental listing meanwhile — then swaps it in.
+    ///
+    /// `known` is the highest sequence listed when it started. Of the cached
+    /// sequences, only those above it are kept on top of the full listing:
+    /// they were created after it started (sequences only grow), so it may
+    /// have missed them. Anything at or below `known` that the full listing
+    /// did not see is gone.
+    fn spawn_full_listing(&self, prefix: String, slot: Slot, known: Option<u64>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let full = this.list_seqs(&prefix, None).await;
+            let mut guard = slot.lock().await;
+            let Some(listing) = guard.as_mut() else {
+                return;
+            };
+            listing.full_in_flight = false;
+            if let Ok(mut seqs) = full {
+                let floor = seqs.last().copied().max(known);
+                seqs.extend(
+                    listing
+                        .seqs
+                        .iter()
+                        .copied()
+                        .filter(|s| floor.is_none_or(|floor| *s > floor)),
+                );
+                listing.seqs = Arc::new(seqs);
+                listing.full_at = started;
+            }
+        });
+    }
+
+    /// The segment sequences under a prefix, ascending — all of them, or only
+    /// those above `after` (an incremental refresh: one LIST page).
+    pub(super) async fn list_seqs(
+        &self,
+        prefix: &str,
+        after: Option<u64>,
+    ) -> Result<Vec<u64>, StorageError> {
+        let mut seqs = match after {
+            Some(after) => self.list_range(prefix, Some(after), None).await?,
+            None => self.list_all(prefix).await?,
+        };
+        seqs.retain(|seq| after.is_none_or(|after| *seq > after));
+        seqs.sort_unstable();
+        seqs.dedup();
+        Ok(seqs)
+    }
+
+    /// Every segment sequence under a prefix.
+    ///
+    /// A plain LIST pages through the prefix one page after the other, so a
+    /// busy connector's prefix — hundreds of thousands of segments — took
+    /// ~30 s to list. Segment names are zero-padded sequences, so the store
+    /// lists them in sequence order and a listing can start at any sequence:
+    /// past the first page, the prefix is cut into [`LIST_RANGES`] ranges
+    /// listed side by side. A prefix that fits in one page is listed in one
+    /// LIST, as before.
+    async fn list_all(&self, prefix: &str) -> Result<Vec<u64>, StorageError> {
+        let mut head = Vec::new();
+        let mut listed = self.store().list(Some(&self.keys().segment_prefix(prefix)));
+        while let Some(meta) = listed.next().await {
+            if let Some(seq) = Keys::seq_from_segment(&meta?.location) {
+                head.push(seq);
+            }
+            if head.len() >= LIST_PAGE {
+                break;
+            }
+        }
+        // Stop before the stream asks for a second page.
+        drop(listed);
+        let Some(&last) = head.iter().max().filter(|_| head.len() >= LIST_PAGE) else {
+            return Ok(head);
+        };
+
+        // An upper bound on the tail: probe `last + span`, doubling the span,
+        // until nothing lies above. One request per probe, ~log2(segments).
+        let mut span = LIST_PAGE as u64;
+        while last.checked_add(span).is_some()
+            && self.first_above(prefix, last + span).await?.is_some()
+        {
+            span = span.saturating_mul(2);
+        }
+
+        // (last, last + span] in equal ranges, the last one open-ended — so a
+        // segment created meanwhile, or above a sequence-floor jump, is still
+        // listed.
+        let width = (span / LIST_RANGES as u64).max(1);
+        let ranges = (0..LIST_RANGES as u64).map(|i| {
+            let from = last.saturating_add(i * width);
+            let until = (i + 1 < LIST_RANGES as u64).then(|| from.saturating_add(width + 1));
+            (from, until)
+        });
+        let rest: Vec<Vec<u64>> = futures::stream::iter(ranges)
+            .map(|(from, until)| self.list_range(prefix, Some(from), until))
+            .buffer_unordered(LIST_RANGES)
+            .try_collect()
+            .await?;
+        head.extend(rest.into_iter().flatten());
+        Ok(head)
+    }
+
+    /// The sequences in `(after, until)` — from the start without `after`, to
+    /// the end without `until`. Stops at `until` without reading past it,
+    /// relying on the store listing in key order (S3, GCS).
+    async fn list_range(
+        &self,
+        prefix: &str,
+        after: Option<u64>,
+        until: Option<u64>,
+    ) -> Result<Vec<u64>, StorageError> {
+        let dir = self.keys().segment_prefix(prefix);
+        let mut listed = match after {
+            Some(seq) => self
+                .store()
+                .list_with_offset(Some(&dir), &self.keys().segment(prefix, seq)),
+            None => self.store().list(Some(&dir)),
+        };
+        let mut seqs = Vec::new();
+        while let Some(meta) = listed.next().await {
+            let Some(seq) = Keys::seq_from_segment(&meta?.location) else {
+                continue;
+            };
+            if until.is_some_and(|until| seq >= until) {
+                break;
+            }
+            seqs.push(seq);
+        }
+        Ok(seqs)
+    }
+
+    /// The first sequence above `after`, if any — one LIST request.
+    async fn first_above(&self, prefix: &str, after: u64) -> Result<Option<u64>, StorageError> {
+        let mut listed = self.store().list_with_offset(
+            Some(&self.keys().segment_prefix(prefix)),
+            &self.keys().segment(prefix, after),
+        );
+        while let Some(meta) = listed.next().await {
+            if let Some(seq) = Keys::seq_from_segment(&meta?.location) {
+                return Ok(Some(seq));
+            }
+        }
+        Ok(None)
     }
 
     /// Forgets a prefix's listing, so the next read lists it again — after a
