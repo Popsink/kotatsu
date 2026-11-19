@@ -32,7 +32,10 @@ use super::{
 };
 
 /// A prefix's live multi-topic segments, `(seq, footer)`, in listing order.
-pub(super) type PrefixFooters = Vec<(u64, SegmentFooter)>;
+/// Footers are shared with the cache (`Arc`), not copied out of it: a large
+/// prefix holds thousands of them, each listing every sub-stream it carries,
+/// and copying them all on every read dominated the pod's memory.
+pub(super) type PrefixFooters = Vec<(u64, Arc<SegmentFooter>)>;
 
 /// How long a prefix's segment listing is reused (Popsink/data-plane#6096).
 ///
@@ -128,7 +131,7 @@ impl StorageSource {
         &self,
         prefix: &str,
         seq: u64,
-    ) -> Result<Option<SegmentFooter>, StorageError> {
+    ) -> Result<Option<Arc<SegmentFooter>>, StorageError> {
         let path = self.keys().segment(prefix, seq);
         let key = path.as_ref().to_string();
 
@@ -158,6 +161,7 @@ impl StorageSource {
             }
         };
 
+        let footer = Arc::new(footer);
         if let Ok(mut cache) = self.segment_footers.lock() {
             cache.insert(key, footer.clone());
         }
@@ -342,7 +346,7 @@ impl StorageSource {
 /// shared segment and never a sibling's — nor, since it is charged by the same
 /// identity it is read by (#118), a retired incarnation of its own name's.
 pub(super) fn substream_segments(
-    footers: &[(u64, SegmentFooter)],
+    footers: &[(u64, Arc<SegmentFooter>)],
     prefix: &str,
     substream: SubstreamId<'_>,
 ) -> TopicSegments {
