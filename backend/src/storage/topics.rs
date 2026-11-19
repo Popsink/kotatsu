@@ -756,6 +756,9 @@ mod tests {
         /// While set, a LIST under a segment prefix waits [`SLOW_LIST`] before
         /// yielding anything — a LIST that outlasts its caller.
         slow_lists: std::sync::atomic::AtomicBool,
+        /// Segment listings that start after a key (incremental refreshes,
+        /// probes and parallel ranges), counted apart from `segment_lists`.
+        offset_lists: std::sync::atomic::AtomicUsize,
     }
 
     const SLOW_LIST: std::time::Duration = std::time::Duration::from_millis(300);
@@ -818,6 +821,18 @@ mod tests {
                 .boxed();
             }
             listing
+        }
+        fn list_with_offset(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+            offset: &object_store::path::Path,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            if prefix.is_some_and(|p| p.as_ref().ends_with("/segments")) {
+                self.offset_lists
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.list_with_offset(prefix, offset)
         }
         async fn list_with_delimiter(
             &self,
@@ -891,6 +906,7 @@ mod tests {
             segment_lists: Default::default(),
             metadata_gets: Default::default(),
             slow_lists: Default::default(),
+            offset_lists: Default::default(),
         });
         let src = StorageSource::with_store(store.clone(), "c");
         (store, src)
@@ -900,6 +916,10 @@ mod tests {
         store
             .segment_lists
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn offset_lists(store: &CountingStore) -> usize {
+        store.offset_lists.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn metadata_gets(store: &CountingStore) -> usize {
@@ -958,7 +978,9 @@ mod tests {
 
         let detail = src.group_detail_on("g", None).await.unwrap();
 
-        assert_eq!(segment_lists(&store), 3);
+        // One listing per topic: the first in full, the next two refreshing
+        // it incrementally (#6096).
+        assert_eq!(segment_lists(&store) + offset_lists(&store), 3);
         let rows: Vec<(&str, i32, i64, i64)> = detail
             .offsets
             .iter()
@@ -1044,18 +1066,107 @@ mod tests {
         assert_eq!(segment_lists(&store), 1, "the next caller reuses that LIST");
     }
 
-    /// With a zero TTL every read lists, as before the cache: the cache is the
-    /// only thing sparing the LISTs.
+    /// With a zero TTL every read brings the listing up to date — but past
+    /// the first, incrementally: one page from the highest known sequence,
+    /// not the whole prefix again.
     #[tokio::test]
-    async fn a_zero_ttl_lists_on_every_read() {
+    async fn past_the_ttl_a_listing_is_refreshed_incrementally() {
+        use object_store::{ObjectStore, PutPayload};
         let (store, src) = counting_source();
         let src = src.with_listing_ttl(std::time::Duration::ZERO);
         let [a, b, _] = seed_connector(&store, &src).await;
 
-        src.topic_detail(a).await.unwrap();
+        assert_eq!(src.topic_detail(a).await.unwrap().messages, 2);
         src.topic_detail(b).await.unwrap();
-        src.topic_detail(a).await.unwrap();
-        assert_eq!(segment_lists(&store), 3);
+        assert_eq!((segment_lists(&store), offset_lists(&store)), (1, 1));
+
+        // A segment flushed since: a's partition 0 gains a record.
+        let ten = [0u8; 10];
+        let segment = super::super::segment::build_test_segment(
+            3,
+            1,
+            &[(a, 0, 1, 1, ten.as_slice(), 3, None)],
+        );
+        store
+            .put(
+                &src.keys().segment("acme.prod.db2", 2),
+                PutPayload::from(segment.to_vec()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(src.topic_detail(a).await.unwrap().messages, 3);
+        assert_eq!(
+            (segment_lists(&store), offset_lists(&store)),
+            (1, 2),
+            "still one full listing"
+        );
+    }
+
+    /// An incremental refresh cannot see a deletion, so a full listing runs
+    /// in the background once the full-listing interval has passed: a
+    /// segment retention deleted drops out of the view.
+    #[tokio::test]
+    async fn a_background_full_listing_drops_a_deleted_segment() {
+        use object_store::ObjectStore;
+        let (store, src) = counting_source();
+        let src = src
+            .with_listing_ttl(std::time::Duration::ZERO)
+            .with_full_listing_interval(std::time::Duration::ZERO);
+        let [_, _, c] = seed_connector(&store, &src).await;
+        assert_eq!(src.topic_detail(c).await.unwrap().messages, 4);
+
+        store
+            .delete(&src.keys().segment("acme.prod.db2", 1))
+            .await
+            .unwrap();
+        // Served from the incremental listing (segment 1 still named, its
+        // footer cached) while the full listing runs behind it.
+        let mut messages = 4;
+        for _ in 0..100 {
+            messages = src.topic_detail(c).await.unwrap().messages;
+            if messages == 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(messages, 3, "segment 1 dropped from the view");
+        assert!(segment_lists(&store) >= 2, "listed in full again");
+    }
+
+    /// A prefix larger than one LIST page is listed in ranges side by side —
+    /// one plain LIST for the first page, then probes and ranges that start
+    /// at a sequence — and every sequence is found, across a gap.
+    #[tokio::test]
+    async fn a_large_prefix_is_listed_in_parallel_ranges() {
+        use object_store::{ObjectStore, PutPayload};
+        let (store, src) = counting_source();
+        let seqs: Vec<u64> = (0..2_000).chain(9_000..10_500).collect();
+        for &seq in &seqs {
+            store
+                .put(
+                    &src.keys().segment("acme.prod.big", seq),
+                    PutPayload::from_static(b"x"),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(src.list_seqs("acme.prod.big", None).await.unwrap(), seqs);
+        assert_eq!(
+            segment_lists(&store),
+            1,
+            "one plain LIST, for the first page"
+        );
+        assert!(
+            offset_lists(&store) > super::super::segview::LIST_RANGES,
+            "probes, then the ranges"
+        );
+
+        // A small prefix is still one LIST.
+        let (store, src) = counting_source();
+        seed_connector(&store, &src).await;
+        assert_eq!(src.list_seqs("acme.prod.db2", None).await.unwrap(), [0, 1]);
+        assert_eq!((segment_lists(&store), offset_lists(&store)), (1, 0));
     }
 
     /// A reused listing that names a segment compaction deleted, whose footer

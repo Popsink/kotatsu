@@ -25,8 +25,11 @@ Four constraints shape every feature below:
   filled lazily by those same requests, so a new topic can take that long to
   appear in a listing. Detail reads reuse each connector prefix's **segment
   listing for 10 s** (`backend/src/storage/segview.rs`), so a just-flushed
-  segment — and the `high` it carries — can take that long to show; footers
-  and records are read exactly.
+  segment — and the `high` it carries — can take that long to show; past it
+  the listing is brought up to date incrementally, from the highest known
+  sequence. The one exception to "nothing in the background": a prefix being
+  read is listed again in full every 5 min, behind the requests, to drop the
+  segments retention deleted. Footers and records are read exactly.
 - **Bounded scans.** A filtered read has a scan budget and stops at it, so no
   query can turn into an unbounded walk of the store.
 
