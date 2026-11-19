@@ -4,7 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-11-19
+
+Prefix listings on large connectors (Popsink/data-plane#6096). A topic read
+took up to 28 s whenever the 10 s listing cache had expired, because the whole
+prefix was paged through again. Listings are now refreshed incrementally, a
+full listing runs in the background every 5 min, and a full listing of a large
+prefix is split into ranges listed side by side.
 
 ### Fixed
 - **A large connector prefix no longer takes ~30 s to read**
