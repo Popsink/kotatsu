@@ -28,7 +28,7 @@ use super::{
     segment::{
         decode_segment_footer, FooterOutcome, SegmentFooter, SubstreamId, SEGMENT_FOOTER_OVER_READ,
     },
-    StorageError, StorageSource, FANOUT,
+    StorageError, StorageSource,
 };
 
 /// A prefix's live multi-topic segments, `(seq, footer)`, in listing order.
@@ -60,6 +60,15 @@ pub(super) const FULL_LISTING_INTERVAL: Duration = Duration::from_secs(300);
 /// next read. Kept well above [`LISTING_TTL`]: the listing is what makes the
 /// next refresh incremental.
 const LISTING_IDLE: Duration = Duration::from_secs(900);
+
+/// Segment footers read side by side on a cold pass over a prefix.
+///
+/// A cold prefix means one footer GET per segment, and a busy connector's
+/// prefix holds thousands: at [`super::FANOUT`] (8) at a time the first read of the
+/// largest prefixes took ~27 s, round trip after round trip. A footer read is
+/// one bounded ranged GET (`SEGMENT_FOOTER_OVER_READ`, 64 KiB), so 64 in
+/// flight is at most 4 MiB per prefix being read.
+const FOOTER_FANOUT: usize = 64;
 
 /// Keys one LIST request returns (S3 and GCS both page by 1000).
 const LIST_PAGE: usize = 1000;
@@ -253,7 +262,7 @@ impl StorageSource {
     }
 
     /// Lists a prefix's segments once and reads their footers (cached,
-    /// immutable), `FANOUT` at a time on a cold pass. A topic's count and size
+    /// immutable), [`FOOTER_FANOUT`] at a time on a cold pass. A topic's count and size
     /// are folded from this one listing, for every partition — and, in a topic
     /// listing, for every row under the same prefix.
     ///
@@ -276,7 +285,7 @@ impl StorageSource {
     async fn footers_of(&self, prefix: &str, seqs: &[u64]) -> Result<PrefixFooters, StorageError> {
         futures::stream::iter(seqs.iter().copied())
             .map(|seq| async move { Ok(self.segment_footer(prefix, seq).await?.map(|f| (seq, f))) })
-            .buffered(FANOUT)
+            .buffered(FOOTER_FANOUT)
             .try_collect::<Vec<_>>()
             .await
             .map(|footers| footers.into_iter().flatten().collect())
