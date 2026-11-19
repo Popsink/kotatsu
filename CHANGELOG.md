@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The first read of a large prefix no longer takes ~27 s**
+  (Popsink/data-plane#6096) — a cold prefix reads its segment footers 64 at a
+  time instead of 8. It is one bounded 64 KiB GET per segment and a busy
+  connector's prefix holds thousands, so the first `topic()` on the largest
+  tenant's biggest prefix waited out hundreds of round trips in a row.
+
 ## [0.15.0] - 2026-11-19
 
 Prefix listings on large connectors (Popsink/data-plane#6096). A topic read

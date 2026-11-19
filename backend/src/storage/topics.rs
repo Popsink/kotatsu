@@ -759,6 +759,10 @@ mod tests {
         /// Segment listings that start after a key (incremental refreshes,
         /// probes and parallel ranges), counted apart from `segment_lists`.
         offset_lists: std::sync::atomic::AtomicUsize,
+        /// Segment GETs in flight right now, and the most seen at once. Each
+        /// one is held for a millisecond, as a round trip would.
+        segment_gets: std::sync::atomic::AtomicUsize,
+        segment_gets_peak: std::sync::atomic::AtomicUsize,
     }
 
     const SLOW_LIST: std::time::Duration = std::time::Duration::from_millis(300);
@@ -794,6 +798,15 @@ mod tests {
             if location.as_ref().contains("/topic-metadata/") {
                 self.metadata_gets
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if location.as_ref().ends_with(".seg") {
+                use std::sync::atomic::Ordering::SeqCst;
+                let now = self.segment_gets.fetch_add(1, SeqCst) + 1;
+                self.segment_gets_peak.fetch_max(now, SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                let got = self.inner.get_opts(location, options).await;
+                self.segment_gets.fetch_sub(1, SeqCst);
+                return got;
             }
             self.inner.get_opts(location, options).await
         }
@@ -907,6 +920,8 @@ mod tests {
             metadata_gets: Default::default(),
             slow_lists: Default::default(),
             offset_lists: Default::default(),
+            segment_gets: Default::default(),
+            segment_gets_peak: Default::default(),
         });
         let src = StorageSource::with_store(store.clone(), "c");
         (store, src)
@@ -1131,6 +1146,47 @@ mod tests {
         }
         assert_eq!(messages, 3, "segment 1 dropped from the view");
         assert!(segment_lists(&store) >= 2, "listed in full again");
+    }
+
+    /// A cold prefix reads its footers many at a time, not [`FANOUT`] (8):
+    /// one GET per segment, and a busy prefix holds thousands.
+    #[tokio::test]
+    async fn a_cold_prefix_reads_its_footers_many_at_a_time() {
+        use object_store::{ObjectStore, PutPayload};
+        let (store, src) = counting_source();
+        let topic = "acme.prod.db2.a";
+        let pin = serde_json::json!({ "prefix": "acme.prod.db2" });
+        let meta = serde_json::json!({ "topic": { "num_partitions": 1 } });
+        for (path, body) in [
+            (src.keys().topic_routing(topic), pin),
+            (src.keys().topic_metadata(topic), meta),
+        ] {
+            store
+                .put(&path, PutPayload::from(serde_json::to_vec(&body).unwrap()))
+                .await
+                .unwrap();
+        }
+        let ten = [0u8; 10];
+        for seq in 0..200u64 {
+            let segment = super::super::segment::build_test_segment(
+                3,
+                1,
+                &[(topic, 0, seq as i64, 1, ten.as_slice(), 1, None)],
+            );
+            store
+                .put(
+                    &src.keys().segment("acme.prod.db2", seq),
+                    PutPayload::from(segment.to_vec()),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(src.topic_detail(topic).await.unwrap().messages, 200);
+        let peak = store
+            .segment_gets_peak
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert!(peak > FANOUT, "footer reads in flight at once: {peak}");
     }
 
     /// A prefix larger than one LIST page is listed in ranges side by side —
