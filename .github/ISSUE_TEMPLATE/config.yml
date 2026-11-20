@@ -1,0 +1,7 @@
+# Popsink team: tickets are tracked in Linear (team Dev) since 23/11/2026.
+# Everyone else: open an issue here as usual, it stays public.
+blank_issues_enabled: true
+contact_links:
+  - name: Popsink team? Open the ticket in Linear
+    url: https://linear.app/team/DEV/new
+    about: Internal tickets live in Linear, team Dev (synced with Popsink/data-plane). External users can ignore this and open an issue below.
