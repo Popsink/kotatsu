@@ -112,12 +112,21 @@ async fn source_status(State(state): State<AppState>) -> impl IntoResponse {
         return Json(json!({ "configured": false, "connected": false }));
     };
 
+    // The segment-footer cache's size and bound (DEV-664): the one cache whose
+    // size follows the bucket rather than the request, so the one worth
+    // watching. Kotatsu has no metrics endpoint; this is where it is read.
+    let footer_cache = source.footer_cache_stats();
     match source.check().await {
-        Ok(()) => Json(json!({ "configured": true, "connected": true })),
+        Ok(()) => Json(json!({
+            "configured": true,
+            "connected": true,
+            "footer_cache": footer_cache,
+        })),
         Err(err) => Json(json!({
             "configured": true,
             "connected": false,
             "error": err.to_string(),
+            "footer_cache": footer_cache,
         })),
     }
 }

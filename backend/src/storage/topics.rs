@@ -1253,7 +1253,7 @@ mod tests {
             .delete(&src.keys().segment("acme.prod.db2", 1))
             .await
             .unwrap();
-        src.segment_footers.lock().unwrap().clear();
+        src.segment_footers.clear();
 
         let detail = src.topic_detail(c).await.unwrap();
         assert_eq!(segment_lists(&store), 2, "relisted once");

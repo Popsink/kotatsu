@@ -172,10 +172,8 @@ impl StorageSource {
         let path = self.keys().segment(prefix, seq);
         let key = path.as_ref().to_string();
 
-        if let Ok(cache) = self.segment_footers.lock() {
-            if let Some(footer) = cache.get(&key) {
-                return Ok(Some(footer.clone()));
-            }
+        if let Some(footer) = self.segment_footers.get(&key) {
+            return Ok(Some(footer));
         }
 
         let tail = match self.get_suffix(&path, SEGMENT_FOOTER_OVER_READ).await? {
@@ -199,9 +197,7 @@ impl StorageSource {
         };
 
         let footer = Arc::new(footer);
-        if let Ok(mut cache) = self.segment_footers.lock() {
-            cache.insert(key, footer.clone());
-        }
+        self.segment_footers.insert(key, footer.clone());
         Ok(Some(footer))
     }
 
