@@ -144,6 +144,7 @@ Environment variables (backend):
 | `KOTATSU_BIND`       | `0.0.0.0:8080`   | HTTP bind address                           |
 | `KOTATSU_STATIC_DIR` | _(unset)_        | Dir of built frontend assets (prod only)    |
 | `KOTATSU_KORA_URL`   | _(unset)_        | Kora base URL; unset disables Avro decoding |
+| `KOTATSU_FOOTER_CACHE_MIB` | `64`     | Bound on the decoded segment-footer cache, in MiB (least recently used out). Size it to hold every large prefix being browsed: a prefix bigger than the cache reads cold on every request. Its size is reported under `footer_cache` in `/api/source/status`. |
 
 The S3 source is configured with `KOTATSU_S3_*` / `KOTATSU_CLUSTER` — see
 [Pointing at an S3 source](#pointing-at-an-s3-source).

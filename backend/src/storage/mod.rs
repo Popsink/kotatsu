@@ -7,17 +7,21 @@
 mod catalog;
 mod cluster;
 mod error;
+mod footer_cache;
 mod groups;
 mod keys;
 mod model;
 mod reader;
 mod routing;
+#[cfg(test)]
+mod scale_bench;
 mod segment;
 mod segview;
 mod topics;
 
 pub use cluster::ClusterSummary;
 pub use error::StorageError;
+pub use footer_cache::FooterCacheStats;
 pub use groups::{ConsumingGroup, GroupDetailView, GroupLag, GroupOffset, GroupSummary, LagMode};
 pub use keys::Keys;
 pub use model::{decode_batch, BatchHeader, DecodedRecord, OffsetSpec, RecordHeader, Watermark};
@@ -53,9 +57,9 @@ pub struct StorageSource {
     /// Segments are immutable and create-only, so a decoded footer never changes
     /// — no TTL. New/compacted segments are discovered by re-listing the prefix
     /// (see [`Self::segment_listings`]); this only spares re-reading a footer
-    /// already seen. Shared across
-    /// clones via the `Arc`.
-    segment_footers: Arc<Mutex<HashMap<String, Arc<segment::SegmentFooter>>>>,
+    /// already seen. Bounded in bytes, least recently used first out (DEV-664).
+    /// Shared across clones via the `Arc`.
+    segment_footers: Arc<footer_cache::FooterCache>,
     /// Cached topic catalog (name index + per-row summaries) for the list/search
     /// views, short-TTL and lazily warmed (#84). `None` until first filled.
     topic_catalog: Arc<Mutex<Option<catalog::Catalog<TopicSummary>>>>,
@@ -142,7 +146,7 @@ impl StorageSource {
             store,
             keys: Keys::new(&cfg.cluster),
             high_cache: Arc::new(Mutex::new(HashMap::new())),
-            segment_footers: Arc::new(Mutex::new(HashMap::new())),
+            segment_footers: Arc::new(footer_cache::FooterCache::from_env()),
             topic_catalog: Arc::new(Mutex::new(None)),
             group_catalog: Arc::new(Mutex::new(None)),
             topic_routes: Arc::new(Mutex::new(HashMap::new())),
@@ -152,6 +156,11 @@ impl StorageSource {
             listing_ttl: segview::LISTING_TTL,
             full_listing_interval: segview::FULL_LISTING_INTERVAL,
         })
+    }
+
+    /// The segment-footer cache's current size and bound (DEV-664).
+    pub fn footer_cache_stats(&self) -> FooterCacheStats {
+        self.segment_footers.stats()
     }
 
     pub fn keys(&self) -> &Keys {
@@ -165,7 +174,9 @@ impl StorageSource {
             store,
             keys: Keys::new(cluster),
             high_cache: Arc::new(Mutex::new(HashMap::new())),
-            segment_footers: Arc::new(Mutex::new(HashMap::new())),
+            segment_footers: Arc::new(footer_cache::FooterCache::new(
+                footer_cache::DEFAULT_CAPACITY_BYTES,
+            )),
             topic_catalog: Arc::new(Mutex::new(None)),
             group_catalog: Arc::new(Mutex::new(None)),
             topic_routes: Arc::new(Mutex::new(HashMap::new())),
@@ -175,6 +186,13 @@ impl StorageSource {
             listing_ttl: segview::LISTING_TTL,
             full_listing_interval: segview::FULL_LISTING_INTERVAL,
         }
+    }
+
+    /// Overrides the footer cache's bound, in bytes.
+    #[cfg(test)]
+    pub(crate) fn with_footer_cache_bytes(mut self, bytes: usize) -> Self {
+        self.segment_footers = Arc::new(footer_cache::FooterCache::new(bytes));
+        self
     }
 
     /// Overrides the prefix-listing TTL; zero lists on every read, as before

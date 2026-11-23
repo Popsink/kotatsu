@@ -39,6 +39,9 @@ regex = "1"
 # Sub-stream identity in segment footers (v4, #118) and the routing pin that
 # carries it. Wire form is the raw 16 bytes, never the hyphenated string.
 uuid = { version = "1", features = ["serde"] }
+# The segment-footer cache's eviction order (DEV-664): footers are immutable,
+# so the cache only needs a bound, never a TTL.
+lru = "0.19"
 
 # Used only by the #[ignore]-gated integration tests under tests/.
 [dev-dependencies]
